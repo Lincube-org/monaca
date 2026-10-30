@@ -524,12 +524,11 @@ impl Store {
         account_id: AccountId,
     ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        let result = sqlx::query(
-            "DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'totp'",
-        )
-        .bind(account_id.uuid())
-        .execute(&pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'totp'")
+                .bind(account_id.uuid())
+                .execute(&pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 

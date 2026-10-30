@@ -309,10 +309,7 @@ impl AppState {
     }
 
     /// Count a rejected TOTP code, returning the running total.
-    pub async fn record_mfa_failure(
-        &self,
-        id: &str,
-    ) -> Result<u32, monaca_oidc::InteractionError> {
+    pub async fn record_mfa_failure(&self, id: &str) -> Result<u32, monaca_oidc::InteractionError> {
         let now = self.now();
         let mut map = self.interactions.lock().await;
         let stored = map

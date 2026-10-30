@@ -933,15 +933,19 @@ pub async fn mfa_verify(
         ));
     }
 
-    let Some(sealed) = state.store.totp_secret(&tenant, account.account_id()).await? else {
+    let Some(sealed) = state
+        .store
+        .totp_secret(&tenant, account.account_id())
+        .await?
+    else {
         return Err(ApiError::problem(
             kinds::INVALID_VERIFICATION_CODE,
             "the code is incorrect or expired",
         ));
     };
     let dek = state.tenant_dek(&tenant)?;
-    let secret = open(&dek, &sealed)
-        .map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
+    let secret =
+        open(&dek, &sealed).map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
 
     if !verify_totp(&secret, &body.code, state.now()) {
         let attempts = state

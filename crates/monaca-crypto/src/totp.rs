@@ -115,13 +115,14 @@ mod tests {
     #[test]
     fn a_code_is_accepted_for_one_step_either_way() {
         let secret = generate_secret();
-        let moment = at(59);
+        // Step 3 of the epoch: both neighbours are positive, so the ±1 window is unambiguous.
+        let moment = at(3 * PERIOD_SECS);
         let current = code_at(&secret, moment);
         assert!(verify(&secret, &current, moment));
-        assert!(verify(&secret, &current, at(59 + PERIOD_SECS)));
-        assert!(verify(&secret, &current, at(59 - PERIOD_SECS)));
-        assert!(!verify(&secret, &current, at(59 + 2 * PERIOD_SECS)));
-        assert!(!verify(&secret, &current, at(59 - 2 * PERIOD_SECS)));
+        assert!(verify(&secret, &current, at(4 * PERIOD_SECS)));
+        assert!(verify(&secret, &current, at(2 * PERIOD_SECS)));
+        assert!(!verify(&secret, &current, at(5 * PERIOD_SECS)));
+        assert!(!verify(&secret, &current, at(PERIOD_SECS)));
     }
 
     #[test]
@@ -157,7 +158,9 @@ mod tests {
         assert_eq!(encoded.len(), 32);
         assert!(!encoded.contains('='));
         assert_eq!(
-            BASE32_NOPAD.decode(encoded.as_bytes()).expect("valid base32"),
+            BASE32_NOPAD
+                .decode(encoded.as_bytes())
+                .expect("valid base32"),
             secret
         );
     }
