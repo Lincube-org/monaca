@@ -24,6 +24,8 @@ pub struct StoredInteraction {
     pub consumed: bool,
     /// The account that signed in, when the flow is waiting for consent.
     pub signed_in_account: Option<Uuid>,
+    /// The SSO session the sign-in established, carried into the authorization code.
+    pub session_id: Option<Uuid>,
 }
 
 /// Everything a handler needs.
@@ -146,6 +148,7 @@ impl AppState {
                 interaction,
                 consumed: false,
                 signed_in_account: None,
+                session_id: None,
             },
         );
     }
@@ -155,6 +158,14 @@ impl AppState {
         &self,
         id: &str,
     ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
+        Ok(self.peek_interaction_state(id).await?.0)
+    }
+
+    /// Read an interaction and whether sign-in already happened (for the consent-only page).
+    pub async fn peek_interaction_state(
+        &self,
+        id: &str,
+    ) -> Result<(InteractionRequest, Option<Uuid>), monaca_oidc::InteractionError> {
         let now = self.now();
         let map = self.interactions.lock().await;
         let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
@@ -164,7 +175,7 @@ impl AppState {
         if stored.consumed {
             return Err(monaca_oidc::InteractionError::Consumed);
         }
-        Ok(stored.interaction.clone())
+        Ok((stored.interaction.clone(), stored.signed_in_account))
     }
 
     /// Mark an interaction consumed, returning it. A second call is `Consumed`.
@@ -192,6 +203,7 @@ impl AppState {
         &self,
         id: &str,
         account: Uuid,
+        session_id: Uuid,
     ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
         let now = self.now();
         let mut map = self.interactions.lock().await;
@@ -205,14 +217,16 @@ impl AppState {
             return Err(monaca_oidc::InteractionError::Consumed);
         }
         stored.signed_in_account = Some(account);
+        stored.session_id = Some(session_id);
         Ok(stored.interaction.clone())
     }
 
-    /// Redeem an interaction that has signed in, returning the account awaiting consent.
+    /// Redeem an interaction that has signed in, returning the account awaiting consent and the
+    /// session it authenticated.
     pub async fn take_signed_in_interaction(
         &self,
         id: &str,
-    ) -> Result<(InteractionRequest, Uuid), monaca_oidc::InteractionError> {
+    ) -> Result<(InteractionRequest, Uuid, Option<Uuid>), monaca_oidc::InteractionError> {
         let now = self.now();
         let mut map = self.interactions.lock().await;
         let stored = map
@@ -228,7 +242,7 @@ impl AppState {
             .signed_in_account
             .ok_or(monaca_oidc::InteractionError::NotSignedIn)?;
         stored.consumed = true;
-        Ok((stored.interaction.clone(), account))
+        Ok((stored.interaction.clone(), account, stored.session_id))
     }
 
     /// Append an audit event to an org chain in its own transaction.

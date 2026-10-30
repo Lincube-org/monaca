@@ -56,6 +56,11 @@ impl DiscoveryDocument {
         format!("{}/oauth2/par", self.issuer)
     }
 
+    /// The RP-initiated logout endpoint (OpenID Connect RP-Initiated Logout 1.0 §2).
+    pub fn end_session_endpoint(&self) -> String {
+        format!("{}/oauth2/end-session", self.issuer)
+    }
+
     /// Render the document.
     pub fn to_json(&self) -> Value {
         let auth_methods = json!([
@@ -72,6 +77,9 @@ impl DiscoveryDocument {
             "introspection_endpoint": self.introspection_endpoint(),
             "revocation_endpoint": self.revocation_endpoint(),
             "pushed_authorization_request_endpoint": self.pushed_authorization_request_endpoint(),
+            "end_session_endpoint": self.end_session_endpoint(),
+            "frontchannel_logout_supported": true,
+            "frontchannel_logout_session_supported": true,
             "jwks_uri": self.jwks_uri(),
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
@@ -132,6 +140,11 @@ mod tests {
             value["pushed_authorization_request_endpoint"],
             "http://localhost:8080/t/demo/oauth2/par"
         );
+        assert_eq!(
+            value["end_session_endpoint"],
+            "http://localhost:8080/t/demo/oauth2/end-session"
+        );
+        assert_eq!(value["frontchannel_logout_supported"], json!(true));
         assert_eq!(value["dpop_signing_alg_values_supported"], json!(["ES256"]));
         assert_eq!(
             value["prompt_values_supported"],

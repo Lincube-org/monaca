@@ -13,8 +13,10 @@ use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::hash_password;
 use monaca_oidc::{is_absolute_http_url, valid_scope};
-use monaca_store::{AccountRow, AgentKeyRow, AgentRow, GrantRow, TenantRow};
-use monaca_types::{AccountId, AgentId, AgentKeyId, EventId, GrantId, TenantId, TypedId};
+use monaca_store::{AccountRow, AgentKeyRow, AgentRow, GrantRow, SessionRow, TenantRow};
+use monaca_types::{
+    AccountId, AgentId, AgentKeyId, EventId, GrantId, SessionId, TenantId, TypedId,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -292,6 +294,107 @@ pub async fn get_account(
         .await?
         .ok_or_else(|| ApiError::not_found("account"))?;
     Ok(Json(account_json(&account)))
+}
+
+/// `GET /v1/accounts/{id}/sessions`.
+pub async fn list_account_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
+
+    let sessions = state.store.list_sessions(&tenant, account_id).await?;
+    let items: Vec<Value> = sessions.iter().map(session_json).collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `DELETE /v1/accounts/{id}/sessions/{session}`.
+pub async fn revoke_account_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, session)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    let session_id = SessionId::parse(&session)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a session id"))?;
+
+    // A session may only be revoked through the account it belongs to.
+    let owned = state
+        .store
+        .session_by_id(&tenant, session_id.uuid())
+        .await?
+        .filter(|row| row.account_id == account_id.uuid())
+        .ok_or_else(|| ApiError::not_found("session"))?;
+    if !state.store.revoke_session(&tenant, owned.id).await? {
+        return Err(ApiError::not_found("session"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "session.revoked".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Session,
+            id: Some(session_id.to_typed_string()),
+        },
+        decision: AuditDecision::Deny,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "account_id": account_id.to_typed_string() }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append session.revoked audit event");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/accounts/{id}/sessions` — revoke every live session of the account.
+pub async fn revoke_account_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
+
+    let revoked = state.store.revoke_account_sessions(&tenant, account_id).await?;
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "session.revoked_all".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Deny,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "revoked": revoked }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append session.revoked_all audit event");
+    }
+    Ok(Json(json!({ "revoked": revoked })))
+}
+
+fn parse_account(raw: &str) -> Result<AccountId, ApiError> {
+    AccountId::parse(raw)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))
 }
 
 /// `POST /v1/orgs/{org}/members`.
@@ -826,6 +929,20 @@ fn account_json(account: &AccountRow) -> Value {
         "display_name": account.display_name,
         "state": account.state,
         "created_at": ts(account.created_at),
+    })
+}
+
+fn session_json(session: &SessionRow) -> Value {
+    json!({
+        "id": session.session_id().to_typed_string(),
+        "account_id": AccountId::from_uuid(session.account_id).to_typed_string(),
+        "client_id": session
+            .client_id
+            .map(|id| monaca_types::ClientId::from_uuid(id).to_typed_string()),
+        "issued_at": ts(session.issued_at),
+        "expires_at": ts(session.expires_at),
+        "last_seen_at": ts(session.last_seen_at),
+        "user_agent": session.user_agent,
     })
 }
 

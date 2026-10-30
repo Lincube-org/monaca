@@ -82,6 +82,10 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
         .route("/t/{tenant}/oauth2/revoke", post(crate::oauth::revoke))
         .route("/t/{tenant}/oauth2/par", post(crate::oauth::par))
         .route(
+            "/t/{tenant}/oauth2/end-session",
+            get(crate::protocol::end_session).post(crate::protocol::end_session_post),
+        )
+        .route(
             "/t/{tenant}/interaction/{iid}",
             get(crate::protocol::interaction_details),
         )
@@ -104,6 +108,15 @@ pub fn management_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/accounts", post(crate::management::create_account))
         .route("/v1/accounts/{id}", get(crate::management::get_account))
+        .route(
+            "/v1/accounts/{id}/sessions",
+            get(crate::management::list_account_sessions)
+                .delete(crate::management::revoke_account_sessions),
+        )
+        .route(
+            "/v1/accounts/{id}/sessions/{session}",
+            delete(crate::management::revoke_account_session),
+        )
         .route(
             "/v1/orgs/{org}/members",
             get(crate::management::list_members).post(crate::management::add_member),

@@ -48,7 +48,10 @@ pub struct Interaction {
 
 impl Interaction {
     /// The JSON the auth-ui reads — §6.1's `GET /interaction/{iid}` body.
-    pub fn to_public_json(&self) -> Value {
+    ///
+    /// `signed_in` is true when an existing session already authenticated this flow, so the page
+    /// shows the consent step directly instead of asking for a password again.
+    pub fn to_public_json(&self, signed_in: bool) -> Value {
         json!({
             "interaction_id": self.interaction_id.to_string(),
             "tenant": self.tenant,
@@ -56,6 +59,7 @@ impl Interaction {
             "scopes": self.scopes,
             "organization": self.organization,
             "consent_required": self.consent_required,
+            "signed_in": signed_in,
             "expires_at": self.expires_at,
         })
     }
@@ -131,13 +135,19 @@ mod tests {
 
     #[test]
     fn the_public_shape_matches_the_contract() {
-        let value = interaction().to_public_json();
+        let value = interaction().to_public_json(false);
         assert_eq!(value["tenant"], "demo");
         assert_eq!(value["client"]["client_id"], "monaca-console");
         assert_eq!(value["client"]["name"], "Monaca Console");
         assert_eq!(value["scopes"], json!(["openid"]));
         assert_eq!(value["organization"], "acme");
         assert_eq!(value["consent_required"], json!(false));
+        assert_eq!(value["signed_in"], json!(false));
+        assert_eq!(
+            interaction().to_public_json(true)["signed_in"],
+            json!(true),
+            "an SSO-reused flow skips the password form"
+        );
         // Never expose the challenge, the state or the nonce to the page.
         assert!(value.get("code_challenge").is_none());
         assert!(value.get("state").is_none());

@@ -35,6 +35,8 @@ pub struct AuthorizeParams {
     pub organization: Option<String>,
     /// `none` | `login` | `consent`, space-delimited.
     pub prompt: Option<String>,
+    /// OpenID Connect Core §3.1.2.1: the maximum age of the authentication, in seconds.
+    pub max_age: Option<String>,
     /// RFC 9126: a pushed request to redeem instead of the inline parameters.
     pub request_uri: Option<String>,
     /// RFC 9449 §10: the JWK thumbprint the authorization code is bound to.
@@ -62,6 +64,8 @@ pub struct AuthorizeRequest {
     pub organization: Option<String>,
     /// Validated prompt values.
     pub prompt: Vec<String>,
+    /// The maximum acceptable age of the authentication, in seconds.
+    pub max_age: Option<i64>,
     /// RFC 9449 §10 key binding.
     pub dpop_jkt: Option<String>,
 }
@@ -158,6 +162,7 @@ impl AuthorizeParams {
         }
 
         let prompt = parse_prompt(self.prompt.as_deref())?;
+        let max_age = parse_max_age(self.max_age.as_deref())?;
         let dpop_jkt = parse_dpop_jkt(self.dpop_jkt.as_deref())?;
 
         Ok(AuthorizeRequest {
@@ -170,6 +175,7 @@ impl AuthorizeParams {
             resource: self.resource.clone().filter(|value| !value.is_empty()),
             organization: self.organization.clone().filter(|value| !value.is_empty()),
             prompt,
+            max_age,
             dpop_jkt,
         })
     }
@@ -195,6 +201,22 @@ fn parse_prompt(raw: Option<&str>) -> Result<Vec<String>, AuthorizeError> {
         ));
     }
     Ok(prompt)
+}
+
+/// Validate `max_age` — OpenID Connect Core §3.1.2.1: a non-negative integer number of seconds.
+fn parse_max_age(raw: Option<&str>) -> Result<Option<i64>, AuthorizeError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let seconds: i64 = value.parse().map_err(|_| {
+        AuthorizeError::InvalidRequest("max_age must be an integer number of seconds".into())
+    })?;
+    if seconds < 0 {
+        return Err(AuthorizeError::InvalidRequest(
+            "max_age must not be negative".into(),
+        ));
+    }
+    Ok(Some(seconds))
 }
 
 /// Validate an RFC 9449 §10 `dpop_jkt`: base64url(SHA-256(JWK)), 43 characters.
@@ -252,6 +274,7 @@ mod tests {
             resource: Some("http://localhost:8080/v1".into()),
             organization: Some("acme".into()),
             prompt: None,
+            max_age: None,
             request_uri: None,
             dpop_jkt: None,
         }
@@ -341,6 +364,29 @@ mod tests {
         let mut params = valid();
         params.prompt = Some("consent".into());
         assert!(params.validate().expect("valid").requires_consent(false));
+    }
+
+    #[test]
+    fn max_age_is_a_non_negative_integer() {
+        let mut params = valid();
+        params.max_age = Some("600".into());
+        assert_eq!(params.validate().expect("valid").max_age, Some(600));
+
+        let mut params = valid();
+        params.max_age = Some("0".into());
+        assert_eq!(params.validate().expect("valid").max_age, Some(0));
+
+        let mut params = valid();
+        params.max_age = Some("-1".into());
+        assert!(params.validate().is_err());
+
+        let mut params = valid();
+        params.max_age = Some("soon".into());
+        assert!(params.validate().is_err());
+
+        let mut params = valid();
+        params.max_age = Some("".into());
+        assert_eq!(params.validate().expect("valid").max_age, None);
     }
 
     #[test]

@@ -49,6 +49,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "protocol completeness: PAR, DPoP, refresh families, token revocation (M1)",
         include_str!("../migrations/tenant_2.sql"),
     ),
+    (
+        3,
+        "sessions and RP-initiated logout (M1)",
+        include_str!("../migrations/tenant_3.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

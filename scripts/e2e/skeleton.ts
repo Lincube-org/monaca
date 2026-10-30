@@ -75,6 +75,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "GET /v1/orgs/acme/audit?grant_id=grt_… shows account → grant → agent → token(jti) → tool; " +
       "GET /v1/orgs/acme/audit/verify → {\"valid\":true}",
   },
+  {
+    step: "7",
+    title: "session & logout",
+    assertion:
+      "sign-in sets the monaca_session cookie; a silent prompt=none authorize reuses it; " +
+      "GET/DELETE /v1/accounts/{id}/sessions manage it; " +
+      "GET /t/demo/oauth2/end-session echoes state, clears the cookie and a later silent authorize is login_required",
+  },
 ];
 
 interface StepResult {
@@ -670,6 +678,197 @@ async function browserFlow(base: string, consoleSecret: string): Promise<StepRes
   };
 }
 
+/**
+ * Sessions and logout — the SSO cookie, the management session API and RP-initiated logout.
+ *
+ * Three independent browsers are simulated, because each check needs a live session: one is
+ * revoked by the admin API, one is ended through `end-session`, and one is removed in bulk.
+ */
+async function sessionFlow(base: string, consoleSecret: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const authorizeUrl = async (tag: string, prompt?: string): Promise<{ url: string; verifier: string; state: string }> => {
+    const verifier = `s-${tag}-${runId}-${"y".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const state = `st-${tag}-${runId}`;
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+      ...(prompt === undefined ? {} : { prompt }),
+    })}`;
+    return { url, verifier, state };
+  };
+
+  /** One interactive sign-in: authorize → interaction → sign-in, returning the cookie and code. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ cookie?: string; sessionId?: string; code?: string; idToken?: string; sub?: string } | undefined> => {
+    const { url, verifier } = await authorizeUrl(tag);
+    const authorize = await call(url, { redirect: "manual" });
+    const interaction = new URL(authorize.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (authorize.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${authorize.status} ${text(authorize.body)}`;
+      return undefined;
+    }
+
+    const response = await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: BOOTSTRAP_ADMIN.email, password: BOOTSTRAP_ADMIN.password }),
+    });
+    const redirectTo = (response.body as { redirect_to?: string })?.redirect_to;
+    if (response.status !== 200 || redirectTo === undefined) {
+      detail = `sign-in(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+
+    // `fetch` never applies a cookie jar here, so the `Set-Cookie` is parsed by hand.
+    const setCookie = response.headers.get("set-cookie") ?? "";
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(setCookie)?.[1];
+    checks.push([`sign-in(${tag}) set the session cookie`, cookie !== undefined]);
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const exchanged = await tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+    const idToken = (exchanged.body as { id_token?: unknown })?.id_token as string | undefined;
+    const sub = jwtClaims(idToken)?.sub as string | undefined;
+    checks.push([`code(${tag}) exchanged`, exchanged.status === 200 && sub !== undefined]);
+    return { cookie, sessionId: cookie, code, idToken, sub };
+  };
+
+  /** `prompt=none` with the cookie; returns the code when the SSO session was accepted. */
+  const silent = async (cookie: string | undefined): Promise<{ status: number; error: string | null; code: string | null }> => {
+    const { url } = await authorizeUrl("silent", "none");
+    const response = await call(url, {
+      redirect: "manual",
+      headers: cookie === undefined ? {} : { cookie: `monaca_session=${cookie}` },
+    });
+    const params = new URL(response.headers.get("location") ?? "", base).searchParams;
+    return { status: response.status, error: params.get("error"), code: params.get("code") };
+  };
+
+  const sessionsUrl = (accountId: string): string => `${base}/v1/accounts/${encodeURIComponent(accountId)}/sessions`;
+  const listSessions = async (
+    accountId: string,
+  ): Promise<{ items: { id: string; uuid: string }[]; status: number }> => {
+    const response = await call(sessionsUrl(accountId), { headers: { authorization: `Bearer ${adminToken}` } });
+    const items = ((response.body as { items?: { id?: string }[] })?.items ?? []).map((item) => {
+      const id = item.id ?? "";
+      return { id, uuid: typeIdUuid(id) };
+    });
+    return { items, status: response.status };
+  };
+
+  try {
+    // --- session A: the cookie and silent reuse ------------------------------------------------
+    const first = await signIn("a");
+    if (first === undefined || first.cookie === undefined || first.sub === undefined) {
+      return { step: "7", title: "session & logout", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const listed = await listSessions(first.sub);
+    const listedSession = listed.items.find((item) => item.uuid === first.cookie);
+    checks.push(["GET sessions lists the cookie's session", listed.status === 200 && listedSession !== undefined]);
+
+    const reused = await silent(first.cookie);
+    checks.push(["prompt=none reuses the session", reused.status === 302 && reused.code !== null]);
+
+    // --- admin revoke of one session ------------------------------------------------------------
+    const revoked = await call(`${sessionsUrl(first.sub)}/${encodeURIComponent(listedSession?.id ?? "")}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    checks.push(["DELETE sessions/{sid} → 204", revoked.status === 204]);
+    const afterRevoke = await listSessions(first.sub);
+    checks.push(["the revoked session is gone", afterRevoke.status === 200 && !afterRevoke.items.some((item) => item.uuid === first.cookie)]);
+    const stale = await silent(first.cookie);
+    checks.push(["a revoked session cannot sign in silently", stale.status === 302 && stale.error === "login_required"]);
+
+    // --- session B: RP-initiated logout --------------------------------------------------------
+    const second = await signIn("b");
+    if (second === undefined || second.cookie === undefined || second.idToken === undefined) {
+      return { step: "7", title: "session & logout", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const logoutState = `logout-${runId}`;
+    const endSession = await call(
+      `${base}/t/${TENANT}/oauth2/end-session?${new URLSearchParams({
+        id_token_hint: second.idToken,
+        post_logout_redirect_uri: redirectUri,
+        state: logoutState,
+      })}`,
+      { redirect: "manual", headers: { cookie: `monaca_session=${second.cookie}` } },
+    );
+    const endLocation = new URL(endSession.headers.get("location") ?? "", base);
+    checks.push(["end-session → 302 to the registered target", endSession.status === 302 && endLocation.origin === new URL(redirectUri).origin]);
+    checks.push(["end-session echoes state", endLocation.searchParams.get("state") === logoutState]);
+    checks.push(["end-session clears the cookie", (endSession.headers.get("set-cookie") ?? "").includes("monaca_session=;")]);
+    const afterLogout = await silent(second.cookie);
+    checks.push(["end-session ended the SSO session", afterLogout.status === 302 && afterLogout.error === "login_required"]);
+
+    // --- session C: revoke every session of an account ----------------------------------------
+    const third = await signIn("c");
+    if (third === undefined || third.cookie === undefined || third.sub === undefined) {
+      return { step: "7", title: "session & logout", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const all = await call(sessionsUrl(third.sub), {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    const replayed = await listSessions(third.sub);
+    checks.push([
+      "DELETE sessions revokes every live session",
+      all.status === 200 && ((all.body as { revoked?: number })?.revoked ?? 0) >= 1,
+    ]);
+    checks.push(["no session is left after revoke-all", replayed.status === 200 && replayed.items.length === 0]);
+    const bulkStale = await silent(third.cookie);
+    checks.push(["revoke-all ends silent authentication", bulkStale.status === 302 && bulkStale.error === "login_required"]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "7",
+    title: "session & logout",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: cookie → silent reuse → admin revoke → end-session → revoke-all`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * The UUID inside a `<prefix>_<suffix>` typed id, so a `ses_…` returned by the API can be compared
+ * with the raw UUID the cookie carries. The suffix is 130 bits of Crockford base32 (§5.2).
+ */
+function typeIdUuid(id: string): string {
+  const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+  const suffix = id.slice(id.indexOf("_") + 1);
+  let value = 0n;
+  for (const symbol of suffix) {
+    value = (value << 5n) | BigInt(alphabet.indexOf(symbol));
+  }
+  const hex = (value & ((1n << 128n) - 1n)).toString(16).padStart(32, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -833,6 +1032,7 @@ async function main(): Promise<number> {
 
   push(await auditChain(base, adminToken, walk));
   push(await browserFlow(base, parsed.consoleSecret));
+  push(await sessionFlow(base, parsed.consoleSecret, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

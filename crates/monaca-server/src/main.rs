@@ -17,6 +17,7 @@ mod oauth;
 mod openapi;
 mod protocol;
 mod routes;
+mod session;
 mod state;
 
 #[cfg(test)]

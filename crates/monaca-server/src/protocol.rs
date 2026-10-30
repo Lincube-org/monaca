@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Form, Json};
 use monaca_agent::{Permission, attenuate};
@@ -13,7 +13,7 @@ use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
     Interaction, TokenErrorCode, TokenForm, TokenRequest, at_hash, scope_subset, verify_pkce_s256,
 };
-use monaca_store::{AccountRow, TenantRow};
+use monaca_store::{AccountRow, OrgRow, TenantRow};
 use monaca_types::{AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -22,6 +22,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::error::{ApiError, kinds};
+use crate::session;
 use crate::state::AppState;
 
 /// `GET /t/{tenant}/.well-known/openid-configuration` and the RFC 8414 form.
@@ -58,6 +59,7 @@ pub async fn authorize(
     State(state): State<Arc<AppState>>,
     Path(tenant_slug): Path<String>,
     Query(mut params): Query<AuthorizeParams>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let tenant = state.tenant(&tenant_slug).await?;
 
@@ -136,15 +138,6 @@ pub async fn authorize(
         ));
     }
 
-    // monaca has no cross-application session yet, so `prompt=none` can never be satisfied.
-    if request.is_silent() {
-        return Ok(redirect_error(
-            &request.redirect_uri,
-            "login_required",
-            &request.state,
-        ));
-    }
-
     let org_slug = request
         .organization
         .clone()
@@ -160,7 +153,111 @@ pub async fn authorize(
         }
     };
 
-    let interaction = Interaction {
+    // The SSO cookie is the cross-application login state: a valid session means this authorize
+    // request needs no interaction at all. `prompt=login` and `max_age` are the two ways a client
+    // asks for a fresh authentication anyway (OpenID Connect Core §3.1.2.1).
+    let now = state.now();
+    let session = match session::session_id(&headers) {
+        Some(id) => state.store.session_by_id(&tenant, id).await?,
+        None => None,
+    };
+    let session = session
+        .filter(|row| row.is_active(now))
+        .filter(|row| !request.prompt.iter().any(|value| value == "login"))
+        .filter(|row| match request.max_age {
+            Some(max_age) => now - row.issued_at <= Duration::seconds(max_age),
+            None => true,
+        });
+
+    if let Some(session) = session {
+        // A disabled account must not keep riding an old session.
+        if let Some(account) = state
+            .store
+            .account_by_id(&tenant, AccountId::from_uuid(session.account_id))
+            .await?
+            .filter(|account| account.state == "active")
+        {
+            if request.requires_consent(client.is_third_party) {
+                // `prompt=none` may not open a page; with a session but no recorded consent the
+                // only compliant answer is the `consent_required` error (OIDC Core §3.1.2.6).
+                if request.is_silent() {
+                    return Ok(redirect_error(
+                        &request.redirect_uri,
+                        "consent_required",
+                        &request.state,
+                    ));
+                }
+                // Consent still has to be shown, but not the password form: record the session as
+                // this interaction's authentication, and let the page render its consent step.
+                let interaction = build_interaction(
+                    &state,
+                    &tenant,
+                    &client,
+                    &request,
+                    &org,
+                    true,
+                );
+                state.mark_interaction_signed_in(
+                    &interaction.interaction_id.to_string(),
+                    account.id,
+                    session.id,
+                )
+                .await
+                .map_err(ApiError::Interaction)?;
+                return Ok(found(&sign_in_location(&state, &tenant, &interaction)));
+            }
+
+            let code = issue_code(
+                &state,
+                &tenant,
+                client.id,
+                account.id,
+                org.id,
+                &request.redirect_uri,
+                &request.scopes,
+                &request.code_challenge,
+                request.nonce.as_deref(),
+                request.resource.as_deref(),
+                Some(session.id),
+                request.dpop_jkt.as_deref(),
+                session.issued_at,
+                client.client_id.as_str(),
+                true,
+            )
+            .await?;
+            state.store.touch_session(&tenant, session.id, now).await?;
+            return Ok(found(&append_query(
+                &request.redirect_uri,
+                &[("code", code.as_str()), ("state", request.state.as_str())],
+            )));
+        }
+    }
+
+    // `prompt=none` without a usable session cannot be satisfied.
+    if request.is_silent() {
+        return Ok(redirect_error(
+            &request.redirect_uri,
+            "login_required",
+            &request.state,
+        ));
+    }
+
+    let interaction = build_interaction(&state, &tenant, &client, &request, &org, false);
+    let location = sign_in_location(&state, &tenant, &interaction);
+    state.put_interaction(interaction).await;
+    Ok(found(&location))
+}
+
+/// Capture the authorize request as an interaction the auth-ui can resolve.
+fn build_interaction(
+    state: &AppState,
+    tenant: &TenantRow,
+    client: &monaca_store::ClientRow,
+    request: &monaca_oidc::AuthorizeRequest,
+    org: &OrgRow,
+    consent_required: bool,
+) -> Interaction {
+    Interaction {
         interaction_id: InteractionId::new(),
         tenant: tenant.slug.clone(),
         client_row_id: client.id,
@@ -174,18 +271,19 @@ pub async fn authorize(
         resource: request.resource.clone(),
         state: request.state.clone(),
         dpop_jkt: request.dpop_jkt.clone(),
-        consent_required: request.requires_consent(client.is_third_party),
+        consent_required,
         expires_at: state.now() + Duration::seconds(state.config.interaction_ttl.as_secs() as i64),
-    };
+    }
+}
 
-    let location = format!(
+/// Where the auth-ui sign-in page lives for this interaction.
+fn sign_in_location(state: &AppState, tenant: &TenantRow, interaction: &Interaction) -> String {
+    format!(
         "{}/sign-in?tenant={}&interaction={}",
         state.config.auth_ui_url.trim_end_matches('/'),
         tenant.slug,
         interaction.interaction_id
-    );
-    state.put_interaction(interaction).await;
-    Ok(found(&location))
+    )
 }
 
 /// `GET /t/{tenant}/interaction/{iid}`.
@@ -193,11 +291,11 @@ pub async fn interaction_details(
     State(state): State<Arc<AppState>>,
     Path((_tenant, iid)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let interaction = state
-        .peek_interaction(&iid)
+    let (interaction, signed_in) = state
+        .peek_interaction_state(&iid)
         .await
         .map_err(ApiError::Interaction)?;
-    Ok(Json(interaction.to_public_json()))
+    Ok(Json(interaction.to_public_json(signed_in.is_some())))
 }
 
 /// The sign-in body.
@@ -213,6 +311,7 @@ pub struct SignInBody {
 pub async fn sign_in(
     State(state): State<Arc<AppState>>,
     Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(body): Json<SignInBody>,
 ) -> Result<Response, ApiError> {
     let interaction = state
@@ -270,15 +369,20 @@ pub async fn sign_in(
         ));
     }
 
+    // Establish (or reuse) the cross-application session before the code is minted, so the browser
+    // leaves sign-in with the SSO cookie and the next application skips the password page.
+    let session_id = establish_session(&state, &tenant, &headers, &account, interaction.client_row_id).await?;
+
     // A third-party client (or `prompt=consent`) pauses here: the page must ask the user to
     // approve the scopes before a code is minted. Sign-in is recorded but not consumed, so the
     // consent step can redeem it.
     if interaction.consent_required {
         state
-            .mark_interaction_signed_in(&iid, account.id)
+            .mark_interaction_signed_in(&iid, account.id, session_id)
             .await
             .map_err(ApiError::Interaction)?;
-        return Ok(Json(json!({ "consent_required": true })).into_response());
+        let response = Json(json!({ "consent_required": true })).into_response();
+        return Ok(with_session_cookie(response, session_id, &state));
     }
 
     // Consume only after authentication succeeds, so a typo does not burn the interaction.
@@ -287,7 +391,55 @@ pub async fn sign_in(
         .await
         .map_err(ApiError::Interaction)?;
 
-    approve_interaction(state, tenant, interaction, account).await
+    let response = approve_interaction(state.clone(), tenant, interaction, account, Some(session_id)).await?;
+    Ok(with_session_cookie(response, session_id, &state))
+}
+
+/// Reuse a valid cookie session for the same account, or insert a fresh one.
+async fn establish_session(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    headers: &HeaderMap,
+    account: &AccountRow,
+    client_row_id: Uuid,
+) -> Result<Uuid, ApiError> {
+    let now = state.now();
+    if let Some(id) = session::session_id(headers)
+        && let Some(row) = state.store.session_by_id(tenant, id).await?
+        && row.account_id == account.id
+        && row.is_active(now)
+    {
+        state.store.touch_session(tenant, id, now).await?;
+        return Ok(id);
+    }
+
+    // A v7 uuid, like every other row id, so the session is addressable as a `ses_…` typed id.
+    let id = Uuid::now_v7();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    state
+        .store
+        .insert_session(
+            tenant,
+            id,
+            account.id,
+            Some(client_row_id),
+            now + Duration::seconds(state.config.session_ttl.as_secs() as i64),
+            user_agent,
+        )
+        .await?;
+    Ok(id)
+}
+
+/// Attach the SSO cookie to a sign-in response.
+fn with_session_cookie(mut response: Response, session_id: Uuid, state: &AppState) -> Response {
+    let secure = session::secure_origin(&state.config);
+    let value = session::set_cookie(session_id, state.config.session_ttl.as_secs(), secure);
+    if let Ok(value) = HeaderValue::from_str(&value) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
 }
 
 /// The consent body.
@@ -323,7 +475,7 @@ pub async fn consent(
         .into_response());
     }
 
-    let (interaction, account_id) = state
+    let (interaction, account_id, session_id) = state
         .take_signed_in_interaction(&iid)
         .await
         .map_err(ApiError::Interaction)?;
@@ -334,7 +486,7 @@ pub async fn consent(
         .await?
         .ok_or_else(|| ApiError::problem(kinds::INVALID_REQUEST, "account is gone"))?;
 
-    approve_interaction(state, tenant, interaction, account).await
+    approve_interaction(state, tenant, interaction, account, session_id).await
 }
 
 /// Mint the authorization code for an approved interaction and return the client redirect.
@@ -343,51 +495,39 @@ async fn approve_interaction(
     tenant: TenantRow,
     interaction: Interaction,
     account: AccountRow,
+    session_id: Option<Uuid>,
 ) -> Result<Response, ApiError> {
     let org_slug = interaction.organization.clone();
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
-    let org_ctx = org.ctx(&tenant);
-
-    let code = issue_code();
-    let code_hash = sha256_hex(&code);
-    let now = state.now();
-    state
-        .store
-        .insert_auth_code(
-            &tenant,
-            &code_hash,
-            interaction.client_row_id,
-            account.id,
-            org.id,
-            &interaction.redirect_uri,
-            &interaction.scopes,
-            &interaction.code_challenge,
-            interaction.nonce.as_deref(),
-            interaction.resource.as_deref(),
-            None,
-            interaction.dpop_jkt.as_deref(),
-            now,
-            now + Duration::seconds(state.config.auth_code_ttl.as_secs() as i64),
-        )
-        .await?;
-
-    let event = AuditEvent {
-        id: EventId::new(),
-        at: now,
-        action: "interaction.sign_in.succeeded".into(),
-        actor_chain: vec![AuditActor::account(account.account_id())],
-        subject: AuditSubject {
-            subject_type: AuditActorType::Account,
-            id: Some(account.account_id().to_typed_string()),
-        },
-        decision: AuditDecision::Allow,
-        grant_id: None,
-        jti: None,
-        payload: json!({ "org": org_slug, "client_id": interaction.client_id }),
+    // `auth_time` is the authentication instant, which is the session's creation when one exists.
+    let auth_time = match session_id {
+        Some(id) => state
+            .store
+            .session_by_id(&tenant, id)
+            .await?
+            .map(|row| row.issued_at)
+            .unwrap_or_else(|| state.now()),
+        None => state.now(),
     };
-    if let Err(err) = state.audit_org(&org_ctx, &event).await {
-        tracing::warn!(%err, "could not append sign-in.succeeded audit event");
-    }
+
+    let code = issue_code(
+        &state,
+        &tenant,
+        interaction.client_row_id,
+        account.id,
+        org.id,
+        &interaction.redirect_uri,
+        &interaction.scopes,
+        &interaction.code_challenge,
+        interaction.nonce.as_deref(),
+        interaction.resource.as_deref(),
+        session_id,
+        interaction.dpop_jkt.as_deref(),
+        auth_time,
+        &interaction.client_id,
+        false,
+    )
+    .await?;
 
     let redirect_to = append_query(
         &interaction.redirect_uri,
@@ -397,6 +537,79 @@ async fn approve_interaction(
         ],
     );
     Ok(Json(json!({ "redirect_to": redirect_to })).into_response())
+}
+
+/// Store a single-use authorization code and record the audit event.
+///
+/// Both paths use this: the interactive one (`approve_interaction`) and the silent SSO one in
+/// `authorize`, which is why the session and its authentication instant are explicit parameters.
+#[allow(clippy::too_many_arguments)]
+async fn issue_code(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    client_row_id: Uuid,
+    account_id: Uuid,
+    org_id: Uuid,
+    redirect_uri: &str,
+    scopes: &[String],
+    code_challenge: &str,
+    nonce: Option<&str>,
+    resource: Option<&str>,
+    session_id: Option<Uuid>,
+    dpop_jkt: Option<&str>,
+    auth_time: OffsetDateTime,
+    client_id: &str,
+    sso: bool,
+) -> Result<String, ApiError> {
+    let code = issue_code_value();
+    let code_hash = sha256_hex(&code);
+    let now = state.now();
+    state
+        .store
+        .insert_auth_code(
+            tenant,
+            &code_hash,
+            client_row_id,
+            account_id,
+            org_id,
+            redirect_uri,
+            scopes,
+            code_challenge,
+            nonce,
+            resource,
+            session_id,
+            dpop_jkt,
+            auth_time,
+            now + Duration::seconds(state.config.auth_code_ttl.as_secs() as i64),
+        )
+        .await?;
+
+    let org = state.store.org_by_id(tenant, OrgId::from_uuid(org_id)).await?;
+    let org_ctx = org.ctx(tenant);
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: now,
+        action: "interaction.sign_in.succeeded".into(),
+        actor_chain: vec![AuditActor::account(AccountId::from_uuid(account_id))],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(AccountId::from_uuid(account_id).to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "org": org.slug,
+            "client_id": client_id,
+            "sso": sso,
+            "session_id": session_id.map(|id| id.to_string()),
+        }),
+    };
+    if let Err(err) = state.audit_org(&org_ctx, &event).await {
+        tracing::warn!(%err, "could not append sign-in.succeeded audit event");
+    }
+
+    Ok(code)
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/abort`.
@@ -414,6 +627,165 @@ pub async fn abort(
             &[("error", "access_denied"), ("state", interaction.state.as_str())],
         )
     })))
+}
+
+/// `GET /t/{tenant}/oauth2/end-session` and its POST form — OpenID Connect RP-Initiated Logout.
+pub async fn end_session(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_slug): Path<String>,
+    Query(params): Query<EndSessionParams>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    end_session_core(state, tenant_slug, params, headers).await
+}
+
+/// `POST /t/{tenant}/oauth2/end-session` — the spec allows either method.
+pub async fn end_session_post(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_slug): Path<String>,
+    headers: HeaderMap,
+    Form(params): Form<EndSessionParams>,
+) -> Result<Response, ApiError> {
+    end_session_core(state, tenant_slug, params, headers).await
+}
+
+/// The RP-initiated logout parameters (OpenID Connect RP-Initiated Logout 1.0 §2).
+#[derive(Debug, Default, Deserialize)]
+pub struct EndSessionParams {
+    /// An id_token the OP issued to this client; identifies the client and the issuer.
+    pub id_token_hint: Option<String>,
+    /// Where to send the browser after logout. Must be registered for the client.
+    pub post_logout_redirect_uri: Option<String>,
+    /// Opaque client state, echoed onto the logout redirect.
+    pub state: Option<String>,
+    /// OAuth 2.0 `client_id`, when no hint is supplied.
+    pub client_id: Option<String>,
+}
+
+async fn end_session_core(
+    state: Arc<AppState>,
+    tenant_slug: String,
+    params: EndSessionParams,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
+
+    // Resolve the client from the hint when given, otherwise from `client_id`. The hint is verified
+    // in full: its signature, its issuer, and that its audience names the client we will redirect
+    // to. An unverifiable hint is a malformed request, never a reason to trust a redirect.
+    let mut hint_client: Option<String> = None;
+    if let Some(raw) = params
+        .id_token_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let (_, claims) = monaca_crypto::decode_unverified(raw).map_err(|_| {
+            ApiError::problem(kinds::INVALID_REQUEST, "id_token_hint is malformed")
+        })?;
+        if claims.get("iss").and_then(Value::as_str) != Some(tenant.issuer.as_str()) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "id_token_hint was issued by another issuer",
+            ));
+        }
+        let aud = claims
+            .get("aud")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ApiError::problem(kinds::INVALID_REQUEST, "id_token_hint has no audience")
+            })?
+            .to_owned();
+        let jwks = state.jwks(&tenant).await?;
+        monaca_crypto::verify_jws(raw, &jwks, "JWT")
+            .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "id_token_hint is not signed by this issuer"))?;
+        hint_client = Some(aud);
+    }
+
+    if let (Some(hint), Some(requested)) = (hint_client.as_deref(), params.client_id.as_deref())
+        && hint != requested
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "client_id does not match the id_token",
+        ));
+    }
+    let client_id = hint_client.or_else(|| params.client_id.clone());
+    let client = match client_id.as_deref() {
+        Some(id) => state.store.client_by_client_id(&tenant, id).await?,
+        None => None,
+    };
+
+    // A logout redirect is only allowed to a registered target; otherwise the endpoint would be an
+    // open redirector. When the parameter is absent the caller gets a small confirmation body.
+    let redirect_to = match params
+        .post_logout_redirect_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(uri) => {
+            let client = client.as_ref().ok_or_else(|| {
+                ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    "post_logout_redirect_uri requires an identified client",
+                )
+            })?;
+            let registered = state.store.client_post_logout_uris(&tenant, client.id).await?;
+            if !registered.iter().any(|candidate| candidate == uri) {
+                return Err(ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    "post_logout_redirect_uri is not registered for this client",
+                ));
+            }
+            Some(uri.to_owned())
+        }
+        None => None,
+    };
+
+    // End the browser's session, whether or not the caller named a client.
+    if let Some(session_id) = session::session_id(&headers) {
+        let revoked = state.store.revoke_session(&tenant, session_id).await?;
+        if revoked {
+            let event = AuditEvent {
+                id: EventId::new(),
+                at: state.now(),
+                action: "session.logout".into(),
+                actor_chain: Vec::new(),
+                subject: AuditSubject {
+                    subject_type: AuditActorType::Session,
+                    id: Some(monaca_types::SessionId::from_uuid(session_id).to_typed_string()),
+                },
+                decision: AuditDecision::Allow,
+                grant_id: None,
+                jti: None,
+                payload: json!({ "client_id": client.as_ref().map(|c| c.client_id.clone()) }),
+            };
+            if let Err(err) = state.audit_tenant(&tenant, &event).await {
+                tracing::warn!(%err, "could not append session.logout audit event");
+            }
+        }
+    }
+
+    let mut response = match redirect_to {
+        Some(uri) => {
+            let location = match params
+                .state
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                Some(state_value) => append_query(&uri, &[("state", state_value)]),
+                None => uri,
+            };
+            found(&location)
+        }
+        None => Json(json!({ "status": "logged_out" })).into_response(),
+    };
+    let secure = session::secure_origin(&state.config);
+    if let Ok(value) = HeaderValue::from_str(&session::clear_cookie(secure)) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    Ok(response)
 }
 
 /// `POST /t/{tenant}/oauth2/token`.
@@ -1205,7 +1577,7 @@ fn sign_in_event(
     }
 }
 
-fn issue_code() -> String {
+fn issue_code_value() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 

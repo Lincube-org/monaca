@@ -119,6 +119,10 @@ onMounted(async () => {
 
   try {
     details.value = await getInteraction(tenantFromUrl.value, interactionId.value);
+    // A valid SSO session already authenticated this interaction; only the consent step remains.
+    if (details.value.signed_in && details.value.consent_required) {
+      consentRequired.value = true;
+    }
   } catch (error) {
     loadError.value = error instanceof Error ? error : new Error(String(error));
   } finally {

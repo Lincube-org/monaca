@@ -28,6 +28,8 @@ export interface InteractionDetails {
   organization: string | null;
   /** Whether the flow must show the consent screen before a code is issued. */
   consent_required: boolean;
+  /** Whether a cross-application session already authenticated this interaction. */
+  signed_in: boolean;
   expires_at: string;
 }
 

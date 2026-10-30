@@ -155,6 +155,43 @@ pub struct ParRow {
     pub consumed_at: Option<OffsetDateTime>,
 }
 
+/// A sign-in session in `tenant.sessions`.
+///
+/// `issued_at` is the authentication instant (`auth_time`); `last_seen_at` is the last time an
+/// authorize request reused the session, which is what `prompt`/`max_age` mean. The `ip` column
+/// exists in the schema but is not read here: sqlx needs the `ipnetwork` feature to decode `inet`.
+#[derive(Debug, Clone, FromRow)]
+pub struct SessionRow {
+    /// Row id, carried as `ses_…` on the API and inside the SSO cookie.
+    pub id: Uuid,
+    /// The account that signed in.
+    pub account_id: Uuid,
+    /// The client that established the session, when known.
+    pub client_id: Option<Uuid>,
+    /// The authentication instant.
+    pub issued_at: OffsetDateTime,
+    /// When the session stops being usable.
+    pub expires_at: OffsetDateTime,
+    /// Revocation instant (`logout`, an admin revoke, or an account disable).
+    pub revoked_at: Option<OffsetDateTime>,
+    /// Last authorize request that reused it.
+    pub last_seen_at: OffsetDateTime,
+    /// The browser's `User-Agent`, for the sessions list.
+    pub user_agent: Option<String>,
+}
+
+impl SessionRow {
+    /// The session's typed id.
+    pub fn session_id(&self) -> monaca_types::SessionId {
+        monaca_types::SessionId::from_uuid(self.id)
+    }
+
+    /// Whether the row can still authenticate an authorize request at `now`.
+    pub fn is_active(&self, now: OffsetDateTime) -> bool {
+        self.revoked_at.is_none() && self.expires_at > now
+    }
+}
+
 /// An agent row.
 #[derive(Debug, Clone, FromRow)]
 pub struct AgentRow {
@@ -544,7 +581,24 @@ impl Store {
         Ok(rows.into_iter().map(|(uri,)| uri).collect())
     }
 
+    /// The RP-initiated-logout targets registered for a client row.
+    pub async fn client_post_logout_uris(
+        &self,
+        tenant: &TenantRow,
+        client_row_id: Uuid,
+    ) -> Result<Vec<String>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: Option<(Vec<String>,)> = sqlx::query_as(
+            "SELECT post_logout_redirect_uris FROM tenant.clients WHERE id = $1",
+        )
+        .bind(client_row_id)
+        .fetch_optional(&pool)
+        .await?;
+        Ok(row.map(|(uris,)| uris).unwrap_or_default())
+    }
+
     /// Create a client and its redirect URIs, atomically.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_client(
         &self,
         tenant: &TenantRow,
@@ -556,14 +610,17 @@ impl Store {
         jwks: Option<&Value>,
         scopes: &[String],
         redirect_uris: &[String],
+        post_logout_redirect_uris: &[String],
     ) -> Result<Uuid, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
         let (id,): (Uuid,) = sqlx::query_as(
             "INSERT INTO tenant.clients
-               (id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-             ON CONFLICT (client_id) DO UPDATE SET name = EXCLUDED.name
+               (id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
+                post_logout_redirect_uris)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (client_id) DO UPDATE SET name = EXCLUDED.name,
+               post_logout_redirect_uris = EXCLUDED.post_logout_redirect_uris
              RETURNING id",
         )
         .bind(Uuid::now_v7())
@@ -574,6 +631,7 @@ impl Store {
         .bind(token_auth_method)
         .bind(jwks)
         .bind(scopes)
+        .bind(post_logout_redirect_uris)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -590,6 +648,120 @@ impl Store {
 
         tx.commit().await?;
         Ok(id)
+    }
+
+    // ---------------------------------------------------------------- sessions
+
+    /// Insert a sign-in session. The row id is the cookie value's source of truth.
+    pub async fn insert_session(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+        account_id: Uuid,
+        client_row_id: Option<Uuid>,
+        expires_at: OffsetDateTime,
+        user_agent: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.sessions
+               (id, account_id, client_id, expires_at, last_seen_at, user_agent)
+             VALUES ($1,$2,$3,$4,now(),$5)",
+        )
+        .bind(session_id)
+        .bind(account_id)
+        .bind(client_row_id)
+        .bind(expires_at)
+        .bind(user_agent)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A session by id, revoked or not. The caller decides whether it is still usable.
+    pub async fn session_by_id(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+    ) -> Result<Option<SessionRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SessionRow>(
+            "SELECT id, account_id, client_id, issued_at, expires_at, revoked_at,
+                    last_seen_at, user_agent
+             FROM tenant.sessions WHERE id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Record that a session authenticated an authorize request.
+    pub async fn touch_session(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query("UPDATE tenant.sessions SET last_seen_at = $2 WHERE id = $1")
+            .bind(session_id)
+            .bind(at)
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every session of an account that is not revoked and not expired.
+    pub async fn list_sessions(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Vec<SessionRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SessionRow>(
+            "SELECT id, account_id, client_id, issued_at, expires_at, revoked_at,
+                    last_seen_at, user_agent
+             FROM tenant.sessions
+             WHERE account_id = $1 AND revoked_at IS NULL AND expires_at > now()
+             ORDER BY last_seen_at DESC",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Revoke one session. Returns whether a live session was actually revoked.
+    pub async fn revoke_session(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.sessions SET revoked_at = now()
+             WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(session_id)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Revoke every live session of an account. Returns how many were revoked.
+    pub async fn revoke_account_sessions(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<u64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.sessions SET revoked_at = now()
+             WHERE account_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     // ------------------------------------------------------------- signing keys

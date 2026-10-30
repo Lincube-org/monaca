@@ -89,6 +89,10 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
                 "http://localhost:5173/bff/callback".into(),
                 "http://localhost:8080/bff/callback".into(),
             ],
+            &[
+                "http://localhost:5173/bff/callback".into(),
+                "http://localhost:8080/bff/callback".into(),
+            ],
         )
         .await?;
 
@@ -103,6 +107,7 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
             "client_secret_basic",
             None,
             &["monaca:admin".into()],
+            &[],
             &[],
         )
         .await?;
