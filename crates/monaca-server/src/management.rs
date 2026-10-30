@@ -371,7 +371,10 @@ pub async fn revoke_account_sessions(
         .await?
         .ok_or_else(|| ApiError::not_found("account"))?;
 
-    let revoked = state.store.revoke_account_sessions(&tenant, account_id).await?;
+    let revoked = state
+        .store
+        .revoke_account_sessions(&tenant, account_id)
+        .await?;
     let event = AuditEvent {
         id: EventId::new(),
         at: state.now(),

@@ -74,7 +74,10 @@ mod tests {
         let code = generate_numeric_code(DEFAULT_CODE_DIGITS);
         let hash = hash_secret(&code);
         assert_eq!(hash.len(), 64);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert!(verify_secret(&code, &hash));
     }
 

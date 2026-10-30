@@ -445,12 +445,10 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
 
-        sqlx::query(
-            "DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'password'",
-        )
-        .bind(account_id.uuid())
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'password'")
+            .bind(account_id.uuid())
+            .execute(&mut *tx)
+            .await?;
 
         sqlx::query(
             "INSERT INTO tenant.credentials (id, account_id, kind, secret_enc)
@@ -647,12 +645,11 @@ impl Store {
         client_row_id: Uuid,
     ) -> Result<Vec<String>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        let row: Option<(Vec<String>,)> = sqlx::query_as(
-            "SELECT post_logout_redirect_uris FROM tenant.clients WHERE id = $1",
-        )
-        .bind(client_row_id)
-        .fetch_optional(&pool)
-        .await?;
+        let row: Option<(Vec<String>,)> =
+            sqlx::query_as("SELECT post_logout_redirect_uris FROM tenant.clients WHERE id = $1")
+                .bind(client_row_id)
+                .fetch_optional(&pool)
+                .await?;
         Ok(row.map(|(uris,)| uris).unwrap_or_default())
     }
 

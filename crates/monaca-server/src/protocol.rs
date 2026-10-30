@@ -192,21 +192,15 @@ pub async fn authorize(
                 }
                 // Consent still has to be shown, but not the password form: record the session as
                 // this interaction's authentication, and let the page render its consent step.
-                let interaction = build_interaction(
-                    &state,
-                    &tenant,
-                    &client,
-                    &request,
-                    &org,
-                    true,
-                );
-                state.mark_interaction_signed_in(
-                    &interaction.interaction_id.to_string(),
-                    account.id,
-                    session.id,
-                )
-                .await
-                .map_err(ApiError::Interaction)?;
+                let interaction = build_interaction(&state, &tenant, &client, &request, &org, true);
+                state
+                    .mark_interaction_signed_in(
+                        &interaction.interaction_id.to_string(),
+                        account.id,
+                        session.id,
+                    )
+                    .await
+                    .map_err(ApiError::Interaction)?;
                 return Ok(found(&sign_in_location(&state, &tenant, &interaction)));
             }
 
@@ -394,8 +388,14 @@ async fn finish_sign_in(
 
     // Establish (or reuse) the cross-application session before the code is minted, so the browser
     // leaves sign-in with the SSO cookie and the next application skips the password page.
-    let session_id =
-        establish_session(&state, &tenant, headers, &account, interaction.client_row_id).await?;
+    let session_id = establish_session(
+        &state,
+        &tenant,
+        headers,
+        &account,
+        interaction.client_row_id,
+    )
+    .await?;
 
     // A third-party client (or `prompt=consent`) pauses here: the page must ask the user to
     // approve the scopes before a code is minted. Sign-in is recorded but not consumed, so the
@@ -415,7 +415,14 @@ async fn finish_sign_in(
         .await
         .map_err(ApiError::Interaction)?;
 
-    let response = approve_interaction(state.clone(), tenant, interaction, account, Some(session_id)).await?;
+    let response = approve_interaction(
+        state.clone(),
+        tenant,
+        interaction,
+        account,
+        Some(session_id),
+    )
+    .await?;
     Ok(with_session_cookie(response, session_id, &state))
 }
 
@@ -576,8 +583,12 @@ async fn take_verification_code(
     email: &str,
     code: &str,
 ) -> Result<(), ApiError> {
-    let invalid =
-        || ApiError::problem(kinds::INVALID_VERIFICATION_CODE, "the code is incorrect or expired");
+    let invalid = || {
+        ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        )
+    };
 
     let Some(row) = state
         .store
@@ -595,7 +606,11 @@ async fn take_verification_code(
             "too many guesses; request a new code",
         ));
     }
-    let Some(attempts) = state.store.verification_code_attempt(tenant, row.id).await? else {
+    let Some(attempts) = state
+        .store
+        .verification_code_attempt(tenant, row.id)
+        .await?
+    else {
         return Err(invalid());
     };
     if attempts > MAX_VERIFICATION_ATTEMPTS {
@@ -688,7 +703,10 @@ pub async fn sign_up_verify(
 
     // The new account joins the org the interaction issues into, so the flow can complete without
     // an admin round-trip. The org and tenant chains both record it (§8.1).
-    let org = state.store.org_by_slug(&tenant, &interaction.organization).await?;
+    let org = state
+        .store
+        .org_by_slug(&tenant, &interaction.organization)
+        .await?;
     let org_ctx = org.ctx(&tenant);
     let mut tx = state.store.begin_org(&org_ctx).await?;
     state
@@ -794,14 +812,7 @@ pub async fn password_reset(
     let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
     let email = normalise_email(&body.email)?;
     check_password(&body.password)?;
-    take_verification_code(
-        &state,
-        &tenant,
-        PURPOSE_PASSWORD_RESET,
-        &email,
-        &body.code,
-    )
-    .await?;
+    take_verification_code(&state, &tenant, PURPOSE_PASSWORD_RESET, &email, &body.code).await?;
 
     let Some((account, _)) = state.store.account_by_email(&tenant, &email).await? else {
         return Err(ApiError::problem(
@@ -1022,7 +1033,10 @@ async fn issue_code(
         )
         .await?;
 
-    let org = state.store.org_by_id(tenant, OrgId::from_uuid(org_id)).await?;
+    let org = state
+        .store
+        .org_by_id(tenant, OrgId::from_uuid(org_id))
+        .await?;
     let org_ctx = org.ctx(tenant);
     let event = AuditEvent {
         id: EventId::new(),
@@ -1118,9 +1132,8 @@ async fn end_session_core(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let (_, claims) = monaca_crypto::decode_unverified(raw).map_err(|_| {
-            ApiError::problem(kinds::INVALID_REQUEST, "id_token_hint is malformed")
-        })?;
+        let (_, claims) = monaca_crypto::decode_unverified(raw)
+            .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "id_token_hint is malformed"))?;
         if claims.get("iss").and_then(Value::as_str) != Some(tenant.issuer.as_str()) {
             return Err(ApiError::problem(
                 kinds::INVALID_REQUEST,
@@ -1135,8 +1148,12 @@ async fn end_session_core(
             })?
             .to_owned();
         let jwks = state.jwks(&tenant).await?;
-        monaca_crypto::verify_jws(raw, &jwks, "JWT")
-            .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "id_token_hint is not signed by this issuer"))?;
+        monaca_crypto::verify_jws(raw, &jwks, "JWT").map_err(|_| {
+            ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "id_token_hint is not signed by this issuer",
+            )
+        })?;
         hint_client = Some(aud);
     }
 
@@ -1169,7 +1186,10 @@ async fn end_session_core(
                     "post_logout_redirect_uri requires an identified client",
                 )
             })?;
-            let registered = state.store.client_post_logout_uris(&tenant, client.id).await?;
+            let registered = state
+                .store
+                .client_post_logout_uris(&tenant, client.id)
+                .await?;
             if !registered.iter().any(|candidate| candidate == uri) {
                 return Err(ApiError::problem(
                     kinds::INVALID_REQUEST,
@@ -1207,11 +1227,7 @@ async fn end_session_core(
 
     let mut response = match redirect_to {
         Some(uri) => {
-            let location = match params
-                .state
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
+            let location = match params.state.as_deref().filter(|value| !value.is_empty()) {
                 Some(state_value) => append_query(&uri, &[("state", state_value)]),
                 None => uri,
             };

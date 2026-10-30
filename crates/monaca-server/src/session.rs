@@ -67,7 +67,10 @@ mod tests {
     #[test]
     fn a_malformed_cookie_is_ignored() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::COOKIE, HeaderValue::from_static("monaca_session=nope"));
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("monaca_session=nope"),
+        );
         assert_eq!(session_id(&headers), None);
         headers.insert(header::COOKIE, HeaderValue::from_static("other=1"));
         assert_eq!(session_id(&headers), None);
