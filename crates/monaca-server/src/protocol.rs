@@ -163,7 +163,7 @@ pub async fn authorize(
     };
     let session = session
         .filter(|row| row.is_active(now))
-        .filter(|row| !request.prompt.iter().any(|value| value == "login"))
+        .filter(|_| !request.prompt.iter().any(|value| value == "login"))
         .filter(|row| match request.max_age {
             Some(max_age) => now - row.issued_at <= Duration::seconds(max_age),
             None => true,
