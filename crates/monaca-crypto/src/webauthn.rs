@@ -283,7 +283,10 @@ fn parse_authenticator_data(bytes: &[u8]) -> Result<AuthenticatorData<'_>, Crypt
 }
 
 /// Turn a COSE `EC2` key into the SEC1 uncompressed point `p256` verifies with.
-fn cose_to_sec1(bytes: &[u8]) -> Result<[u8; 66], CryptoError> {
+///
+/// The point is one `0x04` prefix plus two 32-byte coordinates — 65 bytes, the only length
+/// `VerifyingKey::from_sec1_bytes` accepts for P-256.
+fn cose_to_sec1(bytes: &[u8]) -> Result<[u8; 65], CryptoError> {
     let Cbor::Map(entries) = parse_cbor(bytes)? else {
         return Err(malformed("credential public key is not a COSE map"));
     };
@@ -306,7 +309,7 @@ fn cose_to_sec1(bytes: &[u8]) -> Result<[u8; 66], CryptoError> {
         ));
     }
 
-    let mut sec1 = [0u8; 66];
+    let mut sec1 = [0u8; 65];
     sec1[0] = 0x04;
     sec1[1..33].copy_from_slice(x);
     sec1[33..].copy_from_slice(y);
@@ -646,6 +649,20 @@ mod tests {
     }
 
     #[test]
+    fn a_cose_ec2_key_becomes_a_65_byte_sec1_point() {
+        // {1: 2, 3: -7, -1: 1, -2: <32 bytes>, -3: <32 bytes>}
+        let mut bytes = vec![0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20];
+        bytes.extend_from_slice(&[0x11u8; 32]);
+        bytes.extend_from_slice(&[0x22, 0x58, 0x20]);
+        bytes.extend_from_slice(&[0x22u8; 32]);
+        let sec1 = cose_to_sec1(&bytes).expect("a valid COSE key");
+        assert_eq!(sec1.len(), 65);
+        assert_eq!(sec1[0], 0x04);
+        assert_eq!(&sec1[1..33], &[0x11u8; 32]);
+        assert_eq!(&sec1[33..], &[0x22u8; 32]);
+    }
+
+    #[test]
     fn client_data_must_name_the_expected_ceremony() {
         let data =
             br#"{"type":"webauthn.get","challenge":"AAAA","origin":"http://localhost:5174"}"#;
@@ -660,7 +677,7 @@ mod tests {
             data,
             &[0u8; 37],
             &[0u8; 64],
-            &[0u8; 66],
+            &[0u8; 65],
             &[0, 0, 0],
             "localhost",
             "http://localhost:5174",

@@ -2179,7 +2179,10 @@ async function passkeyFlow(base: string, adminToken: string, consoleSecret: stri
         (plain.body as { factors: string[] }).factors.join(",") === "totp",
     ]);
   } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
     detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
   }
 
   const ok = checks.length > 0 && checks.every(([, passed]) => passed);
@@ -2372,6 +2375,7 @@ async function usernameFlow(base: string, adminToken: string, consoleSecret: str
     checks.push(["an invalid username is 400", invalid.status === 400]);
   } catch (error) {
     detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
   }
 
   const ok = checks.length > 0 && checks.every(([, passed]) => passed);
