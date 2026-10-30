@@ -52,7 +52,11 @@ pub async fn userinfo(
     let jti = token_jti(&claims)
         .ok_or_else(|| ApiError::bearer(401, "invalid_token", "the token has no usable `jti`"))?;
     if state.store.access_token_revoked(&tenant, jti).await? {
-        return Err(ApiError::bearer(401, "invalid_token", "the token was revoked"));
+        return Err(ApiError::bearer(
+            401,
+            "invalid_token",
+            "the token was revoked",
+        ));
     }
 
     // RFC 9449 §7.1: a token bound with `cnf.jkt` is only usable with a proof for the same key,
@@ -261,7 +265,10 @@ pub async fn par(
             .collect(),
     );
     let params: AuthorizeParams = serde_json::from_value(raw).map_err(|_| {
-        ApiError::token(TokenErrorCode::InvalidRequest, "a pushed request is malformed")
+        ApiError::token(
+            TokenErrorCode::InvalidRequest,
+            "a pushed request is malformed",
+        )
     })?;
 
     if params
@@ -338,9 +345,13 @@ fn resource_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::bearer(401, "invalid_token", "the request carries no token"))?;
-    let (scheme, token) = value
-        .split_once(' ')
-        .ok_or_else(|| ApiError::bearer(401, "invalid_token", "the authorization header is malformed"))?;
+    let (scheme, token) = value.split_once(' ').ok_or_else(|| {
+        ApiError::bearer(
+            401,
+            "invalid_token",
+            "the authorization header is malformed",
+        )
+    })?;
     match scheme {
         // RFC 9449 §7.1: a DPoP-bound token is presented with the `DPoP` scheme.
         "Bearer" | "DPoP" if !token.is_empty() => Ok(token),
@@ -400,7 +411,14 @@ async fn authenticate_request_client(
         .as_ref()
         .map(|(_, secret)| secret.clone())
         .or_else(|| client_secret.map(str::to_owned));
-    authenticate_client(state, &client, secret.as_deref(), client_assertion, endpoint).await?;
+    authenticate_client(
+        state,
+        &client,
+        secret.as_deref(),
+        client_assertion,
+        endpoint,
+    )
+    .await?;
     Ok(client)
 }
 

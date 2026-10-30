@@ -403,6 +403,13 @@ jobs:
       - name: Make the server binary executable
         run: chmod +x .monaca/bin/monaca-server
 
+      # `postgres:18` creates only the service's `POSTGRES_DB`; the control plane's own database
+      # is not one of them. `monaca-server migrate` applies schema migrations only and never
+      # creates a database — that is the tenant provisioner's job (§5.4) — so the control
+      # database is created here once, mirroring the dev container (§2.2).
+      - name: Create the control database
+        run: psql "postgres://postgres:postgres@127.0.0.1:5432/postgres" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE monaca_control'
+
       - name: Migrate and bootstrap the CI database
         run: |
           .monaca/bin/monaca-server migrate

@@ -1154,17 +1154,11 @@ pub(crate) async fn verify_dpop(
     let Some(raw) = headers.get("dpop").and_then(|value| value.to_str().ok()) else {
         return Ok(None);
     };
-    let proof = monaca_oidc::verify_proof(
-        raw,
-        method,
-        url,
-        access_token,
-        state.now().unix_timestamp(),
-    )
-    .map_err(|err| ApiError::token(TokenErrorCode::InvalidDpopProof, err.to_string()))?;
+    let proof =
+        monaca_oidc::verify_proof(raw, method, url, access_token, state.now().unix_timestamp())
+            .map_err(|err| ApiError::token(TokenErrorCode::InvalidDpopProof, err.to_string()))?;
 
-    let expires_at =
-        state.now() + Duration::seconds(monaca_oidc::PROOF_WINDOW_SECS);
+    let expires_at = state.now() + Duration::seconds(monaca_oidc::PROOF_WINDOW_SECS);
     if !state
         .store
         .dpop_replay_add(tenant, &proof.jti, expires_at)

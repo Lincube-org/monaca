@@ -77,18 +77,17 @@ pub fn verify(
     access_token: Option<&str>,
     now: i64,
 ) -> Result<DpopProof, DpopError> {
-    let (header, claims) = monaca_crypto::verify_embedded_jwk(proof, "dpop+jwt").map_err(
-        |err| match err {
+    let (header, claims) =
+        monaca_crypto::verify_embedded_jwk(proof, "dpop+jwt").map_err(|err| match err {
             CryptoError::BadSignature(_) => DpopError::Signature,
             other => DpopError::Malformed(other.to_string()),
-        },
-    )?;
+        })?;
 
     let jwk = header
         .get("jwk")
         .ok_or_else(|| DpopError::Malformed("the header has no `jwk`".into()))?;
-    let jkt = monaca_crypto::jwk_thumbprint(jwk)
-        .map_err(|err| DpopError::Malformed(err.to_string()))?;
+    let jkt =
+        monaca_crypto::jwk_thumbprint(jwk).map_err(|err| DpopError::Malformed(err.to_string()))?;
 
     let htm = claims
         .get("htm")
@@ -168,7 +167,13 @@ mod tests {
     #[test]
     fn a_malformed_proof_is_refused() {
         assert!(matches!(
-            verify("not-a-jwt", "POST", "https://a.test/token", None, 1_700_000_000),
+            verify(
+                "not-a-jwt",
+                "POST",
+                "https://a.test/token",
+                None,
+                1_700_000_000
+            ),
             Err(DpopError::Malformed(_))
         ));
     }
@@ -179,7 +184,10 @@ mod tests {
             without_query("https://a.test/token?x=1#f"),
             "https://a.test/token"
         );
-        assert_eq!(without_query("https://a.test/token"), "https://a.test/token");
+        assert_eq!(
+            without_query("https://a.test/token"),
+            "https://a.test/token"
+        );
     }
 
     #[test]

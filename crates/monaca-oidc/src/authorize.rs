@@ -181,10 +181,7 @@ impl AuthorizeParams {
 /// cross-application session to select an account from.
 fn parse_prompt(raw: Option<&str>) -> Result<Vec<String>, AuthorizeError> {
     let values = raw.unwrap_or_default();
-    let prompt: Vec<String> = values
-        .split_ascii_whitespace()
-        .map(str::to_owned)
-        .collect();
+    let prompt: Vec<String> = values.split_ascii_whitespace().map(str::to_owned).collect();
     for value in &prompt {
         if !matches!(value.as_str(), "none" | "login" | "consent") {
             return Err(AuthorizeError::InvalidRequest(format!(

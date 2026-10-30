@@ -197,7 +197,9 @@ impl IntoResponse for ApiError {
                 // characters a header value cannot carry.
                 let challenge = format!("Bearer error=\"{code}\"");
                 if let Ok(value) = HeaderValue::from_str(&challenge) {
-                    response.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+                    response
+                        .headers_mut()
+                        .insert(header::WWW_AUTHENTICATE, value);
                 }
                 response
             }

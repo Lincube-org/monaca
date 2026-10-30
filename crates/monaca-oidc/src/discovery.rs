@@ -59,7 +59,10 @@ impl DiscoveryDocument {
     /// Render the document.
     pub fn to_json(&self) -> Value {
         let auth_methods = json!([
-            "none", "client_secret_basic", "client_secret_post", "private_key_jwt"
+            "none",
+            "client_secret_basic",
+            "client_secret_post",
+            "private_key_jwt"
         ]);
         json!({
             "issuer": self.issuer,
@@ -129,10 +132,7 @@ mod tests {
             value["pushed_authorization_request_endpoint"],
             "http://localhost:8080/t/demo/oauth2/par"
         );
-        assert_eq!(
-            value["dpop_signing_alg_values_supported"],
-            json!(["ES256"])
-        );
+        assert_eq!(value["dpop_signing_alg_values_supported"], json!(["ES256"]));
         assert_eq!(
             value["prompt_values_supported"],
             json!(["none", "login", "consent"])

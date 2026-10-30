@@ -131,7 +131,8 @@ mod tests {
     #[test]
     fn thumbprints_ignore_kid_use_and_alg() {
         let base = json!({"kty":"EC","crv":"P-256","x":"a","y":"b"});
-        let decorated = json!({"kty":"EC","crv":"P-256","x":"a","y":"b","kid":"k","use":"sig","alg":"ES256"});
+        let decorated =
+            json!({"kty":"EC","crv":"P-256","x":"a","y":"b","kid":"k","use":"sig","alg":"ES256"});
         assert_eq!(
             jwk_thumbprint(&base).expect("a"),
             jwk_thumbprint(&decorated).expect("b")
