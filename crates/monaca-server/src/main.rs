@@ -1,32 +1,36 @@
 //! `monaca-server` — the axum 0.8 binary that fronts the whole system.
 //!
-//! Stage 0 implements the parts of the surface that do not need a database: the liveness and
-//! version endpoints, the OpenAPI document, and the CLI's shape. `migrate` and `bootstrap`
-//! report that they are not implemented yet and exit 0, so the CI e2e stage can call them
-//! exactly as it will once they are real.
-//!
 //! Routes are split by the audiences in `docs/contracts/m0.md` §6:
 //!
 //! * the **protocol** endpoints under `/t/{tenant}` and `/.well-known`, reached through the
 //!   gateway and issuing every `iss`;
 //! * the **management** API under `/v1`, bearer-authenticated with `monaca:admin`;
 //! * **`/internal/*`**, shared-secret authenticated, the only way the Bun side writes core data.
-//!
-//! M1 adds the real `/v1` handlers, OTLP export and mTLS on `/internal/*`.
 
+mod bootstrap;
 mod cli;
+mod config;
+mod error;
+mod internal;
+mod management;
 mod openapi;
+mod protocol;
 mod routes;
+mod state;
 
 #[cfg(test)]
 mod tests;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
+use monaca_store::{Store, StoreConfig};
 
 use crate::cli::{Cli, Command};
+use crate::config::Config;
+use crate::state::AppState;
 
 /// The default bind address — §2.2 `MONACA_SERVER_ADDR`.
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8081";
@@ -39,27 +43,29 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve(args) => serve(args).await,
         Command::Openapi(args) => openapi::run(args),
-        Command::Migrate => {
-            println!("not implemented in stage 0");
-            Ok(())
-        }
-        Command::Bootstrap => {
-            println!("not implemented in stage 0");
-            Ok(())
-        }
+        Command::Migrate => migrate().await,
+        Command::Bootstrap => bootstrap().await,
         Command::Audit(args) => match args.command {
-            cli::AuditCommand::Verify => {
-                println!("not implemented in stage 0");
-                Ok(())
-            }
+            cli::AuditCommand::Verify => audit_verify().await,
         },
     }
+}
+
+/// Build the configuration, store and shared state.
+async fn build_state() -> anyhow::Result<Arc<AppState>> {
+    let config = Config::from_env();
+    config.validate()?;
+    let store = Store::connect(StoreConfig::from_env())
+        .await
+        .context("could not connect to PostgreSQL; run `monaca-server migrate` first")?;
+    AppState::new(store, config).map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 /// Start the HTTP server on the configured address and serve until Ctrl-C.
 async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
     let addr = resolve_addr(args.addr.as_deref())?;
-    let app = routes::router();
+    let state = build_state().await?;
+    let app = routes::router(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -74,6 +80,51 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("the server stopped with an error")
+}
+
+/// `monaca-server migrate`.
+async fn migrate() -> anyhow::Result<()> {
+    let config = Config::from_env();
+    config.validate()?;
+    let store = Store::connect(StoreConfig::from_env())
+        .await
+        .context("could not connect to PostgreSQL")?;
+    bootstrap::migrate(&store).await
+}
+
+/// `monaca-server bootstrap`.
+async fn bootstrap() -> anyhow::Result<()> {
+    let config = Config::from_env();
+    config.validate()?;
+    let store = Store::connect(StoreConfig::from_env())
+        .await
+        .context("could not connect to PostgreSQL")?;
+    bootstrap::migrate(&store).await?;
+    let state = AppState::new(store, config).map_err(|err| anyhow::anyhow!("{err}"))?;
+    bootstrap::run(&state).await
+}
+
+/// `monaca-server audit verify` — recompute one org's chain.
+async fn audit_verify() -> anyhow::Result<()> {
+    let store = Store::connect(StoreConfig::from_env()).await?;
+    let tenant_slug = std::env::var("MONACA_AUDIT_TENANT").unwrap_or_else(|_| "demo".into());
+    let org_slug = std::env::var("MONACA_AUDIT_ORG").unwrap_or_else(|_| "acme".into());
+
+    let tenant = store.tenant_by_slug(&tenant_slug).await?;
+    let org = store.org_by_slug(&tenant, &org_slug).await?;
+    let ctx = org.ctx(&tenant);
+
+    let mut tx = store.begin_org(&ctx).await?;
+    let report = store
+        .audit_verify(&mut *tx, &ctx.schema_name, 1, None)
+        .await?;
+    tx.rollback().await?;
+
+    println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+    if !report.valid {
+        anyhow::bail!("audit chain is broken");
+    }
+    Ok(())
 }
 
 /// The bind address, from `--addr`, `MONACA_SERVER_ADDR`, or [`DEFAULT_ADDR`].

@@ -1,6 +1,6 @@
 [package]
 name = "monaca-oidc"
-description = "PLACEHOLDER"
+description = "The OpenID Connect and OAuth 2.1 protocol engine: discovery, authorize, interaction, token and id_token."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,12 @@ publish.workspace = true
 [dependencies]
 monaca-types = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+data-encoding = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

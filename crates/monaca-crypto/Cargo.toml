@@ -12,6 +12,21 @@ publish.workspace = true
 [dependencies]
 monaca-types = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+jsonwebtoken = { workspace = true }
+p256 = { workspace = true }
+rand_core = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+data-encoding = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+tokio = { workspace = true }
 
 [features]
 # FIPS builds swap jsonwebtoken's RustCrypto backend for aws-lc-rs. Declared but unused in M0:

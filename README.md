@@ -6,9 +6,13 @@ authorization layer (delegation chains, scope attenuation, approvals, audit fore
 Rust for the hot paths and the protocol engine; a Bun/Hono gateway hosts modules, the console BFF and
 the dev proxy; PostgreSQL stores one database per tenant and one schema per organization.
 
-**Status: M0 stage 0.** The repository skeleton, the binding contract, the module system, the MCP
-guard and the UI package are in place. The Rust crates and the acceptance walk-through are being
-built; see [docs/contracts/m0.md](docs/contracts/m0.md) §12 for the acceptance criteria.
+**Status: M0 walk-through complete.** The repository skeleton, the binding contract, the module
+system, the MCP guard and the UI package are in place, and the Rust side now implements the M0
+surface: three migration sets with tenant/org provisioning, ES256 keys and JWKS, the OIDC
+authorization-code + interaction + refresh + client-credentials flows, agent grants with
+`private_key_jwt`/RAR and scope attenuation, the `/v1` management API, and the per-org audit hash
+chain with verification. `monaca-server migrate`, `bootstrap`, `serve` and `audit verify` are real
+commands. See [docs/contracts/m0.md](docs/contracts/m0.md) §12 for the acceptance criteria.
 
 ## Architecture at a glance
 
@@ -100,8 +104,10 @@ bun run verify:ci             # dispatch rust.yml + web.yml on this branch, watc
 | `bun run build` | build every package |
 
 `bun run e2e:skeleton` is environment-agnostic: it takes `--base-url` for localhost, the remote dev
-gateway or the CI server. Stage 0 (health) is implemented; the five M0 acceptance steps are printed
-as TODO and land in the next stage.
+gateway or the CI server. It runs the whole M0 walk-through (contract §12): setup through the
+management API, the agent's `private_key_jwt` grant, the over-request refusal, the allowed and
+denied MCP tool calls, the audit chain and its verification, plus the console's browser flow. Steps
+4 and 4b report `skip` against the bare server, because only the gateway mounts `/mcp/demo`.
 
 ## Repo layout
 

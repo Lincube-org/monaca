@@ -1,12 +1,22 @@
-//! Router tests — the stage-0 acceptance in `docs/contracts/m0.md` §12 step 1.
+//! Router tests — `docs/contracts/m0.md` §12 step 1.
 //!
-//! These drive the router through `tower::ServiceExt::oneshot`, so no socket is bound and the
-//! test cannot collide with a running server or a CI port. The handler functions are private to
-//! the binary crate, which is why these live here rather than in `tests/`.
+//! These drive a state-free router through `tower::ServiceExt::oneshot`, so no socket is bound and
+//! no database is required. The protocol and management handlers need PostgreSQL and are covered
+//! by `scripts/e2e/skeleton.ts` against a running server; what belongs here is the surface that
+//! must answer before any dependency is reachable.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::routing::get;
 use tower::ServiceExt as _;
+
+/// The two endpoints that need no state.
+fn app() -> Router {
+    Router::new()
+        .route("/healthz", get(crate::routes::healthz))
+        .route("/version", get(crate::routes::version))
+}
 
 /// Read a response body as JSON.
 async fn json_body(response: axum::response::Response) -> serde_json::Value {
@@ -19,7 +29,7 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
 /// `GET /healthz` answers `200 {"status":"ok"}` — §6.1 and §12 step 1.
 #[tokio::test]
 async fn healthz_answers_ok() {
-    let response = crate::routes::router()
+    let response = app()
         .oneshot(
             Request::builder()
                 .uri("/healthz")
@@ -39,7 +49,7 @@ async fn healthz_answers_ok() {
 /// The gateway's `/healthz` adds a `service` member; the server's does not — §6.1 vs §9.
 #[tokio::test]
 async fn healthz_does_not_name_a_service() {
-    let response = crate::routes::router()
+    let response = app()
         .oneshot(
             Request::builder()
                 .uri("/healthz")
@@ -63,7 +73,7 @@ async fn healthz_does_not_name_a_service() {
 
 #[tokio::test]
 async fn version_reports_the_binary() {
-    let response = crate::routes::router()
+    let response = app()
         .oneshot(
             Request::builder()
                 .uri("/version")
@@ -82,27 +92,10 @@ async fn version_reports_the_binary() {
 /// An unrouted path is a 404, not a panic or a 500.
 #[tokio::test]
 async fn an_unknown_path_is_not_found() {
-    let response = crate::routes::router()
+    let response = app()
         .oneshot(
             Request::builder()
                 .uri("/nope")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("the router responds");
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-/// `/internal/*` must not be reachable yet: it is the one prefix the gateway never proxies, so a
-/// half-built group must not answer.
-#[tokio::test]
-async fn internal_routes_are_not_mounted_in_stage_0() {
-    let response = crate::routes::router()
-        .oneshot(
-            Request::builder()
-                .uri("/internal/health")
                 .body(Body::empty())
                 .expect("request"),
         )

@@ -20,12 +20,18 @@ const HOP_BY_HOP_HEADERS = [
   "content-length",
 ] as const;
 
+// `authorization` is deliberately **not** in that list, and it is deliberately not deleted below.
+// The token endpoint authenticates clients with HTTP Basic (`client_secret_basic`, §6.1) and with
+// `private_key_jwt`, so stripping it here would make every client-authenticated request fail the
+// moment it travels through the public origin — which is where they all travel in dev. Browser
+// credentials are what must not leak, and `cookie` is still deleted; the BFF's `/bff/api/*`
+// rewrite sets its own bearer afterwards, so a header a browser sent cannot win there either.
+
 /** Headers to send upstream: the request's own, minus hop-by-hop ones and browser credentials. */
 export function upstreamHeaders(request: Request, extra?: Record<string, string>): Headers {
   const headers = new Headers(request.headers);
   for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
   headers.delete("cookie");
-  headers.delete("authorization");
   for (const [name, value] of Object.entries(extra ?? {})) headers.set(name, value);
   return headers;
 }

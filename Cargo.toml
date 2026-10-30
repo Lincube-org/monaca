@@ -75,13 +75,18 @@ jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_
 # surface. Revisit only when jsonwebtoken moves to 0.14.
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "pkcs8", "jwk", "pem", "std", "serde"] }
 sha2 = "0.10.9"
-argon2 = { version = "0.6.0", features = ["std", "password-hash"] }
+# argon2 0.6 has no `std` feature; `alloc` + `password-hash` is what its own default set adds
+# (minus `getrandom`, which the PHC salt generation below needs).
+argon2 = { version = "0.6.0", features = ["alloc", "password-hash", "getrandom", "zeroize"] }
 subtle = "2.6.1"
 # p256 0.13's ecdsa 0.16 consumes rand_core 0.6 (SigningKey::random takes a rand_core 0.6
 # CryptoRngCore), so key generation uses rand_core 0.6 directly rather than rand 0.9.
 # Mixing rand 0.9 in here would mean a second getrandom/OsRng root for no benefit.
 rand_core = { version = "0.6.4", features = ["std", "getrandom"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
+# Envelope encryption for tenant DEKs, signing keys and passkey/TOTP blobs (§5.6 `secret_enc`).
+# AES-256-GCM is the RustCrypto default and keeps the single-stack rule the p256 pin protects.
+aes-gcm = { version = "0.10.3", features = ["aes", "alloc"] }
 
 # --- errors / observability -------------------------------------------------
 thiserror = "2.0.21"

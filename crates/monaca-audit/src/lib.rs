@@ -24,4 +24,4 @@ mod verify;
 
 pub use chain::{CHAIN_FIELDS, GENESIS_HASH, canonical_bytes, chain_hash, hash_hex};
 pub use event::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject, ChainFields};
-pub use verify::{VerifyReport, VerifyStop, verify_chain};
+pub use verify::{ChainHead, StoredEvent, VerifyReason, VerifyReport, VerifyStop, verify_chain};

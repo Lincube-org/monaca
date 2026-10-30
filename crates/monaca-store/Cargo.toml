@@ -1,6 +1,6 @@
 [package]
 name = "monaca-store"
-description = "PLACEHOLDER"
+description = "Persistence: migrations, tenant and org provisioning, the org transaction boundary and the outbox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,18 @@ publish.workspace = true
 
 [dependencies]
 monaca-types = { workspace = true }
+monaca-audit = { workspace = true }
+monaca-crypto = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

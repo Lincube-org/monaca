@@ -1,68 +1,72 @@
 //! Request contexts — the tenant and organization a unit of work runs in.
 //!
 //! `TenantCtx` is what makes a pool/router lookup meaningful; `OrgCtx` is what makes
-//! `with_org_tx` safe. Both are cheap `Copy` values built once at the HTTP edge and threaded
-//! down, so no function below the edge has to re-derive a tenant from a string.
+//! `with_org_tx` safe. Both are built once at the HTTP edge from a database row and threaded down,
+//! so no function below the edge has to re-derive a tenant from a string.
+//!
+//! The slug and the derived names are owned `String`s rather than `&'static str`: they come from
+//! the control plane at runtime, and a `'static` field would force every request to leak the row
+//! it just read. The contexts are cloned at the edge, not in a loop.
 
 use uuid::Uuid;
 
 use crate::id::{AccountId, ClientId, OrgId, TenantId};
 
 /// The tenant a request is scoped to: the issuer's `{base}/t/{tenant}` component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TenantCtx {
     /// Tenant primary key (`ten_…`).
     pub tenant_id: TenantId,
     /// Tenant slug, e.g. `demo`. Used in `iss` and in DB name derivation.
-    pub slug: &'static str,
+    pub slug: String,
     /// Database name, `mt_<short>`.
-    pub db_name: &'static str,
+    pub db_name: String,
 }
 
 impl TenantCtx {
     /// Build a context from a tenant id and its slug.
     ///
-    /// `db_name` is derived from `short` by the caller (which already validated it), because
-    /// deriving it here would need the control-plane row this struct deliberately does not hold.
-    pub const fn new(tenant_id: TenantId, slug: &'static str, db_name: &'static str) -> Self {
+    /// `db_name` is passed in rather than derived here: deriving it needs the control-plane row's
+    /// `short`, which this struct deliberately does not hold.
+    pub fn new(tenant_id: TenantId, slug: impl Into<String>, db_name: impl Into<String>) -> Self {
         Self {
             tenant_id,
-            slug,
-            db_name,
+            slug: slug.into(),
+            db_name: db_name.into(),
         }
     }
 }
 
 /// A tenant context plus the organization an org-scoped unit of work runs in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrgCtx {
     /// The enclosing tenant.
     pub tenant: TenantCtx,
     /// Organization primary key (`org_…`).
     pub org_id: OrgId,
     /// Organization slug, e.g. `acme`.
-    pub org_slug: &'static str,
+    pub org_slug: String,
     /// Schema holding this org's tables, `org_<oshort>`.
-    pub schema_name: &'static str,
+    pub schema_name: String,
     /// The PG role `with_org_tx` assumes: `t<tshort>_o<oshort>`.
-    pub role_name: &'static str,
+    pub role_name: String,
 }
 
 impl OrgCtx {
     /// Build a context from its parts.
-    pub const fn new(
+    pub fn new(
         tenant: TenantCtx,
         org_id: OrgId,
-        org_slug: &'static str,
-        schema_name: &'static str,
-        role_name: &'static str,
+        org_slug: impl Into<String>,
+        schema_name: impl Into<String>,
+        role_name: impl Into<String>,
     ) -> Self {
         Self {
             tenant,
             org_id,
-            org_slug,
-            schema_name,
-            role_name,
+            org_slug: org_slug.into(),
+            schema_name: schema_name.into(),
+            role_name: role_name.into(),
         }
     }
 }
@@ -75,7 +79,7 @@ impl OrgCtx {
 pub struct Principal {
     /// `acc_…` — the user, or the delegating user on an agent token.
     pub account_id: AccountId,
-    /// `cli_…` — the client the token was issued to.
+    /// The protocol `client_id` the token was issued to, kept as a typed id when it names a row.
     pub client_id: ClientId,
     /// `agt_…`, present only on a delegated token.
     pub agent_id: Option<crate::id::AgentId>,

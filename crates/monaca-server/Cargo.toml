@@ -16,10 +16,16 @@ path = "src/main.rs"
 [dependencies]
 monaca-types = { workspace = true }
 monaca-audit = { workspace = true }
+monaca-crypto = { workspace = true }
+monaca-store = { workspace = true }
+monaca-oidc = { workspace = true }
+monaca-agent = { workspace = true }
+monaca-policy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
+sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
@@ -27,6 +33,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { workspace = true }
 anyhow = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+data-encoding = { workspace = true }
+rand_core = { workspace = true }
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` is what the router test drives the app with; `axum::body::to_bytes`

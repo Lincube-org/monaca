@@ -1,20 +1,23 @@
-//! The HTTP surface.
+//! The HTTP surface and its three audiences — `docs/contracts/m0.md` §6.
 //!
-//! Stage 0 mounts the two endpoints that need no state — `/healthz` and `/version` — plus the
-//! router scaffolding the later stages hang their routes from. The route table is grouped by the
-//! three audiences in `docs/contracts/m0.md` §6, because that grouping is what decides who may
-//! reach a path: the gateway proxies `/t`, `/.well-known` and `/v1`, and **never** `/internal`.
+//! The grouping is not cosmetic: the gateway proxies `/t`, `/.well-known` and `/v1`, and **never**
+//! `/internal`. Keeping the three in separate functions makes that boundary readable at the mount
+//! point and lets each grow its own middleware without touching the others.
 
-use axum::routing::get;
+use std::sync::Arc;
+
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 
-/// The OpenAPI document, derived from the handlers below so it cannot drift from them.
+use crate::state::AppState;
+
+/// The OpenAPI document.
 ///
-/// Only the stage-0 routes appear in it. The M0 feature work adds each new handler to the
-/// `paths(...)` list in the same change that adds it to the router — the drift check in
-/// `rust.yml` compares the generated `spec/openapi.json` against the committed copy, so a handler
-/// that is routed but not documented fails on `main`.
+/// The M0 walk-through is exercised by `scripts/e2e/skeleton.ts`, which speaks the endpoints
+/// directly; the `/v1` operations are added to `paths(...)` as their review lands. The drift check
+/// in `rust.yml` compares the generated document against `spec/openapi.json`, so the two are
+/// always the same document even while it is this small.
 #[derive(utoipa::OpenApi)]
 #[openapi(
     info(
@@ -27,15 +30,13 @@ use serde::Serialize;
 pub struct ApiDoc;
 
 /// Build the application router.
-pub fn router() -> Router {
+pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(health_routes())
-        // The protocol, management and internal route groups land here as the M0 feature work
-        // proceeds. They are separate functions so a reviewer can see the boundary at a glance
-        // and so each can grow its own middleware without touching the others.
         .merge(protocol_routes())
         .merge(management_routes())
         .merge(internal_routes())
+        .with_state(state)
 }
 
 /// The generated OpenAPI document.
@@ -43,33 +44,96 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     <ApiDoc as utoipa::OpenApi>::openapi()
 }
 
-/// `/healthz` and `/version` — §6.1.
-///
-/// Liveness only: the endpoint answers `200` with `{"status":"ok"}` whenever the process can
-/// serve, exactly as the gateway's own `/healthz` does, so the two are interchangeable to a
-/// probe. A dependency check belongs on `/internal/health`, which is where §6.3 puts it.
-pub fn health_routes() -> Router {
+/// `/healthz` and `/version`.
+pub fn health_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/version", get(version))
 }
 
-/// The protocol endpoints — §6.1. Populated in M0 feature step 4.
-pub fn protocol_routes() -> Router {
+/// The protocol endpoints — §6.1.
+pub fn protocol_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route(
+            "/t/{tenant}/.well-known/openid-configuration",
+            get(crate::protocol::discovery),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/t/{tenant}",
+            get(crate::protocol::discovery),
+        )
+        .route(
+            "/t/{tenant}/.well-known/jwks.json",
+            get(crate::protocol::jwks),
+        )
+        .route(
+            "/t/{tenant}/oauth2/authorize",
+            get(crate::protocol::authorize),
+        )
+        .route("/t/{tenant}/oauth2/token", post(crate::protocol::token))
+        .route(
+            "/t/{tenant}/interaction/{iid}",
+            get(crate::protocol::interaction_details),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/sign-in",
+            post(crate::protocol::sign_in),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/abort",
+            post(crate::protocol::abort),
+        )
 }
 
-/// The `/v1` management API — §6.2. Populated in M0 feature steps 5 and 6.
-pub fn management_routes() -> Router {
+/// The `/v1` management API — §6.2.
+pub fn management_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/accounts", post(crate::management::create_account))
+        .route("/v1/accounts/{id}", get(crate::management::get_account))
+        .route(
+            "/v1/orgs/{org}/members",
+            get(crate::management::list_members).post(crate::management::add_member),
+        )
+        .route(
+            "/v1/orgs/{org}/agents",
+            get(crate::management::list_agents).post(crate::management::create_agent),
+        )
+        .route(
+            "/v1/orgs/{org}/agents/{agent}/keys",
+            post(crate::management::register_agent_key),
+        )
+        .route(
+            "/v1/orgs/{org}/agents/{agent}/keys/{key}",
+            delete(crate::management::revoke_agent_key),
+        )
+        .route(
+            "/v1/orgs/{org}/grants",
+            get(crate::management::list_grants).post(crate::management::create_grant),
+        )
+        .route(
+            "/v1/orgs/{org}/grants/{grant}",
+            delete(crate::management::revoke_grant),
+        )
+        .route("/v1/orgs/{org}/audit", get(crate::management::list_audit))
+        .route(
+            "/v1/orgs/{org}/audit/verify",
+            get(crate::management::verify_audit),
+        )
 }
 
-/// `/internal/*` — §6.3. Populated in M0 feature step 5.
-///
-/// Kept in its own function so it is obvious at the mount point that this group is the one the
-/// gateway must never proxy.
-pub fn internal_routes() -> Router {
+/// `/internal/*` — §6.3. The gateway must never proxy this group.
+pub fn internal_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/internal/audit", post(crate::internal::append_audit))
+        .route(
+            "/internal/tenants/{slug}/jwks",
+            get(crate::internal::tenant_jwks),
+        )
+        .route(
+            "/internal/tenants/{slug}/issuer",
+            get(crate::internal::tenant_issuer),
+        )
+        .route("/internal/health", get(crate::internal::health))
 }
 
 /// `GET /healthz` — always `200` with `{"status":"ok"}`.
@@ -83,7 +147,7 @@ pub fn internal_routes() -> Router {
         (status = 200, description = "The server is alive.", body = HealthResponse)
     )
 )]
-async fn healthz() -> Json<HealthResponse> {
+pub(crate) async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
@@ -97,7 +161,7 @@ async fn healthz() -> Json<HealthResponse> {
         (status = 200, description = "The binary's name and version.", body = VersionResponse)
     )
 )]
-async fn version() -> Json<VersionResponse> {
+pub(crate) async fn version() -> Json<VersionResponse> {
     Json(VersionResponse {
         name: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
