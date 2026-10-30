@@ -34,14 +34,20 @@ export interface InteractionDetails {
   consent_required: boolean;
   /** Whether a cross-application session already authenticated this interaction. */
   signed_in: boolean;
+  /** Whether the primary factor passed and the account still owes an authenticator code. */
+  mfa_required: boolean;
   expires_at: string;
 }
 
 /**
- * The sign-in result is a union because a third-party client (or `prompt=consent`) pauses after
- * authentication: the server has not minted a code yet and waits for `submitConsent`.
+ * The sign-in result is a union because authentication can pause twice: a third-party client (or
+ * `prompt=consent`) waits for `submitConsent`, and an account with an authenticator app waits for
+ * `verifyMfa` before anything is minted (§6.1 `mfa`).
  */
-export type SignInResult = { redirect_to: string } | { consent_required: true };
+export type SignInResult =
+  | { redirect_to: string }
+  | { consent_required: true }
+  | { mfa_required: true; factors: string[] };
 
 /**
  * The answer to every code-request endpoint. It is deliberately the same whether or not an account
@@ -231,6 +237,18 @@ export function resetPassword(
   return call<SignInResult>(`${base(tenant, iid)}/password/reset`, {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+/** Prove the second factor with the six-digit code from the authenticator app. */
+export function verifyMfa(
+  tenant: string,
+  iid: string,
+  code: string,
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/mfa/verify`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
   });
 }
 

@@ -464,6 +464,94 @@ impl Store {
         Ok(())
     }
 
+    /// The account's envelope-encrypted TOTP secret, or `None` when MFA is not enrolled.
+    ///
+    /// The blob is sealed by the caller: the store has no key provider and must never see plaintext
+    /// authenticator secrets (§5.6 `credentials.secret_enc`).
+    pub async fn totp_secret(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, (Vec<u8>,)>(
+            "SELECT secret_enc FROM tenant.credentials
+             WHERE account_id = $1 AND kind = 'totp' LIMIT 1",
+        )
+        .bind(account_id.uuid())
+        .fetch_optional(&pool)
+        .await?
+        .map(|(bytes,)| bytes))
+    }
+
+    /// Replace the account's TOTP credential with a freshly sealed secret.
+    ///
+    /// One TOTP row per account, for the same reason as [`Store::set_password`]: the sign-in path
+    /// reads it without having to pick a winner, and a re-enrollment must not leave the old
+    /// authenticator working.
+    pub async fn set_totp_secret(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        sealed: &[u8],
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query("DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'totp'")
+            .bind(account_id.uuid())
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO tenant.credentials (id, account_id, kind, secret_enc)
+             VALUES ($1,$2,'totp',$3)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(account_id.uuid())
+        .bind(sealed)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Remove the account's TOTP credential. `true` when one existed.
+    pub async fn delete_totp_secret(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'totp'",
+        )
+        .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record a successful TOTP use, so an operator can see the factor is live.
+    pub async fn touch_totp(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "UPDATE tenant.credentials SET last_used_at = $2
+             WHERE account_id = $1 AND kind = 'totp'",
+        )
+        .bind(account_id.uuid())
+        .bind(at)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
     /// The account's role in an org, or `None` when it is not a member.
     pub async fn org_member_role(
         &self,

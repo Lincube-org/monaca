@@ -13,6 +13,7 @@
 //   3b the same request widened to `tools:write` is refused
 //   4  `list_notes` succeeds; 4b `delete_note` is refused with `insufficient_scope`
 //   5  the audit page shows account → grant → agent → token(jti) → tool and the chain verifies
+import { createHmac } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describeNetError } from "../lib/net.ts";
@@ -95,6 +96,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
     assertion:
       "sign-up → GET /internal/mail code → sign-up/verify → token; sign-in/code → code → verify → token; " +
       "password/forgot → password/reset → the old password is 401 and the new one signs in",
+  },
+  {
+    step: "9",
+    title: "two-step verification",
+    assertion:
+      "POST /t/demo/account/mfa/totp (session cookie) → secret + otpauth_url; verify a computed TOTP → enabled; " +
+      "a new sign-in answers {\"mfa_required\":true}; a wrong code is 401 and the right one mints a token; " +
+      "DELETE the credential → the next sign-in needs one factor again",
   },
 ];
 
@@ -1059,6 +1068,229 @@ async function emailFlow(base: string, consoleSecret: string, internalSecret: st
   };
 }
 
+/** Decode the base32 secret an authenticator app stores (RFC 4648, no padding). */
+function base32Decode(input: string): Buffer {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const symbol of input.replaceAll("=", "").toUpperCase()) {
+    const index = alphabet.indexOf(symbol);
+    if (index < 0) throw new Error(`invalid base32 symbol ${JSON.stringify(symbol)}`);
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((value >>> bits) & 0xff);
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+/** RFC 6238, SHA-1, six digits, 30-second steps — the code an authenticator app would show now. */
+function totpFromBase32(secret: string, at: number = Date.now()): string {
+  const step = Math.floor(at / 1000 / 30);
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(step));
+  const digest = createHmac("sha1", base32Decode(secret)).update(counter).digest();
+  const offset = digest[digest.length - 1]! & 0x0f;
+  const value =
+    ((digest[offset]! & 0x7f) << 24) |
+    (digest[offset + 1]! << 16) |
+    (digest[offset + 2]! << 8) |
+    digest[offset + 3]!;
+  return String(value % 1_000_000).padStart(6, "0");
+}
+
+/**
+ * Step 9 — the authenticator (TOTP) factor.
+ *
+ * A dedicated account is created for the run: enrolling the second factor on the bootstrap admin
+ * would make every later walk-through answer `mfa_required`. The code is computed locally with the
+ * secret the setup endpoint returned, which is exactly what an authenticator app does.
+ */
+async function mfaFlow(base: string, adminToken: string, consoleSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const email = `mfa-${runId}@demo.localhost`;
+  const password = `pw-${runId}-mfa-account`;
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "9",
+    title: "two-step verification",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `m-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  try {
+    // --- a dedicated account, already a member of acme ------------------------------------------
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "MFA flow", password }),
+    });
+    const accountId = (account.body as { id?: string })?.id;
+    if (account.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    // --- first sign-in: one factor, so the flow completes and leaves the SSO cookie -------------
+    const first = await signIn("first");
+    if (first === undefined) return fail("");
+    checks.push([
+      "a fresh account signs in with one factor",
+      first.status === 200 && (first.body as { redirect_to?: unknown })?.redirect_to !== undefined,
+    ]);
+    if (first.cookie === undefined) return fail("the first sign-in set no session cookie");
+    const cookie = { cookie: `monaca_session=${first.cookie}` };
+
+    // --- enrollment: secret + otpauth URL, confirmed with a locally computed code ---------------
+    const enrollment = await call(`${base}/t/${TENANT}/account/mfa/totp`, { method: "POST", headers: cookie });
+    const secret = (enrollment.body as { secret?: unknown })?.secret;
+    checks.push([
+      "the setup endpoint returns a base32 secret and an otpauth URL",
+      enrollment.status === 200 &&
+        typeof secret === "string" &&
+        typeof (enrollment.body as { otpauth_url?: unknown })?.otpauth_url === "string",
+    ]);
+    if (typeof secret !== "string") return fail(`POST /account/mfa/totp → ${enrollment.status} ${text(enrollment.body)}`);
+
+    const confirmed = await call(`${base}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push([
+      "a computed authenticator code enables the factor",
+      confirmed.status === 200 && (confirmed.body as { enabled?: unknown })?.enabled === true,
+    ]);
+
+    const profile = await call(`${base}/t/${TENANT}/account`, { headers: cookie });
+    checks.push([
+      "GET /account reports totp enabled",
+      profile.status === 200 && ((profile.body as { mfa?: { totp?: unknown } })?.mfa?.totp) === true,
+    ]);
+
+    // --- sign-in now pauses for the second factor -----------------------------------------------
+    const challenged = await signIn("challenged");
+    if (challenged === undefined) return fail("");
+    checks.push([
+      "a new sign-in answers mfa_required instead of a redirect",
+      challenged.status === 200 &&
+        (challenged.body as { mfa_required?: unknown })?.mfa_required === true &&
+        (challenged.body as { redirect_to?: unknown })?.redirect_to === undefined,
+    ]);
+
+    const wrong = String((Number(totpFromBase32(secret)[0]) + 1) % 10) + totpFromBase32(secret).slice(1);
+    const refused = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: wrong }),
+    });
+    checks.push(["a wrong authenticator code is refused", refused.status === 401]);
+
+    const verified = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    const mfaToken = await exchange((verified.body as { redirect_to?: unknown })?.redirect_to, challenged.verifier);
+    checks.push([
+      "the correct code completes the flow and issues a token",
+      verified.status === 200 && mfaToken.status === 200,
+    ]);
+
+    // --- removal: the account is back to one factor ---------------------------------------------
+    const removed = await call(`${base}/t/${TENANT}/account/mfa/totp`, { method: "DELETE", headers: cookie });
+    checks.push(["DELETE removes the authenticator", removed.status === 204]);
+
+    const plain = await signIn("plain");
+    if (plain === undefined) return fail("");
+    const plainRedirect = (plain.body as { redirect_to?: unknown })?.redirect_to;
+    const plainToken = await exchange(plainRedirect, plain.verifier);
+    checks.push([
+      "sign-in needs one factor again",
+      plain.status === 200 && plainRedirect !== undefined && plainToken.status === 200,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "9",
+    title: "two-step verification",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: enroll → challenge → wrong code refused → token → remove → one factor`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /**
  * The UUID inside a `<prefix>_<suffix>` typed id, so a `ses_…` returned by the API can be compared
  * with the raw UUID the cookie carries. The suffix is 130 bits of Crockford base32 (§5.2).
@@ -1239,6 +1471,7 @@ async function main(): Promise<number> {
   push(await browserFlow(base, parsed.consoleSecret));
   push(await sessionFlow(base, parsed.consoleSecret, adminToken));
   push(await emailFlow(base, parsed.consoleSecret, parsed.internalSecret));
+  push(await mfaFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

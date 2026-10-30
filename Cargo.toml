@@ -84,6 +84,10 @@ subtle = "2.6.1"
 # Mixing rand 0.9 in here would mean a second getrandom/OsRng root for no benefit.
 rand_core = { version = "0.6.4", features = ["std", "getrandom"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
+# RFC 6238 TOTP. HMAC-SHA1 is the default every authenticator app assumes, so the
+# authenticator segment of MFA must not advertise anything else (§6.1 `mfa`).
+hmac = "0.12.1"
+sha1 = "0.10.6"
 # Envelope encryption for tenant DEKs, signing keys and passkey/TOTP blobs (§5.6 `secret_enc`).
 # AES-256-GCM is the RustCrypto default and keeps the single-stack rule the p256 pin protects.
 aes-gcm = { version = "0.10.3", features = ["aes", "alloc"] }

@@ -7,6 +7,7 @@
 //! * the **management** API under `/v1`, bearer-authenticated with `monaca:admin`;
 //! * **`/internal/*`**, shared-secret authenticated, the only way the Bun side writes core data.
 
+mod account;
 mod bootstrap;
 mod cli;
 mod config;

@@ -80,6 +80,13 @@ pub mod kinds {
         "Too many attempts",
         429,
     );
+    /// The account already has an authenticator app; replacing it is a deliberate removal first.
+    pub const MFA_ALREADY_ENABLED: ProblemKind = ProblemKind::new(
+        "mfa_already_enabled",
+        "MONACA_MFA_ALREADY_ENABLED",
+        "MFA already enabled",
+        409,
+    );
     /// The server could not complete a valid request.
     pub const INTERNAL: ProblemKind =
         ProblemKind::new("internal", "MONACA_INTERNAL", "Internal error", 500);
@@ -271,6 +278,7 @@ mod tests {
             kinds::WEAK_PASSWORD,
             kinds::INVALID_VERIFICATION_CODE,
             kinds::TOO_MANY_ATTEMPTS,
+            kinds::MFA_ALREADY_ENABLED,
             kinds::INTERNAL,
         ] {
             assert!(kind.code().starts_with("MONACA_"));

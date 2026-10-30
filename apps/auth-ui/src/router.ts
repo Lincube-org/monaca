@@ -23,6 +23,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/pages/SignInPage.vue"),
   },
   {
+    path: "/account/:tenant",
+    name: "account",
+    component: () => import("@/pages/AccountPage.vue"),
+  },
+  {
     path: "/",
     name: "root",
     component: () => import("@/pages/SignInPage.vue"),

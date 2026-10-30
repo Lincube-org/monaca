@@ -26,6 +26,8 @@ argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
 tokio = { workspace = true }
 
 [features]

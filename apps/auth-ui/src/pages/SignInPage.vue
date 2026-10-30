@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, ScopeBadge, Skeleton } from "@monaca/ui";
-import { AlertCircle, ArrowLeft, Check, Eye, EyeOff, Loader2, LockKeyhole, Mail } from "lucide-vue-next";
+import { AlertCircle, ArrowLeft, Check, Eye, EyeOff, Loader2, LockKeyhole, Mail, ShieldCheck } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 
 import {
   InteractionError,
   getInteraction,
   submitSignIn,
+  verifyMfa,
   submitConsent,
   abortInteraction,
   navigateTo,
@@ -58,6 +59,13 @@ const consentRequired = ref(false);
 const consentSubmitting = ref(false);
 const consentError = ref<Error | null>(null);
 
+/** Set once the password (or code) was accepted and the authenticator is still owed. */
+const mfaRequired = ref(false);
+const mfaCode = ref("");
+const mfaSubmitting = ref(false);
+const mfaError = ref<InteractionError | null>(null);
+const mfaInput = ref<InstanceType<typeof Input> | null>(null);
+
 /**
  * Which authentication flow the page is showing. The interaction is the same in all four; only the
  * proof of identity changes (password, an emailed code, a new account, a password reset).
@@ -86,6 +94,7 @@ const awaitingCode = computed(() => mode.value !== "password" && stage.value ===
 
 const pageTitle = computed<MessageKey>(() => {
   if (consentRequired.value) return "consent.title";
+  if (mfaRequired.value) return "mfa.title";
   switch (mode.value) {
     case "code":
       return "emailCode.title";
@@ -100,6 +109,8 @@ const pageTitle = computed<MessageKey>(() => {
 
 /** The line under the title: what this flow will do. */
 const modeNote = computed<MessageKey>(() => {
+  if (consentRequired.value) return "consent.request";
+  if (mfaRequired.value) return details.value ? "mfa.note" : "mfa.noteFallback";
   switch (mode.value) {
     case "code":
       return "emailCode.note";
@@ -175,6 +186,27 @@ const loadErrorMessage = computed<MessageKey>(() => {
   return "errors.generic";
 });
 
+const mfaErrorMessage = computed<MessageKey>(() => {
+  const error = mfaError.value;
+  if (!error) return "errors.generic";
+  switch (error.code) {
+    case "MONACA_INVALID_VERIFICATION_CODE":
+      return "errors.mfaInvalidCode";
+    case "MONACA_TOO_MANY_ATTEMPTS":
+      return "errors.mfaTooManyAttempts";
+    case "MONACA_INTERACTION_EXPIRED":
+      return "errors.interactionExpired";
+    case "MONACA_INTERACTION_CONSUMED":
+      return "errors.interactionConsumed";
+    case "MONACA_INTERACTION_NOT_FOUND":
+      return "errors.interactionNotFound";
+    case "MONACA_UNREACHABLE":
+      return "errors.network";
+    default:
+      return "errors.generic";
+  }
+});
+
 const submitErrorMessage = computed<MessageKey>(() => {
   const error = submitError.value;
   if (!error) return "errors.generic";
@@ -225,12 +257,20 @@ onMounted(async () => {
     if (details.value.signed_in && details.value.consent_required) {
       consentRequired.value = true;
     }
+    // A page reload after the password was accepted must resume the second-factor step rather than
+    // ask for the password again (§6.1 `mfa`).
+    if (details.value.mfa_required) {
+      mfaRequired.value = true;
+    }
   } catch (error) {
     loadError.value = error instanceof Error ? error : new Error(String(error));
   } finally {
     loading.value = false;
     await nextTick();
-    if (!loadError.value) emailInput.value?.$el?.focus?.();
+    if (!loadError.value) {
+      if (mfaRequired.value) mfaInput.value?.$el?.focus?.();
+      else emailInput.value?.$el?.focus?.();
+    }
   }
 });
 
@@ -261,10 +301,18 @@ function changeEmail(): void {
   void nextTick(() => emailInput.value?.$el?.focus?.());
 }
 
-/** A code was accepted: either the flow is done, or consent is the only step left. */
+/** A code was accepted: the flow is done, or it pauses for consent or the second factor. */
 function handleResult(result: SignInResult): void {
   if ("consent_required" in result) {
+    // The code is withheld until the scopes are approved; the second factor is already satisfied.
+    mfaRequired.value = false;
     consentRequired.value = true;
+    return;
+  }
+  if ("mfa_required" in result) {
+    mfaRequired.value = true;
+    password.value = "";
+    void nextTick(() => mfaInput.value?.$el?.focus?.());
     return;
   }
   navigateTo(result.redirect_to);
@@ -272,9 +320,40 @@ function handleResult(result: SignInResult): void {
 
 /** The form's one submit handler: it names the step the current mode is on. */
 async function submit(): Promise<void> {
+  if (mfaRequired.value) return verifySecondFactor();
   if (mode.value === "password") return signIn();
   if (stage.value === "request") return requestCode();
   return verifyCode();
+}
+
+/** The second-factor step: six digits from the authenticator app (§6.1 `mfa`). */
+async function verifySecondFactor(): Promise<void> {
+  fieldError.value = null;
+  mfaError.value = null;
+  const submitted = mfaCode.value.trim();
+  if (!/^[0-9]{6}$/.test(submitted)) {
+    fieldError.value = "errors.mfaCodeRequired";
+    return;
+  }
+  if (!tenantFromUrl.value || !interactionId.value) return;
+
+  mfaSubmitting.value = true;
+  try {
+    handleResult(await verifyMfa(tenantFromUrl.value, interactionId.value, submitted));
+  } catch (error) {
+    mfaError.value = error instanceof InteractionError ? error : null;
+    if (!(error instanceof InteractionError)) {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+    // A rejected code is burned for this attempt; clearing the field makes a retype deliberate.
+    if (error instanceof InteractionError && error.code === "MONACA_INVALID_VERIFICATION_CODE") {
+      mfaCode.value = "";
+    }
+    await nextTick();
+    mfaInput.value?.$el?.focus?.();
+  } finally {
+    mfaSubmitting.value = false;
+  }
 }
 
 async function signIn(): Promise<void> {
@@ -482,7 +561,7 @@ async function cancel(): Promise<void> {
               {{
                 details
                   ? t(consentRequired ? "consent.request" : modeNote, { client: details.client.name })
-                  : t("signIn.requestFallback")
+                  : t(mfaRequired ? "mfa.noteFallback" : "signIn.requestFallback")
               }}
             </p>
           </div>
@@ -538,6 +617,56 @@ async function cancel(): Promise<void> {
               {{ t("errors.consentFailed") }}
             </p>
           </div>
+
+          <!-- Second factor: the password was right, the authenticator code is the last step. -->
+          <form v-else-if="mfaRequired" class="flex flex-col gap-4" @submit.prevent="submit">
+            <div class="flex flex-col gap-1.5">
+              <Label for="signin-mfa-code">{{ t("mfa.code") }}</Label>
+              <Input
+                id="signin-mfa-code"
+                ref="mfaInput"
+                v-model="mfaCode"
+                type="text"
+                name="code"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                pattern="[0-9]{6}"
+                spellcheck="false"
+                :placeholder="t('mfa.codePlaceholder')"
+                :invalid="fieldError === 'errors.mfaCodeRequired' || mfaError !== null"
+                :aria-describedby="fieldError || mfaError ? 'signin-error' : undefined"
+              />
+            </div>
+
+            <p
+              v-if="fieldError || mfaError"
+              id="signin-error"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ t(fieldError ?? mfaErrorMessage) }}
+            </p>
+
+            <div class="flex flex-col gap-2">
+              <Button type="submit" variant="primary" block :disabled="mfaSubmitting" :aria-busy="mfaSubmitting">
+                <Loader2 v-if="mfaSubmitting" class="animate-spin" />
+                <ShieldCheck v-else />
+                {{ mfaSubmitting ? t("mfa.verifying") : t("mfa.verify") }}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                block
+                :disabled="cancelling || mfaSubmitting"
+                @click="cancel"
+              >
+                <ArrowLeft />
+                {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
+              </Button>
+            </div>
+          </form>
 
           <form v-else class="flex flex-col gap-4" @submit.prevent="submit">
             <div class="flex flex-col gap-1.5">

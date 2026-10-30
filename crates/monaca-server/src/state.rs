@@ -9,6 +9,7 @@ use monaca_oidc::Interaction as InteractionRequest;
 use monaca_store::{OrgRow, Store, TenantRow};
 use monaca_types::{Clock, KeyId, OrgCtx, SystemClock};
 use serde_json::Value;
+use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -26,6 +27,10 @@ pub struct StoredInteraction {
     pub signed_in_account: Option<Uuid>,
     /// The SSO session the sign-in established, carried into the authorization code.
     pub session_id: Option<Uuid>,
+    /// The account that passed the primary factor and still owes a TOTP code (§6.1 `mfa`).
+    pub mfa_account: Option<Uuid>,
+    /// Wrong TOTP codes tried on this interaction; five ends it.
+    pub mfa_attempts: u32,
 }
 
 /// Everything a handler needs.
@@ -43,6 +48,10 @@ pub struct AppState {
     /// Pending logins, keyed by `int_…`. In-memory in M0: the gateway is a single process, and an
     /// interaction is short-lived by design. M1 moves this to a table so the server can scale out.
     interactions: Mutex<HashMap<String, StoredInteraction>>,
+    /// In-flight TOTP enrollments, keyed by account: the secret generated for a setup page that has
+    /// not been confirmed yet. In-memory for the same reason as `interactions` — an enrollment is
+    /// one continuous visit (§6.1 `mfa`).
+    totp_enrollments: Mutex<HashMap<Uuid, (Vec<u8>, OffsetDateTime)>>,
     /// The active signing key per tenant, decoded. Cached because every token needs it and the
     /// private half is sealed at rest.
     signing: Mutex<HashMap<Uuid, Arc<SigningKeyPair>>>,
@@ -60,6 +69,7 @@ impl AppState {
             argon: Argon2Params::from_env(),
             clock: Arc::new(SystemClock),
             interactions: Mutex::new(HashMap::new()),
+            totp_enrollments: Mutex::new(HashMap::new()),
             signing: Mutex::new(HashMap::new()),
         }))
     }
@@ -72,6 +82,13 @@ impl AppState {
     /// A tenant by slug.
     pub async fn tenant(&self, slug: &str) -> Result<TenantRow, ApiError> {
         Ok(self.store.tenant_by_slug(slug).await?)
+    }
+
+    /// The tenant's data-encryption key, for sealing per-account secrets such as a TOTP seed.
+    pub fn tenant_dek(&self, tenant: &TenantRow) -> Result<[u8; 32], ApiError> {
+        self.keys
+            .tenant_dek(&tenant.tenant_id())
+            .ok_or_else(|| ApiError::internal("tenant DEK missing"))
     }
 
     /// An org by slug, or the configured default when the slug is empty.
@@ -149,6 +166,8 @@ impl AppState {
                 consumed: false,
                 signed_in_account: None,
                 session_id: None,
+                mfa_account: None,
+                mfa_attempts: 0,
             },
         );
     }
@@ -243,6 +262,114 @@ impl AppState {
             .ok_or(monaca_oidc::InteractionError::NotSignedIn)?;
         stored.consumed = true;
         Ok((stored.interaction.clone(), account, stored.session_id))
+    }
+
+    /// Remember that the primary factor passed and a TOTP code is still owed.
+    ///
+    /// The interaction stays redeemable: nothing is signed in yet, so a reload must find the same
+    /// challenge rather than a fresh sign-in form.
+    pub async fn mark_mfa_pending(
+        &self,
+        id: &str,
+        account: Uuid,
+    ) -> Result<(), monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        if stored.mfa_account != Some(account) {
+            stored.mfa_attempts = 0;
+        }
+        stored.mfa_account = Some(account);
+        Ok(())
+    }
+
+    /// The account waiting for a TOTP code on this interaction, if any.
+    pub async fn mfa_pending(
+        &self,
+        id: &str,
+    ) -> Result<Option<Uuid>, monaca_oidc::InteractionError> {
+        let now = self.now();
+        let map = self.interactions.lock().await;
+        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        Ok(stored.mfa_account)
+    }
+
+    /// Count a rejected TOTP code, returning the running total.
+    pub async fn record_mfa_failure(
+        &self,
+        id: &str,
+    ) -> Result<u32, monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        stored.mfa_attempts += 1;
+        Ok(stored.mfa_attempts)
+    }
+
+    /// Drop the challenge once a code verified, so the sign-in can finish.
+    pub async fn clear_mfa_pending(&self, id: &str) -> Result<(), monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        stored.mfa_account = None;
+        stored.mfa_attempts = 0;
+        Ok(())
+    }
+
+    /// Hold the unconfirmed secret of a TOTP setup until the user proves the app works.
+    pub async fn put_totp_enrollment(
+        &self,
+        account: Uuid,
+        secret: Vec<u8>,
+        expires_at: OffsetDateTime,
+    ) {
+        let now = self.now();
+        let mut map = self.totp_enrollments.lock().await;
+        map.retain(|_, (_, expiry)| *expiry > now);
+        map.insert(account, (secret, expires_at));
+    }
+
+    /// The pending TOTP secret of a setup, if it has not expired.
+    pub async fn totp_enrollment(&self, account: Uuid) -> Option<Vec<u8>> {
+        let now = self.now();
+        let mut map = self.totp_enrollments.lock().await;
+        map.retain(|_, (_, expiry)| *expiry > now);
+        map.get(&account).map(|(secret, _)| secret.clone())
+    }
+
+    /// Forget a pending setup, e.g. when the account removes or replaces it.
+    pub async fn drop_totp_enrollment(&self, account: Uuid) {
+        self.totp_enrollments.lock().await.remove(&account);
     }
 
     /// Append an audit event to an org chain in its own transaction.

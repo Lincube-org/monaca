@@ -21,12 +21,18 @@ mod jws;
 mod keys;
 mod password;
 mod secret;
+mod totp;
 
 pub use jwk::{jwk_thumbprint, verify_embedded_jwk};
 pub use jws::{SigningKeyPair, decode_unverified, verify_jws, verify_jws_with_audience};
 pub use keys::{DevEnvKeyProvider, Jwks, generate_pkcs8_der, open, public_jwk_from_der, seal};
 pub use password::{Argon2Params, hash_password, verify_password};
 pub use secret::{DEFAULT_CODE_DIGITS, generate_numeric_code, hash_secret, verify_secret};
+pub use totp::{
+    DIGITS as TOTP_DIGITS, PERIOD_SECS as TOTP_PERIOD_SECS, SECRET_LEN as TOTP_SECRET_LEN,
+    base32_secret as totp_base32, code_at as totp_code, generate_secret as generate_totp_secret,
+    otpauth_url as totp_otpauth_url, verify as verify_totp,
+};
 
 /// Where a tenant's data-encryption key comes from.
 ///

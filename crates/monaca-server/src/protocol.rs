@@ -9,8 +9,8 @@ use axum::{Form, Json};
 use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
-    DEFAULT_CODE_DIGITS, generate_numeric_code, hash_password, hash_secret, verify_password,
-    verify_secret,
+    DEFAULT_CODE_DIGITS, generate_numeric_code, hash_password, hash_secret, open, verify_password,
+    verify_secret, verify_totp,
 };
 use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
@@ -292,7 +292,14 @@ pub async fn interaction_details(
         .peek_interaction_state(&iid)
         .await
         .map_err(ApiError::Interaction)?;
-    Ok(Json(interaction.to_public_json(signed_in.is_some())))
+    let mfa_required = state
+        .mfa_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?
+        .is_some();
+    let mut body = interaction.to_public_json(signed_in.is_some());
+    body["mfa_required"] = json!(mfa_required);
+    Ok(Json(body))
 }
 
 /// The sign-in body.
@@ -355,12 +362,45 @@ pub async fn sign_in(
     finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
 
-/// The tail every sign-in path shares: membership check, SSO session, consent pause or code mint.
+/// The tail every sign-in path shares: second factor, membership check, SSO session, consent pause
+/// or code mint.
+///
+/// Every primary proof — password, emailed code, a new account, a password reset — lands here, so
+/// all four agree on cookies, consent and MFA. An account with an authenticator app is stopped
+/// before anything is consumed: the interaction stays redeemable and the caller answers with the
+/// challenge shape instead of a redirect (§6.1 `mfa`).
+async fn finish_sign_in(
+    state: Arc<AppState>,
+    tenant: TenantRow,
+    interaction: Interaction,
+    iid: &str,
+    headers: &HeaderMap,
+    account: AccountRow,
+) -> Result<Response, ApiError> {
+    if state
+        .store
+        .totp_secret(&tenant, account.account_id())
+        .await?
+        .is_some()
+    {
+        state
+            .mark_mfa_pending(iid, account.id)
+            .await
+            .map_err(ApiError::Interaction)?;
+        return Ok(Json(json!({
+            "mfa_required": true,
+            "factors": ["totp"],
+        }))
+        .into_response());
+    }
+    complete_sign_in(state, tenant, interaction, iid, headers, account).await
+}
+
+/// Sign-in with every factor satisfied: membership check, SSO session, consent pause or code mint.
 ///
 /// Sign-in is only *recorded* here when the client demands consent; otherwise the interaction is
-/// consumed and the authorization code is minted. Keeping this in one place is what makes the
-/// password, email-code, sign-up and password-reset flows agree on cookies and consent.
-async fn finish_sign_in(
+/// consumed and the authorization code is minted.
+async fn complete_sign_in(
     state: Arc<AppState>,
     tenant: TenantRow,
     interaction: Interaction,
@@ -434,6 +474,9 @@ const VERIFICATION_RESEND_SECS: i64 = 60;
 
 /// Wrong guesses a code survives before it stops being checked.
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
+
+/// Wrong TOTP codes an interaction survives before the challenge is refused (§6.1 `mfa`).
+const MAX_MFA_ATTEMPTS: u32 = 5;
 
 /// The shortest accepted password, in characters.
 const MIN_PASSWORD_LEN: usize = 8;
@@ -842,6 +885,91 @@ pub async fn password_reset(
         .await?;
 
     finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// The second-factor body.
+#[derive(Debug, Deserialize)]
+pub struct MfaVerifyBody {
+    /// The six-digit TOTP from the authenticator app.
+    pub code: String,
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/mfa/verify` — prove the second factor.
+///
+/// The interaction remembers which account passed the primary factor, so this handler needs no
+/// credential of its own; it only proves possession of the authenticator enrolled for that account.
+pub async fn mfa_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<MfaVerifyBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let Some(account_id) = state
+        .mfa_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is not waiting for a second factor",
+        ));
+    };
+
+    let Some(account) = state
+        .store
+        .account_by_id(&tenant, AccountId::from_uuid(account_id))
+        .await?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    };
+    if account.state != "active" {
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    }
+
+    let Some(sealed) = state.store.totp_secret(&tenant, account.account_id()).await? else {
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    };
+    let dek = state.tenant_dek(&tenant)?;
+    let secret = open(&dek, &sealed)
+        .map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
+
+    if !verify_totp(&secret, &body.code, state.now()) {
+        let attempts = state
+            .record_mfa_failure(&iid)
+            .await
+            .map_err(ApiError::Interaction)?;
+        if attempts >= MAX_MFA_ATTEMPTS {
+            return Err(ApiError::problem(
+                kinds::TOO_MANY_ATTEMPTS,
+                "too many wrong second-factor codes",
+            ));
+        }
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    }
+
+    state
+        .clear_mfa_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    state
+        .store
+        .touch_totp(&tenant, account.account_id(), state.now())
+        .await?;
+
+    complete_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
 
 /// Reuse a valid cookie session for the same account, or insert a fresh one.

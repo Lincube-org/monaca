@@ -34,6 +34,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(health_routes())
         .merge(protocol_routes())
+        .merge(account_routes())
         .merge(management_routes())
         .merge(internal_routes())
         .with_state(state)
@@ -118,12 +119,33 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             post(crate::protocol::password_reset),
         )
         .route(
+            "/t/{tenant}/interaction/{iid}/mfa/verify",
+            post(crate::protocol::mfa_verify),
+        )
+        .route(
             "/t/{tenant}/interaction/{iid}/consent",
             post(crate::protocol::consent),
         )
         .route(
             "/t/{tenant}/interaction/{iid}/abort",
             post(crate::protocol::abort),
+        )
+}
+
+/// The signed-in account's own security settings — §6.1 `mfa`.
+///
+/// These live under `/t/{tenant}` because they are cookie-authenticated browser calls, not `/v1`
+/// management calls: only the account itself may enroll or remove its second factor.
+pub fn account_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/t/{tenant}/account", get(crate::account::get_account))
+        .route(
+            "/t/{tenant}/account/mfa/totp",
+            post(crate::account::begin_totp).delete(crate::account::disable_totp),
+        )
+        .route(
+            "/t/{tenant}/account/mfa/totp/verify",
+            post(crate::account::verify_totp_enrollment),
         )
 }
 
