@@ -20,11 +20,13 @@ mod jwk;
 mod jws;
 mod keys;
 mod password;
+mod secret;
 
 pub use jwk::{jwk_thumbprint, verify_embedded_jwk};
 pub use jws::{SigningKeyPair, decode_unverified, verify_jws, verify_jws_with_audience};
 pub use keys::{DevEnvKeyProvider, Jwks, generate_pkcs8_der, open, public_jwk_from_der, seal};
 pub use password::{Argon2Params, hash_password, verify_password};
+pub use secret::{DEFAULT_CODE_DIGITS, generate_numeric_code, hash_secret, verify_secret};
 
 /// Where a tenant's data-encryption key comes from.
 ///

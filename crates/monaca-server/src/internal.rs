@@ -6,10 +6,11 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use monaca_audit::AuditEvent;
+use monaca_store::topics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -102,6 +103,41 @@ pub async fn tenant_issuer(
     Ok(Json(json!({
         "issuer": tenant.issuer,
         "audiences": [state.config.management_audience()],
+    })))
+}
+
+/// The query of `GET /internal/mail`.
+#[derive(Debug, Deserialize)]
+pub struct MailQuery {
+    /// Tenant slug.
+    pub tenant: String,
+    /// The recipient address to look up.
+    pub to: String,
+    /// Optional `sign_up` | `sign_in` | `password_reset` filter.
+    pub purpose: Option<String>,
+}
+
+/// `GET /internal/mail` — the newest dev mail addressed to an address.
+///
+/// §6.3: a production deployment would hand these rows to a relay; in M0 and the acceptance run
+/// they are read back here, which is what lets `scripts/e2e/skeleton.ts` finish a verification
+/// flow without an SMTP server.
+pub async fn latest_mail(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<MailQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_secret(&state, &headers)?;
+    let tenant = state.tenant(&query.tenant).await?;
+    let payload = state
+        .store
+        .outbox_mail_latest(&tenant, &query.to, query.purpose.as_deref())
+        .await?
+        .ok_or_else(|| ApiError::problem(kinds::NOT_FOUND, "no mail for that address"))?;
+    Ok(Json(json!({
+        "to": query.to,
+        "topic": topics::MAIL,
+        "payload": payload,
     })))
 }
 

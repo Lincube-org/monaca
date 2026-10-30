@@ -155,6 +155,30 @@ pub struct ParRow {
     pub consumed_at: Option<OffsetDateTime>,
 }
 
+/// A short-lived email verification code in `tenant.verification_codes`.
+///
+/// Only the SHA-256 hex of the code is stored; the row is single-use through `consumed_at`, and
+/// `attempts` is the brute-force guard.
+#[derive(Debug, Clone, FromRow)]
+pub struct VerificationRow {
+    /// Row id.
+    pub id: Uuid,
+    /// `sign_up` | `sign_in` | `password_reset`.
+    pub purpose: String,
+    /// The normalised (trimmed, lowercase) email address.
+    pub identifier: String,
+    /// SHA-256 hex of the code.
+    pub code_hash: String,
+    /// Failed verification attempts so far.
+    pub attempts: i32,
+    /// When the code stops being accepted.
+    pub expires_at: OffsetDateTime,
+    /// When it was successfully redeemed.
+    pub consumed_at: Option<OffsetDateTime>,
+    /// When it was issued.
+    pub created_at: OffsetDateTime,
+}
+
 /// A sign-in session in `tenant.sessions`.
 ///
 /// `issued_at` is the authentication instant (`auth_time`); `last_seen_at` is the last time an
@@ -405,6 +429,41 @@ impl Store {
 
         let phc = secret.and_then(|(bytes,)| String::from_utf8(bytes).ok());
         Ok(Some((account, phc)))
+    }
+
+    /// Replace the account's password with a new argon2id PHC string.
+    ///
+    /// One password row per account is the invariant the sign-in path relies on, so the old row is
+    /// deleted rather than appended to. `credentials.kind` is checked, not merely assumed, so a
+    /// future passkey row can never be overwritten by this call.
+    pub async fn set_password(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        phc: &str,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "DELETE FROM tenant.credentials WHERE account_id = $1 AND kind = 'password'",
+        )
+        .bind(account_id.uuid())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO tenant.credentials (id, account_id, kind, secret_enc)
+             VALUES ($1,$2,'password',$3)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(account_id.uuid())
+        .bind(phc.as_bytes())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     /// The account's role in an org, or `None` when it is not a member.
@@ -762,6 +821,104 @@ impl Store {
         .execute(&pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    // ------------------------------------------------------- verification codes
+
+    /// Issue a verification code, retiring every earlier live code for the same purpose and
+    /// address in one transaction — an old code stops working the moment a new one is sent.
+    pub async fn insert_verification_code(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        identifier: &str,
+        code_hash: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "UPDATE tenant.verification_codes SET consumed_at = now()
+             WHERE purpose = $1 AND identifier = $2 AND consumed_at IS NULL",
+        )
+        .bind(purpose)
+        .bind(identifier)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO tenant.verification_codes (id, purpose, identifier, code_hash, expires_at)
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(purpose)
+        .bind(identifier)
+        .bind(code_hash)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The newest unconsumed code for a purpose and address, expired or not.
+    pub async fn verification_code_latest(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        identifier: &str,
+    ) -> Result<Option<VerificationRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, VerificationRow>(
+            "SELECT id, purpose, identifier, code_hash, attempts, expires_at, consumed_at, created_at
+             FROM tenant.verification_codes
+             WHERE purpose = $1 AND identifier = $2 AND consumed_at IS NULL
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(purpose)
+        .bind(identifier)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Count one failed attempt against a live code and return the new total.
+    ///
+    /// Returns `None` when the code was already consumed, which makes the caller's answer the
+    /// same as an unknown code.
+    pub async fn verification_code_attempt(
+        &self,
+        tenant: &TenantRow,
+        code_id: Uuid,
+    ) -> Result<Option<i32>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: Option<(i32,)> = sqlx::query_as(
+            "UPDATE tenant.verification_codes SET attempts = attempts + 1
+             WHERE id = $1 AND consumed_at IS NULL
+             RETURNING attempts",
+        )
+        .bind(code_id)
+        .fetch_optional(&pool)
+        .await?;
+        Ok(row.map(|(attempts,)| attempts))
+    }
+
+    /// Redeem a code. Returns whether this call was the one that consumed it.
+    pub async fn consume_verification_code(
+        &self,
+        tenant: &TenantRow,
+        code_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.verification_codes SET consumed_at = now()
+             WHERE id = $1 AND consumed_at IS NULL",
+        )
+        .bind(code_id)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     // ------------------------------------------------------------- signing keys
@@ -1467,6 +1624,32 @@ impl Store {
             .collect();
 
         Ok(verify_chain(&stored, head, from))
+    }
+
+    /// The newest dev mail row addressed to `to`, optionally filtered by `purpose`.
+    ///
+    /// This is the M0 stand-in for a real mail delivery: the server writes `mail.verification` to
+    /// the outbox and `GET /internal/mail` reads it back, so the acceptance script can finish a
+    /// verification flow without an SMTP transport. A production relay consumes the same rows.
+    pub async fn outbox_mail_latest(
+        &self,
+        tenant: &TenantRow,
+        to: &str,
+        purpose: Option<&str>,
+    ) -> Result<Option<Value>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: Option<(Value,)> = sqlx::query_as(
+            "SELECT payload FROM tenant.outbox
+             WHERE topic = 'mail.verification'
+               AND lower(payload->>'to') = lower($1)
+               AND ($2::text IS NULL OR payload->>'purpose' = $2)
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(to)
+        .bind(purpose)
+        .fetch_optional(&pool)
+        .await?;
+        Ok(row.map(|(payload,)| payload))
     }
 
     /// Insert an outbox row.

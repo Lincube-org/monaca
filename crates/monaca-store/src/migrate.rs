@@ -54,6 +54,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "sessions and RP-initiated logout (M1)",
         include_str!("../migrations/tenant_3.sql"),
     ),
+    (
+        4,
+        "email verification codes: sign-up, passwordless sign-in and password reset (M1)",
+        include_str!("../migrations/tenant_4.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

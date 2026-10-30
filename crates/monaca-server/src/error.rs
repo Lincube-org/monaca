@@ -52,6 +52,34 @@ pub mod kinds {
         "Grant revoked",
         409,
     );
+    /// Sign-up named an email that already has an account.
+    pub const ACCOUNT_EXISTS: ProblemKind = ProblemKind::new(
+        "account_exists",
+        "MONACA_ACCOUNT_EXISTS",
+        "Account exists",
+        409,
+    );
+    /// A new password is shorter than the contract's minimum.
+    pub const WEAK_PASSWORD: ProblemKind = ProblemKind::new(
+        "weak_password",
+        "MONACA_WEAK_PASSWORD",
+        "Password too short",
+        400,
+    );
+    /// The email code is unknown, expired, already used, or does not match.
+    pub const INVALID_VERIFICATION_CODE: ProblemKind = ProblemKind::new(
+        "invalid_verification_code",
+        "MONACA_INVALID_VERIFICATION_CODE",
+        "Invalid verification code",
+        401,
+    );
+    /// A code was requested too soon, or guessed too many times.
+    pub const TOO_MANY_ATTEMPTS: ProblemKind = ProblemKind::new(
+        "too_many_attempts",
+        "MONACA_TOO_MANY_ATTEMPTS",
+        "Too many attempts",
+        429,
+    );
     /// The server could not complete a valid request.
     pub const INTERNAL: ProblemKind =
         ProblemKind::new("internal", "MONACA_INTERNAL", "Internal error", 500);
@@ -239,6 +267,10 @@ mod tests {
             kinds::NOT_FOUND,
             kinds::PRIVATE_KEY_SUBMITTED,
             kinds::GRANT_REVOKED,
+            kinds::ACCOUNT_EXISTS,
+            kinds::WEAK_PASSWORD,
+            kinds::INVALID_VERIFICATION_CODE,
+            kinds::TOO_MANY_ATTEMPTS,
             kinds::INTERNAL,
         ] {
             assert!(kind.code().starts_with("MONACA_"));

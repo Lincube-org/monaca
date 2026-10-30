@@ -1,9 +1,24 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, ScopeBadge, Skeleton } from "@monaca/ui";
-import { AlertCircle, ArrowLeft, Check, Eye, EyeOff, Loader2, LockKeyhole } from "lucide-vue-next";
+import { AlertCircle, ArrowLeft, Check, Eye, EyeOff, Loader2, LockKeyhole, Mail } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 
-import { InteractionError, getInteraction, submitSignIn, submitConsent, abortInteraction, navigateTo, type InteractionDetails } from "@/api/interaction";
+import {
+  InteractionError,
+  getInteraction,
+  submitSignIn,
+  submitConsent,
+  abortInteraction,
+  navigateTo,
+  startSignUp,
+  verifySignUp,
+  requestSignInCode,
+  verifySignInCode,
+  requestPasswordReset,
+  resetPassword,
+  type InteractionDetails,
+  type SignInResult,
+} from "@/api/interaction";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -43,14 +58,93 @@ const consentRequired = ref(false);
 const consentSubmitting = ref(false);
 const consentError = ref<Error | null>(null);
 
+/**
+ * Which authentication flow the page is showing. The interaction is the same in all four; only the
+ * proof of identity changes (password, an emailed code, a new account, a password reset).
+ */
+type Mode = "password" | "code" | "signup" | "reset";
+const mode = ref<Mode>("password");
+/** `request` collects an address and mails a code; `verify` collects the code (and new secrets). */
+const stage = ref<"request" | "verify">("request");
+const code = ref("");
+const codeRequested = ref(false);
+const newPassword = ref("");
+const displayName = ref("");
+
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
+const codeInput = ref<InstanceType<typeof Input> | null>(null);
 
 const brandName = computed(
   () => details.value?.client.name || details.value?.tenant || tenantFromUrl.value || t("brand.fallbackTenant"),
 );
 const organization = computed(() => details.value?.organization ?? null);
 const scopes = computed(() => details.value?.scopes ?? []);
+
+/** True while the page collects a code rather than an address. */
+const awaitingCode = computed(() => mode.value !== "password" && stage.value === "verify");
+
+const pageTitle = computed<MessageKey>(() => {
+  if (consentRequired.value) return "consent.title";
+  switch (mode.value) {
+    case "code":
+      return "emailCode.title";
+    case "signup":
+      return "signUp.title";
+    case "reset":
+      return "reset.title";
+    default:
+      return "signIn.title";
+  }
+});
+
+/** The line under the title: what this flow will do. */
+const modeNote = computed<MessageKey>(() => {
+  switch (mode.value) {
+    case "code":
+      return "emailCode.note";
+    case "signup":
+      return "signUp.note";
+    case "reset":
+      return "reset.note";
+    default:
+      return "signIn.request";
+  }
+});
+
+const newPasswordLabel = computed<MessageKey>(() =>
+  mode.value === "reset" ? "reset.password" : "signUp.password",
+);
+const newPasswordHint = computed<MessageKey>(() =>
+  mode.value === "reset" ? "reset.passwordHint" : "signUp.passwordHint",
+);
+const changeEmailKey = computed<MessageKey>(() => {
+  switch (mode.value) {
+    case "signup":
+      return "signUp.changeEmail";
+    case "reset":
+      return "reset.changeEmail";
+    default:
+      return "emailCode.changeEmail";
+  }
+});
+
+/** The primary button's label, which names the next step rather than a generic "continue". */
+const primaryLabel = computed<MessageKey>(() => {
+  switch (mode.value) {
+    case "password":
+      return submitting.value ? "signIn.submitting" : "signIn.submit";
+    case "code":
+      if (awaitingCode.value) return submitting.value ? "emailCode.verifying" : "emailCode.verify";
+      return submitting.value ? "emailCode.sending" : "emailCode.send";
+    case "signup":
+      if (awaitingCode.value) return submitting.value ? "signUp.submitting" : "signUp.submit";
+      return submitting.value ? "signUp.sending" : "signUp.continue";
+    case "reset":
+      if (awaitingCode.value) return submitting.value ? "reset.submitting" : "reset.submit";
+      return submitting.value ? "reset.sending" : "reset.send";
+  }
+});
 
 /**
  * Explain the failure in the user's terms. The specific messages matter here: "this request expired,
@@ -87,6 +181,14 @@ const submitErrorMessage = computed<MessageKey>(() => {
   switch (error.code) {
     case "MONACA_INVALID_CREDENTIALS":
       return "errors.invalidCredentials";
+    case "MONACA_ACCOUNT_EXISTS":
+      return "errors.accountExists";
+    case "MONACA_WEAK_PASSWORD":
+      return "errors.weakPassword";
+    case "MONACA_INVALID_VERIFICATION_CODE":
+      return "errors.invalidCode";
+    case "MONACA_TOO_MANY_ATTEMPTS":
+      return "errors.tooManyAttempts";
     case "MONACA_INTERACTION_EXPIRED":
       return "errors.interactionExpired";
     case "MONACA_INTERACTION_CONSUMED":
@@ -132,6 +234,49 @@ onMounted(async () => {
   }
 });
 
+/** Leave the form for whichever flow the visitor picked, keeping only what it can reuse. */
+function switchMode(next: Mode): void {
+  mode.value = next;
+  stage.value = "request";
+  code.value = "";
+  codeRequested.value = false;
+  password.value = "";
+  newPassword.value = "";
+  displayName.value = "";
+  fieldError.value = null;
+  submitError.value = null;
+  void nextTick(() => {
+    if (next === "password") passwordInput.value?.$el?.focus?.();
+    else emailInput.value?.$el?.focus?.();
+  });
+}
+
+/** Return to the address step so a mistyped email can be corrected. */
+function changeEmail(): void {
+  stage.value = "request";
+  code.value = "";
+  codeRequested.value = false;
+  fieldError.value = null;
+  submitError.value = null;
+  void nextTick(() => emailInput.value?.$el?.focus?.());
+}
+
+/** A code was accepted: either the flow is done, or consent is the only step left. */
+function handleResult(result: SignInResult): void {
+  if ("consent_required" in result) {
+    consentRequired.value = true;
+    return;
+  }
+  navigateTo(result.redirect_to);
+}
+
+/** The form's one submit handler: it names the step the current mode is on. */
+async function submit(): Promise<void> {
+  if (mode.value === "password") return signIn();
+  if (stage.value === "request") return requestCode();
+  return verifyCode();
+}
+
 async function signIn(): Promise<void> {
   fieldError.value = null;
   submitError.value = null;
@@ -152,12 +297,7 @@ async function signIn(): Promise<void> {
       email: email.value.trim(),
       password: password.value,
     });
-    if ("consent_required" in result) {
-      // Authenticated, but the code is withheld until the user approves the scopes.
-      consentRequired.value = true;
-      return;
-    }
-    navigateTo(result.redirect_to);
+    handleResult(result);
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
     // Clear the password but keep the email: the user is about to try again.
@@ -167,6 +307,97 @@ async function signIn(): Promise<void> {
     }
     await nextTick();
     passwordInput.value?.$el?.focus?.();
+  } finally {
+    submitting.value = false;
+  }
+}
+
+/** Mail a code for the flow the visitor picked. */
+async function requestCode(): Promise<void> {
+  fieldError.value = null;
+  submitError.value = null;
+  if (email.value.trim().length === 0) {
+    fieldError.value = "errors.emailRequired";
+    return;
+  }
+  if (!tenantFromUrl.value || !interactionId.value) return;
+
+  submitting.value = true;
+  try {
+    const address = email.value.trim();
+    if (mode.value === "signup") {
+      await startSignUp(tenantFromUrl.value, interactionId.value, address);
+    } else if (mode.value === "code") {
+      await requestSignInCode(tenantFromUrl.value, interactionId.value, address);
+    } else {
+      await requestPasswordReset(tenantFromUrl.value, interactionId.value, address);
+    }
+    // The server answers the same way whether or not the address exists; a code is mailed either
+    // way and the verify step is where an unknown address fails, with the same generic answer.
+    stage.value = "verify";
+    codeRequested.value = true;
+    await nextTick();
+    codeInput.value?.$el?.focus?.();
+  } catch (error) {
+    submitError.value = error instanceof InteractionError ? error : null;
+    if (!(error instanceof InteractionError)) {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+  } finally {
+    submitting.value = false;
+  }
+}
+
+/** Redeem the code and finish the flow the visitor picked. */
+async function verifyCode(): Promise<void> {
+  fieldError.value = null;
+  submitError.value = null;
+  if (code.value.trim().length === 0) {
+    fieldError.value = "errors.codeRequired";
+    return;
+  }
+  if ((mode.value === "signup" || mode.value === "reset") && newPassword.value.length < 8) {
+    fieldError.value = "errors.weakPassword";
+    return;
+  }
+  if (!tenantFromUrl.value || !interactionId.value) return;
+
+  submitting.value = true;
+  try {
+    const address = email.value.trim();
+    const submitted = code.value.trim();
+    let result: SignInResult;
+    if (mode.value === "signup") {
+      result = await verifySignUp(tenantFromUrl.value, interactionId.value, {
+        email: address,
+        code: submitted,
+        password: newPassword.value,
+        display_name: displayName.value.trim() || undefined,
+      });
+    } else if (mode.value === "code") {
+      result = await verifySignInCode(tenantFromUrl.value, interactionId.value, {
+        email: address,
+        code: submitted,
+      });
+    } else {
+      result = await resetPassword(tenantFromUrl.value, interactionId.value, {
+        email: address,
+        code: submitted,
+        password: newPassword.value,
+      });
+    }
+    handleResult(result);
+  } catch (error) {
+    submitError.value = error instanceof InteractionError ? error : null;
+    if (!(error instanceof InteractionError)) {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+    // A rejected code is burned for this attempt; clearing the field makes a retype deliberate.
+    if (error instanceof InteractionError && error.code === "MONACA_INVALID_VERIFICATION_CODE") {
+      code.value = "";
+    }
+    await nextTick();
+    codeInput.value?.$el?.focus?.();
   } finally {
     submitting.value = false;
   }
@@ -245,12 +476,12 @@ async function cancel(): Promise<void> {
         <div v-else class="flex flex-col gap-4">
           <div>
             <h1 class="text-[17px] font-semibold leading-snug tracking-[-0.01em] text-ink">
-              {{ consentRequired ? t("consent.title") : t("signIn.title") }}
+              {{ t(pageTitle) }}
             </h1>
             <p class="mt-1 text-[12.5px] leading-snug text-ink-muted">
               {{
                 details
-                  ? t(consentRequired ? "consent.request" : "signIn.request", { client: details.client.name })
+                  ? t(consentRequired ? "consent.request" : modeNote, { client: details.client.name })
                   : t("signIn.requestFallback")
               }}
             </p>
@@ -308,7 +539,7 @@ async function cancel(): Promise<void> {
             </p>
           </div>
 
-          <form v-else class="flex flex-col gap-4" @submit.prevent="signIn">
+          <form v-else class="flex flex-col gap-4" @submit.prevent="submit">
             <div class="flex flex-col gap-1.5">
               <Label for="signin-email">{{ t("signIn.email") }}</Label>
               <Input
@@ -321,13 +552,45 @@ async function cancel(): Promise<void> {
                 inputmode="email"
                 spellcheck="false"
                 autocapitalize="none"
+                :disabled="awaitingCode"
                 :placeholder="t('signIn.emailPlaceholder')"
                 :invalid="fieldError === 'errors.emailRequired'"
                 :aria-describedby="fieldError ? 'signin-error' : undefined"
               />
+              <!-- The address is locked once a code was mailed, so the code always matches it. -->
+              <button
+                v-if="awaitingCode"
+                type="button"
+                class="self-start text-[11.5px] font-medium text-brand-strong hover:underline"
+                @click="changeEmail"
+              >
+                {{ t(changeEmailKey) }}
+              </button>
             </div>
 
-            <div class="flex flex-col gap-1.5">
+            <div v-if="awaitingCode" class="flex flex-col gap-1.5">
+              <Label for="signin-code">{{ t("emailCode.code") }}</Label>
+              <Input
+                id="signin-code"
+                ref="codeInput"
+                v-model="code"
+                type="text"
+                name="code"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                pattern="[0-9]{6}"
+                spellcheck="false"
+                :placeholder="t('emailCode.codePlaceholder')"
+                :invalid="fieldError === 'errors.codeRequired' || submitError !== null"
+                :aria-describedby="fieldError || submitError ? 'signin-error' : undefined"
+              />
+              <p v-if="codeRequested" class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t("emailCode.sent") }}
+              </p>
+            </div>
+
+            <div v-if="mode === 'password'" class="flex flex-col gap-1.5">
               <Label for="signin-password">{{ t("signIn.password") }}</Label>
               <div class="relative">
                 <Input
@@ -354,6 +617,45 @@ async function cancel(): Promise<void> {
               </div>
             </div>
 
+            <div v-if="awaitingCode && (mode === 'signup' || mode === 'reset')" class="flex flex-col gap-1.5">
+              <Label for="signin-new-password">{{ t(newPasswordLabel) }}</Label>
+              <div class="relative">
+                <Input
+                  id="signin-new-password"
+                  v-model="newPassword"
+                  :type="revealPassword ? 'text' : 'password'"
+                  name="new-password"
+                  autocomplete="new-password"
+                  class="pr-9"
+                  :invalid="fieldError === 'errors.weakPassword'"
+                  :aria-describedby="fieldError === 'errors.weakPassword' ? 'signin-error' : undefined"
+                />
+                <button
+                  type="button"
+                  class="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-surface-muted hover:text-ink"
+                  :aria-label="revealPassword ? t('signIn.hidePassword') : t('signIn.showPassword')"
+                  :aria-pressed="revealPassword"
+                  @click="revealPassword = !revealPassword"
+                >
+                  <EyeOff v-if="revealPassword" class="size-3.5" aria-hidden="true" />
+                  <Eye v-else class="size-3.5" aria-hidden="true" />
+                </button>
+              </div>
+              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t(newPasswordHint) }}</p>
+            </div>
+
+            <div v-if="awaitingCode && mode === 'signup'" class="flex flex-col gap-1.5">
+              <Label for="signin-display-name">{{ t("signUp.displayName") }}</Label>
+              <Input
+                id="signin-display-name"
+                v-model="displayName"
+                type="text"
+                name="name"
+                autocomplete="name"
+                :placeholder="t('signUp.displayNamePlaceholder')"
+              />
+            </div>
+
             <!-- Field-level or submission error, in one place, wired through aria-describedby. -->
             <p
               v-if="fieldError || submitError"
@@ -368,8 +670,9 @@ async function cancel(): Promise<void> {
             <div class="flex flex-col gap-2">
               <Button type="submit" variant="primary" block :disabled="submitting" :aria-busy="submitting">
                 <Loader2 v-if="submitting" class="animate-spin" />
+                <Mail v-else-if="mode !== 'password' && !awaitingCode" />
                 <LockKeyhole v-else />
-                {{ submitting ? t("signIn.submitting") : t("signIn.submit") }}
+                {{ t(primaryLabel) }}
               </Button>
               <Button
                 type="button"
@@ -383,7 +686,55 @@ async function cancel(): Promise<void> {
               </Button>
             </div>
 
-            <p class="text-center text-[11.5px] leading-relaxed text-ink-faint">{{ t("signIn.footnote") }}</p>
+            <!-- Four ways in, one interaction; the links only appear once no code is in flight. -->
+            <div
+              v-if="!awaitingCode"
+              class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11.5px]"
+            >
+              <button
+                v-if="mode !== 'password'"
+                type="button"
+                class="font-medium text-brand-strong hover:underline"
+                :disabled="submitting"
+                @click="switchMode('password')"
+              >
+                {{ t("modes.password") }}
+              </button>
+              <button
+                v-if="mode !== 'code'"
+                type="button"
+                class="font-medium text-brand-strong hover:underline"
+                :disabled="submitting"
+                @click="switchMode('code')"
+              >
+                {{ t("modes.code") }}
+              </button>
+              <button
+                v-if="mode !== 'signup'"
+                type="button"
+                class="font-medium text-brand-strong hover:underline"
+                :disabled="submitting"
+                @click="switchMode('signup')"
+              >
+                {{ t("modes.signUp") }}
+              </button>
+              <button
+                v-if="mode !== 'reset'"
+                type="button"
+                class="font-medium text-brand-strong hover:underline"
+                :disabled="submitting"
+                @click="switchMode('reset')"
+              >
+                {{ t("modes.reset") }}
+              </button>
+            </div>
+
+            <p
+              v-if="mode === 'password'"
+              class="text-center text-[11.5px] leading-relaxed text-ink-faint"
+            >
+              {{ t("signIn.footnote") }}
+            </p>
           </form>
         </div>
       </div>

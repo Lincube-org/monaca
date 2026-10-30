@@ -8,12 +8,15 @@ use axum::response::{IntoResponse, Response};
 use axum::{Form, Json};
 use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
-use monaca_crypto::verify_password;
+use monaca_crypto::{
+    DEFAULT_CODE_DIGITS, generate_numeric_code, hash_password, hash_secret, verify_password,
+    verify_secret,
+};
 use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
     Interaction, TokenErrorCode, TokenForm, TokenRequest, at_hash, scope_subset, verify_pkce_s256,
 };
-use monaca_store::{AccountRow, OrgRow, TenantRow};
+use monaca_store::{AccountRow, OrgRow, TenantRow, topics};
 use monaca_types::{AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -355,6 +358,26 @@ pub async fn sign_in(
         ));
     };
 
+    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// The tail every sign-in path shares: membership check, SSO session, consent pause or code mint.
+///
+/// Sign-in is only *recorded* here when the client demands consent; otherwise the interaction is
+/// consumed and the authorization code is minted. Keeping this in one place is what makes the
+/// password, email-code, sign-up and password-reset flows agree on cookies and consent.
+async fn finish_sign_in(
+    state: Arc<AppState>,
+    tenant: TenantRow,
+    interaction: Interaction,
+    iid: &str,
+    headers: &HeaderMap,
+    account: AccountRow,
+) -> Result<Response, ApiError> {
+    let org_slug = interaction.organization.clone();
+    let org = state.store.org_by_slug(&tenant, &org_slug).await?;
+    let org_ctx = org.ctx(&tenant);
+
     // The account must be a member of the org the flow issues into.
     let mut tx = state.store.begin_org(&org_ctx).await?;
     let role = state
@@ -371,14 +394,15 @@ pub async fn sign_in(
 
     // Establish (or reuse) the cross-application session before the code is minted, so the browser
     // leaves sign-in with the SSO cookie and the next application skips the password page.
-    let session_id = establish_session(&state, &tenant, &headers, &account, interaction.client_row_id).await?;
+    let session_id =
+        establish_session(&state, &tenant, headers, &account, interaction.client_row_id).await?;
 
     // A third-party client (or `prompt=consent`) pauses here: the page must ask the user to
     // approve the scopes before a code is minted. Sign-in is recorded but not consumed, so the
     // consent step can redeem it.
     if interaction.consent_required {
         state
-            .mark_interaction_signed_in(&iid, account.id, session_id)
+            .mark_interaction_signed_in(iid, account.id, session_id)
             .await
             .map_err(ApiError::Interaction)?;
         let response = Json(json!({ "consent_required": true })).into_response();
@@ -387,12 +411,426 @@ pub async fn sign_in(
 
     // Consume only after authentication succeeds, so a typo does not burn the interaction.
     let interaction = state
-        .consume_interaction(&iid)
+        .consume_interaction(iid)
         .await
         .map_err(ApiError::Interaction)?;
 
     let response = approve_interaction(state.clone(), tenant, interaction, account, Some(session_id)).await?;
     Ok(with_session_cookie(response, session_id, &state))
+}
+
+/// How long an emailed code stays usable.
+const VERIFICATION_CODE_TTL_SECS: i64 = 600;
+
+/// The shortest wait between two codes for the same purpose and address.
+const VERIFICATION_RESEND_SECS: i64 = 60;
+
+/// Wrong guesses a code survives before it stops being checked.
+const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
+
+/// The shortest accepted password, in characters.
+const MIN_PASSWORD_LEN: usize = 8;
+
+/// The `verification_codes.purpose` values the email flows write.
+const PURPOSE_SIGN_UP: &str = "sign_up";
+const PURPOSE_SIGN_IN: &str = "sign_in";
+const PURPOSE_PASSWORD_RESET: &str = "password_reset";
+
+/// The body of every code-request endpoint.
+#[derive(Debug, Deserialize)]
+pub struct EmailBody {
+    /// The address to mail the code to.
+    pub email: String,
+}
+
+/// `POST …/sign-up/verify` body.
+#[derive(Debug, Deserialize)]
+pub struct SignUpVerifyBody {
+    /// The address the code was mailed to.
+    pub email: String,
+    /// The six-digit code from the mail.
+    pub code: String,
+    /// The initial password.
+    pub password: String,
+    /// Optional display name; the address's local part is used when absent.
+    pub display_name: Option<String>,
+}
+
+/// The body of the email-code sign-in verification.
+#[derive(Debug, Deserialize)]
+pub struct CodeVerifyBody {
+    /// The address the code was mailed to.
+    pub email: String,
+    /// The six-digit code from the mail.
+    pub code: String,
+}
+
+/// `POST …/password/reset` body.
+#[derive(Debug, Deserialize)]
+pub struct PasswordResetBody {
+    /// The address the code was mailed to.
+    pub email: String,
+    /// The six-digit code from the mail.
+    pub code: String,
+    /// The new password.
+    pub password: String,
+}
+
+/// Normalise and validate an address the way the code table indexes it.
+fn normalise_email(email: &str) -> Result<String, ApiError> {
+    let normalised = email.trim().to_lowercase();
+    if normalised.is_empty() || !normalised.contains('@') {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "email must be an address",
+        ));
+    }
+    Ok(normalised)
+}
+
+/// Reject a password shorter than the contract's minimum.
+fn check_password(password: &str) -> Result<(), ApiError> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(ApiError::problem(
+            kinds::WEAK_PASSWORD,
+            format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+        ));
+    }
+    Ok(())
+}
+
+/// The interaction and its tenant, or the interaction error the page should render.
+async fn interaction_and_tenant(
+    state: &Arc<AppState>,
+    iid: &str,
+) -> Result<(Interaction, TenantRow), ApiError> {
+    let interaction = state
+        .peek_interaction(iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    let tenant = state.tenant(&interaction.tenant).await?;
+    Ok((interaction, tenant))
+}
+
+/// Mint a code, mail it through the dev outbox and answer the request endpoint.
+///
+/// The answer is identical whether or not an account exists, so a caller cannot enumerate
+/// addresses; sign-in and forgot-password both call this unconditionally.
+async fn request_verification(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    purpose: &str,
+    email: &str,
+) -> Result<Json<Value>, ApiError> {
+    let now = state.now();
+    if let Some(row) = state
+        .store
+        .verification_code_latest(tenant, purpose, email)
+        .await?
+        && now - row.created_at < Duration::seconds(VERIFICATION_RESEND_SECS)
+    {
+        return Err(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "a code was requested moments ago; try again shortly",
+        ));
+    }
+
+    let code = generate_numeric_code(DEFAULT_CODE_DIGITS);
+    let expires_at = now + Duration::seconds(VERIFICATION_CODE_TTL_SECS);
+    state
+        .store
+        .insert_verification_code(tenant, purpose, email, &hash_secret(&code), expires_at)
+        .await?;
+
+    // §6.3: the outbox is how the Bun side and the acceptance script see what would be mailed.
+    let mut tx = state.store.begin_tenant(tenant).await?;
+    state
+        .store
+        .outbox_append(
+            &mut *tx,
+            topics::MAIL,
+            &json!({
+                "to": email,
+                "purpose": purpose,
+                "code": code,
+                "expires_at": expires_at.unix_timestamp(),
+            }),
+        )
+        .await?;
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "verification_required": true,
+        "expires_in": VERIFICATION_CODE_TTL_SECS,
+    })))
+}
+
+/// Verify and redeem a code, counting the attempt before comparing so guesses cost.
+///
+/// Every rejection is the same 401 except the brute-force limit, which is a 429: an attacker
+/// learns nothing about whether a live code existed, only that they have exhausted it.
+async fn take_verification_code(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    purpose: &str,
+    email: &str,
+    code: &str,
+) -> Result<(), ApiError> {
+    let invalid =
+        || ApiError::problem(kinds::INVALID_VERIFICATION_CODE, "the code is incorrect or expired");
+
+    let Some(row) = state
+        .store
+        .verification_code_latest(tenant, purpose, email)
+        .await?
+    else {
+        return Err(invalid());
+    };
+    if row.expires_at <= state.now() {
+        return Err(invalid());
+    }
+    if row.attempts >= MAX_VERIFICATION_ATTEMPTS {
+        return Err(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "too many guesses; request a new code",
+        ));
+    }
+    let Some(attempts) = state.store.verification_code_attempt(tenant, row.id).await? else {
+        return Err(invalid());
+    };
+    if attempts > MAX_VERIFICATION_ATTEMPTS {
+        return Err(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "too many guesses; request a new code",
+        ));
+    }
+    if !verify_secret(code.trim(), &row.code_hash) {
+        return Err(invalid());
+    }
+    if !state
+        .store
+        .consume_verification_code(tenant, row.id)
+        .await?
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-up` — start self-service registration.
+pub async fn sign_up(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    Json(body): Json<EmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    if state
+        .store
+        .account_by_email(&tenant, &email)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::ACCOUNT_EXISTS,
+            "an account with this email already exists",
+        ));
+    }
+    request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-up/verify` — prove the address and sign in.
+pub async fn sign_up_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<SignUpVerifyBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    check_password(&body.password)?;
+    // A second registration for the same address is a conflict even with a valid code, because
+    // the code proves the address, not the account's absence.
+    if state
+        .store
+        .account_by_email(&tenant, &email)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::ACCOUNT_EXISTS,
+            "an account with this email already exists",
+        ));
+    }
+    take_verification_code(&state, &tenant, PURPOSE_SIGN_UP, &email, &body.code).await?;
+
+    let phc = hash_password(body.password.clone(), state.argon)
+        .await
+        .map_err(ApiError::internal)?;
+    let display_name = body
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_owned());
+    let account = state
+        .store
+        .create_account(
+            &tenant,
+            AccountId::new(),
+            &email,
+            &display_name,
+            Some(&phc),
+            false,
+        )
+        .await?;
+
+    // The new account joins the org the interaction issues into, so the flow can complete without
+    // an admin round-trip. The org and tenant chains both record it (§8.1).
+    let org = state.store.org_by_slug(&tenant, &interaction.organization).await?;
+    let org_ctx = org.ctx(&tenant);
+    let mut tx = state.store.begin_org(&org_ctx).await?;
+    state
+        .store
+        .org_member_add(&mut *tx, account.account_id(), "member")
+        .await?;
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "org.member.added".into(),
+        actor_chain: vec![AuditActor::account(account.account_id())],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account.account_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "org": org.slug, "role": "member", "self_service": true }),
+    };
+    state
+        .store
+        .audit_append(&mut *tx, &org_ctx.schema_name, &event)
+        .await?;
+    tx.commit().await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "account.created".into(),
+        actor_chain: vec![AuditActor::account(account.account_id())],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account.account_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "email": account.primary_email, "self_service": true }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append account.created audit event");
+    }
+
+    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-in/code` — request a passwordless sign-in code.
+pub async fn sign_in_code(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    Json(body): Json<EmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    request_verification(&state, &tenant, PURPOSE_SIGN_IN, &email).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-in/code/verify`.
+pub async fn sign_in_code_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<CodeVerifyBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    take_verification_code(&state, &tenant, PURPOSE_SIGN_IN, &email, &body.code).await?;
+
+    let Some((account, _)) = state.store.account_by_email(&tenant, &email).await? else {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "email or code is incorrect",
+        ));
+    };
+    if account.state != "active" {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "email or code is incorrect",
+        ));
+    }
+    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/password/forgot` — request a reset code.
+pub async fn password_forgot(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    Json(body): Json<EmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    request_verification(&state, &tenant, PURPOSE_PASSWORD_RESET, &email).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/password/reset` — prove the address, set a new password.
+pub async fn password_reset(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordResetBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    check_password(&body.password)?;
+    take_verification_code(
+        &state,
+        &tenant,
+        PURPOSE_PASSWORD_RESET,
+        &email,
+        &body.code,
+    )
+    .await?;
+
+    let Some((account, _)) = state.store.account_by_email(&tenant, &email).await? else {
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    };
+    if account.state != "active" {
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    }
+
+    let phc = hash_password(body.password.clone(), state.argon)
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .set_password(&tenant, account.account_id(), &phc)
+        .await?;
+    // Every existing session belonged to whoever knew the old password. The browser's cookie is
+    // revoked too, and `finish_sign_in` issues a fresh session for this reset flow.
+    state
+        .store
+        .revoke_account_sessions(&tenant, account.account_id())
+        .await?;
+
+    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
 
 /// Reuse a valid cookie session for the same account, or insert a fresh one.

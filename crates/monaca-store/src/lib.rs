@@ -34,7 +34,7 @@ pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, AuditRow, AuthCodeRow, ClientRow, GrantRow, ParRow,
-    RefreshRow, SessionRow, SigningKeyRow,
+    RefreshRow, SessionRow, SigningKeyRow, VerificationRow,
 };
 
 /// A storage failure.
@@ -112,6 +112,8 @@ pub mod topics {
     pub const TENANT: &str = "tenant";
     /// An agent or grant changed.
     pub const AGENT: &str = "agent";
+    /// A dev mail message, read back by `GET /internal/mail`; a real relay consumes it later.
+    pub const MAIL: &str = "mail.verification";
 }
 
 /// How the store reaches PostgreSQL — §2.2.

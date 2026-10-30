@@ -14,6 +14,10 @@
 /** One shape per documented error, so a page can branch without matching on strings. */
 export type InteractionErrorCode =
   | "MONACA_INVALID_CREDENTIALS"
+  | "MONACA_ACCOUNT_EXISTS"
+  | "MONACA_WEAK_PASSWORD"
+  | "MONACA_INVALID_VERIFICATION_CODE"
+  | "MONACA_TOO_MANY_ATTEMPTS"
   | "MONACA_INTERACTION_NOT_FOUND"
   | "MONACA_INTERACTION_EXPIRED"
   | "MONACA_INTERACTION_CONSUMED"
@@ -38,6 +42,16 @@ export interface InteractionDetails {
  * authentication: the server has not minted a code yet and waits for `submitConsent`.
  */
 export type SignInResult = { redirect_to: string } | { consent_required: true };
+
+/**
+ * The answer to every code-request endpoint. It is deliberately the same whether or not an account
+ * exists, so the page neither confirms nor denies an address (§6.1).
+ */
+export interface CodeRequestResult {
+  verification_required: true;
+  /** How long the code stays usable, in seconds. */
+  expires_in: number;
+}
 
 export class InteractionError extends Error {
   readonly code: InteractionErrorCode;
@@ -72,6 +86,10 @@ export class InteractionError extends Error {
 function codeFor(status: number, monacaCode: string | undefined): InteractionErrorCode {
   switch (monacaCode) {
     case "MONACA_INVALID_CREDENTIALS":
+    case "MONACA_ACCOUNT_EXISTS":
+    case "MONACA_WEAK_PASSWORD":
+    case "MONACA_INVALID_VERIFICATION_CODE":
+    case "MONACA_TOO_MANY_ATTEMPTS":
     case "MONACA_INTERACTION_NOT_FOUND":
     case "MONACA_INTERACTION_EXPIRED":
     case "MONACA_INTERACTION_CONSUMED":
@@ -81,6 +99,8 @@ function codeFor(status: number, monacaCode: string | undefined): InteractionErr
       break;
   }
   switch (status) {
+    case 400:
+      return "MONACA_INVALID_REQUEST";
     case 401:
       return "MONACA_INVALID_CREDENTIALS";
     case 404:
@@ -89,6 +109,8 @@ function codeFor(status: number, monacaCode: string | undefined): InteractionErr
       return "MONACA_INTERACTION_EXPIRED";
     case 409:
       return "MONACA_INTERACTION_CONSUMED";
+    case 429:
+      return "MONACA_TOO_MANY_ATTEMPTS";
     default:
       // 5xx (including a dev proxy with nothing behind it) and anything else unexpected.
       return status >= 500 || status === 0 ? "MONACA_UNREACHABLE" : "MONACA_INVALID_REQUEST";
@@ -145,6 +167,70 @@ export function submitSignIn(
   return call<SignInResult>(`${base(tenant, iid)}/sign-in`, {
     method: "POST",
     body: JSON.stringify(credentials),
+  });
+}
+
+/** Start self-service registration: mails a code for the address. */
+export function startSignUp(tenant: string, iid: string, email: string): Promise<CodeRequestResult> {
+  return call<CodeRequestResult>(`${base(tenant, iid)}/sign-up`, {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Prove the address, create the account and finish the flow. */
+export function verifySignUp(
+  tenant: string,
+  iid: string,
+  body: { email: string; code: string; password: string; display_name?: string },
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/sign-up/verify`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Request a passwordless sign-in code. */
+export function requestSignInCode(tenant: string, iid: string, email: string): Promise<CodeRequestResult> {
+  return call<CodeRequestResult>(`${base(tenant, iid)}/sign-in/code`, {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Redeem the sign-in code. */
+export function verifySignInCode(
+  tenant: string,
+  iid: string,
+  body: { email: string; code: string },
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/sign-in/code/verify`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Request a password-reset code. */
+export function requestPasswordReset(
+  tenant: string,
+  iid: string,
+  email: string,
+): Promise<CodeRequestResult> {
+  return call<CodeRequestResult>(`${base(tenant, iid)}/password/forgot`, {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Redeem the reset code and set a new password. */
+export function resetPassword(
+  tenant: string,
+  iid: string,
+  body: { email: string; code: string; password: string },
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/password/reset`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 

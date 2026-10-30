@@ -89,6 +89,13 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "GET/DELETE /v1/accounts/{id}/sessions manage it; " +
       "GET /t/demo/oauth2/end-session echoes state, clears the cookie and a later silent authorize is login_required",
   },
+  {
+    step: "8",
+    title: "email verification",
+    assertion:
+      "sign-up → GET /internal/mail code → sign-up/verify → token; sign-in/code → code → verify → token; " +
+      "password/forgot → password/reset → the old password is 401 and the new one signs in",
+  },
 ];
 
 interface StepResult {
@@ -130,6 +137,8 @@ function usage(): string {
     "                         set it to the tenant's real secret anywhere else.",
     "  --console-secret <s>   the console client's secret, for the browser-flow step. Defaults to",
     "                         the dev value.",
+    "  --internal-secret <s>  the /internal/* shared secret, for reading the dev mail outbox.",
+    "                         Defaults to $MONACA_INTERNAL_SECRET, then the dev value.",
     "  --report <path>        where to write the JSON report (default .monaca/reports/skeleton.json).",
     "  --json                 print only the report, not the human-readable lines.",
     "",
@@ -138,12 +147,13 @@ function usage(): string {
   ].join("\n");
 }
 
-function parseArgs(argv: string[]): { baseUrl: string; report: string; json: boolean; adminSecret: string; consoleSecret: string } | { error: string } {
+function parseArgs(argv: string[]): { baseUrl: string; report: string; json: boolean; adminSecret: string; consoleSecret: string; internalSecret: string } | { error: string } {
   let baseUrl: string | undefined;
   let report = REPORT;
   let json = false;
   let adminSecret = "dev-admin-client-secret";
   let consoleSecret = "dev-console-client-secret";
+  let internalSecret = process.env.MONACA_INTERNAL_SECRET ?? "dev-internal-secret-change-me";
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--base-url") {
@@ -169,6 +179,12 @@ function parseArgs(argv: string[]): { baseUrl: string; report: string; json: boo
       consoleSecret = value;
     } else if (arg?.startsWith("--console-secret=")) {
       consoleSecret = arg.slice("--console-secret=".length);
+    } else if (arg === "--internal-secret") {
+      const value = argv[++i];
+      if (value === undefined) return { error: "--internal-secret needs a value" };
+      internalSecret = value;
+    } else if (arg?.startsWith("--internal-secret=")) {
+      internalSecret = arg.slice("--internal-secret=".length);
     } else if (arg === "--json") {
       json = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -178,7 +194,7 @@ function parseArgs(argv: string[]): { baseUrl: string; report: string; json: boo
     }
   }
   if (baseUrl === undefined || baseUrl.trim() === "") return { error: "--base-url is required" };
-  return { baseUrl: baseUrl.trim(), report, json, adminSecret, consoleSecret };
+  return { baseUrl: baseUrl.trim(), report, json, adminSecret, consoleSecret, internalSecret };
 }
 
 /** Normalises the origin: no trailing slash, so `${base}/healthz` is well formed. */
@@ -861,6 +877,189 @@ async function sessionFlow(base: string, consoleSecret: string, adminToken: stri
 }
 
 /**
+ * The email-verification flows: self-service registration, passwordless sign-in and password reset.
+ *
+ * The code is not guessed: it is read back from the dev outbox through `/internal/mail`, which is
+ * the M0 stand-in for a mail relay. Every flow gets its own interaction, because sign-up, sign-in
+ * and reset each consume one.
+ */
+async function emailFlow(base: string, consoleSecret: string, internalSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const email = `signup-${runId}@example.test`;
+  const password = `pw-${runId}-old-password`;
+  const newPassword = `pw-${runId}-new-password`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  /** A fresh authorize → interaction, so each flow starts from a clean challenge. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `e-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** The newest dev mail for this address and purpose, or undefined when none arrived. */
+  const mailCode = async (purpose: string): Promise<string | undefined> => {
+    const query = new URLSearchParams({ tenant: TENANT, to: email, purpose });
+    const response = await call(`${base}/internal/mail?${query}`, {
+      headers: { "x-monaca-internal-secret": internalSecret },
+    });
+    const code = (response.body as { payload?: { code?: unknown } } | undefined)?.payload?.code;
+    return response.status === 200 && typeof code === "string" ? code : undefined;
+  };
+
+  /** Redeem the code in `redirect_to` for a token, proving the whole flow completed. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  try {
+    // --- sign-up: request → mail → verify → token ----------------------------------------------
+    const signUp = await begin("signup");
+    if (signUp === undefined) {
+      return { step: "8", title: "email verification", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const signUpRequest = await call(`${base}/t/${TENANT}/interaction/${signUp.interaction}/sign-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    checks.push([
+      "sign-up requests a code",
+      signUpRequest.status === 200 && (signUpRequest.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+    const signUpCode = await mailCode("sign_up");
+    checks.push(["dev mail delivered a sign-up code", typeof signUpCode === "string" && /^\d{6}$/.test(signUpCode)]);
+
+    const signUpVerify = await call(`${base}/t/${TENANT}/interaction/${signUp.interaction}/sign-up/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, code: signUpCode ?? "", password, display_name: "Email flow" }),
+    });
+    const signUpToken = await exchange((signUpVerify.body as { redirect_to?: unknown })?.redirect_to, signUp.verifier);
+    const signUpClaims = jwtClaims((signUpToken.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "sign-up completed and issued a token",
+      signUpVerify.status === 200 && signUpToken.status === 200 && signUpClaims?.email === email,
+    ]);
+
+    // --- passwordless sign-in: request → mail → verify → token ---------------------------------
+    const codeSignIn = await begin("code");
+    if (codeSignIn === undefined) {
+      return { step: "8", title: "email verification", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const codeRequest = await call(`${base}/t/${TENANT}/interaction/${codeSignIn.interaction}/sign-in/code`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    checks.push([
+      "code sign-in requests a code",
+      codeRequest.status === 200 && (codeRequest.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+    const signInCode = await mailCode("sign_in");
+    checks.push(["dev mail delivered a sign-in code", typeof signInCode === "string" && /^\d{6}$/.test(signInCode)]);
+
+    const codeVerify = await call(`${base}/t/${TENANT}/interaction/${codeSignIn.interaction}/sign-in/code/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, code: signInCode ?? "" }),
+    });
+    const codeToken = await exchange((codeVerify.body as { redirect_to?: unknown })?.redirect_to, codeSignIn.verifier);
+    checks.push(["code sign-in issued a token", codeVerify.status === 200 && codeToken.status === 200]);
+
+    // --- password reset: forgot → mail → reset → token -----------------------------------------
+    const reset = await begin("reset");
+    if (reset === undefined) {
+      return { step: "8", title: "email verification", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const forgot = await call(`${base}/t/${TENANT}/interaction/${reset.interaction}/password/forgot`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    checks.push([
+      "password reset requests a code",
+      forgot.status === 200 && (forgot.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+    const resetCode = await mailCode("password_reset");
+    checks.push(["dev mail delivered a reset code", typeof resetCode === "string" && /^\d{6}$/.test(resetCode)]);
+
+    const resetResponse = await call(`${base}/t/${TENANT}/interaction/${reset.interaction}/password/reset`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, code: resetCode ?? "", password: newPassword }),
+    });
+    const resetToken = await exchange((resetResponse.body as { redirect_to?: unknown })?.redirect_to, reset.verifier);
+    checks.push(["password reset issued a token", resetResponse.status === 200 && resetToken.status === 200]);
+
+    // --- the reset really changed the credential -----------------------------------------------
+    const oldPassword = await begin("oldpw");
+    if (oldPassword === undefined) {
+      return { step: "8", title: "email verification", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const refused = await call(`${base}/t/${TENANT}/interaction/${oldPassword.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    checks.push(["the old password is refused", refused.status === 401]);
+
+    const newPasswordFlow = await begin("newpw");
+    if (newPasswordFlow === undefined) {
+      return { step: "8", title: "email verification", status: "fail", ms: Math.round(performance.now() - t), detail };
+    }
+    const accepted = await call(`${base}/t/${TENANT}/interaction/${newPasswordFlow.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: newPassword }),
+    });
+    const acceptedToken = await exchange((accepted.body as { redirect_to?: unknown })?.redirect_to, newPasswordFlow.verifier);
+    checks.push(["the new password signs in", accepted.status === 200 && acceptedToken.status === 200]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "8",
+    title: "email verification",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: sign-up → code sign-in → password reset → old password refused`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
  * The UUID inside a `<prefix>_<suffix>` typed id, so a `ses_…` returned by the API can be compared
  * with the raw UUID the cookie carries. The suffix is 130 bits of Crockford base32 (§5.2).
  */
@@ -1039,6 +1238,7 @@ async function main(): Promise<number> {
   push(await auditChain(base, adminToken, walk));
   push(await browserFlow(base, parsed.consoleSecret));
   push(await sessionFlow(base, parsed.consoleSecret, adminToken));
+  push(await emailFlow(base, parsed.consoleSecret, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

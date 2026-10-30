@@ -94,6 +94,30 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             post(crate::protocol::sign_in),
         )
         .route(
+            "/t/{tenant}/interaction/{iid}/sign-up",
+            post(crate::protocol::sign_up),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/sign-up/verify",
+            post(crate::protocol::sign_up_verify),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/sign-in/code",
+            post(crate::protocol::sign_in_code),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/sign-in/code/verify",
+            post(crate::protocol::sign_in_code_verify),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/password/forgot",
+            post(crate::protocol::password_forgot),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/password/reset",
+            post(crate::protocol::password_reset),
+        )
+        .route(
             "/t/{tenant}/interaction/{iid}/consent",
             post(crate::protocol::consent),
         )
@@ -161,6 +185,7 @@ pub fn internal_routes() -> Router<Arc<AppState>> {
             get(crate::internal::tenant_issuer),
         )
         .route("/internal/health", get(crate::internal::health))
+        .route("/internal/mail", get(crate::internal::latest_mail))
 }
 
 /// `GET /healthz` — always `200` with `{"status":"ok"}`.
