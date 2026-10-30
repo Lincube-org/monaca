@@ -55,7 +55,7 @@ pub fn jwk_thumbprint(jwk: &Value) -> Result<String, CryptoError> {
 }
 
 /// Verify a JWS with the `jwk` member of its own header and return `(header, claims)`.
-//!
+///
 /// Used only for DPoP proofs. The embedded key is attacker-supplied, so this proves possession,
 /// not identity; the caller binds the resulting thumbprint to the token it protects. A JWK with a
 /// private component, a non-ES256 algorithm or a wrong `typ` is rejected before the signature is
@@ -99,6 +99,8 @@ pub fn verify_embedded_jwk(token: &str, expected_typ: &str) -> Result<(Value, Va
     validation.validate_aud = false;
     // DPoP proofs use `iat` freshness, not `exp`; the caller enforces the window.
     validation.validate_exp = false;
+    // `set_required_spec_claims(&[])` cannot infer its item type, and the docs say an empty
+    // set must be assigned directly rather than set through the helper.
     validation.required_spec_claims.clear();
 
     let data = decode::<Value>(token, &key, &validation).map_err(|err| classify(&err))?;
