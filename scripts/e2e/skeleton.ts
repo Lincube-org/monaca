@@ -76,6 +76,12 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "GET /v1/orgs/acme/audit/verify → {\"valid\":true}",
   },
   {
+    step: "6",
+    title: "browser flow",
+    assertion:
+      "authorize → interaction → code → id_token(nonce,email) + refresh → rotation → replay refused",
+  },
+  {
     step: "7",
     title: "session & logout",
     assertion:
