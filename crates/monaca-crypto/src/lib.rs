@@ -22,6 +22,7 @@ mod keys;
 mod password;
 mod secret;
 mod totp;
+mod webauthn;
 
 pub use jwk::{jwk_thumbprint, verify_embedded_jwk};
 pub use jws::{SigningKeyPair, decode_unverified, verify_jws, verify_jws_with_audience};
@@ -36,6 +37,10 @@ pub use totp::{
     DIGITS as TOTP_DIGITS, PERIOD_SECS as TOTP_PERIOD_SECS, SECRET_LEN as TOTP_SECRET_LEN,
     base32_secret as totp_base32, code_at as totp_code, generate_secret as generate_totp_secret,
     otpauth_url as totp_otpauth_url, verify as verify_totp,
+};
+pub use webauthn::{
+    RegisteredCredential, assertion_user_verified, decode_base64url, encode_base64url,
+    generate_challenge, verify_assertion, verify_registration,
 };
 
 /// Where a tenant's data-encryption key comes from.

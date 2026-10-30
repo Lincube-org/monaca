@@ -33,6 +33,15 @@ pub struct StoredInteraction {
     pub mfa_attempts: u32,
 }
 
+/// One in-flight WebAuthn challenge, keyed by the ceremony it belongs to.
+#[derive(Debug, Clone)]
+struct PasskeyChallenge {
+    /// The 32 random bytes the browser must echo in `clientDataJSON.challenge`.
+    challenge: Vec<u8>,
+    /// When the challenge stops being accepted.
+    expires_at: OffsetDateTime,
+}
+
 /// Everything a handler needs.
 pub struct AppState {
     /// PostgreSQL.
@@ -52,6 +61,10 @@ pub struct AppState {
     /// not been confirmed yet. In-memory for the same reason as `interactions` — an enrollment is
     /// one continuous visit (§6.1 `mfa`).
     totp_enrollments: Mutex<HashMap<Uuid, (Vec<u8>, OffsetDateTime)>>,
+    /// Pending passkey challenges, keyed `reg:{account}`, `in:{iid}` or `mfa:{iid}`. Each key names
+    /// exactly one ceremony, so a challenge minted for a registration can never be replayed as an
+    /// assertion and two interactions cannot share one.
+    passkey_challenges: Mutex<HashMap<String, PasskeyChallenge>>,
     /// The active signing key per tenant, decoded. Cached because every token needs it and the
     /// private half is sealed at rest.
     signing: Mutex<HashMap<Uuid, Arc<SigningKeyPair>>>,
@@ -70,6 +83,7 @@ impl AppState {
             clock: Arc::new(SystemClock),
             interactions: Mutex::new(HashMap::new()),
             totp_enrollments: Mutex::new(HashMap::new()),
+            passkey_challenges: Mutex::new(HashMap::new()),
             signing: Mutex::new(HashMap::new()),
         }))
     }
@@ -367,6 +381,35 @@ impl AppState {
     /// Forget a pending setup, e.g. when the account removes or replaces it.
     pub async fn drop_totp_enrollment(&self, account: Uuid) {
         self.totp_enrollments.lock().await.remove(&account);
+    }
+
+    /// Remember a freshly generated WebAuthn challenge until its ceremony completes.
+    pub async fn put_passkey_challenge(
+        &self,
+        key: String,
+        challenge: Vec<u8>,
+        expires_at: OffsetDateTime,
+    ) {
+        let now = self.now();
+        let mut map = self.passkey_challenges.lock().await;
+        map.retain(|_, stored| stored.expires_at > now);
+        map.insert(
+            key,
+            PasskeyChallenge {
+                challenge,
+                expires_at,
+            },
+        );
+    }
+
+    /// Redeem a challenge: it is removed whether it is valid or not, so every ceremony is one-shot.
+    pub async fn take_passkey_challenge(&self, key: &str) -> Option<Vec<u8>> {
+        let now = self.now();
+        let mut map = self.passkey_challenges.lock().await;
+        map.retain(|_, stored| stored.expires_at > now);
+        map.remove(key)
+            .filter(|stored| stored.expires_at > now)
+            .map(|stored| stored.challenge)
     }
 
     /// Append an audit event to an org chain in its own transaction.

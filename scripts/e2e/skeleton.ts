@@ -123,6 +123,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "code completes the flow and issues a token; the same code is refused on replay; GET reports the " +
       "remaining count; DELETE removes them and the next challenge offers totp only",
   },
+  {
+    step: "12",
+    title: "passkeys",
+    assertion:
+      "POST /t/demo/account/passkeys/options → creation options (rp.localhost, a challenge); the registration " +
+      "ceremony stores a pky_… key (201) and mfa.passkeys becomes 1; an assertion signs in without a password " +
+      "and a stale assertion is 401; PATCH renames it; with TOTP enrolled the challenge lists totp and passkey " +
+      "and POST /mfa/passkey completes it; DELETE removes the key and the next challenge offers totp only",
+  },
 ];
 
 interface StepResult {
@@ -1727,6 +1736,456 @@ async function backupCodeFlow(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Step 12: a software authenticator
+// ---------------------------------------------------------------------------
+
+/** Concatenate byte arrays; every ceremony below is a sequence of fixed-size slices. */
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function fromBase64Url(value: string): Uint8Array {
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - (value.length % 4)) % 4);
+  return new Uint8Array(Buffer.from(padded, "base64"));
+}
+
+/**
+ * The CBOR heads the two WebAuthn structures use: integers as COSE map keys, byte strings and text
+ * strings, and maps. A full encoder would be a dependency for four major types, so this writes the
+ * three length forms that can actually appear here.
+ */
+function cborHead(major: number, argument: number): Uint8Array {
+  if (argument < 24) return Uint8Array.of((major << 5) | argument);
+  if (argument < 256) return Uint8Array.of((major << 5) | 24, argument);
+  return Uint8Array.of((major << 5) | 25, (argument >>> 8) & 0xff, argument & 0xff);
+}
+
+function cborUint(value: number): Uint8Array {
+  return cborHead(0, value);
+}
+
+/** CBOR major type 1 stores `-1 - value`, so `-7` is the argument `6`. */
+function cborNegative(value: number): Uint8Array {
+  return cborHead(1, -1 - value);
+}
+
+function cborBytes(bytes: Uint8Array): Uint8Array {
+  return concatBytes(cborHead(2, bytes.length), bytes);
+}
+
+function cborText(text: string): Uint8Array {
+  const bytes = new TextEncoder().encode(text);
+  return concatBytes(cborHead(3, bytes.length), bytes);
+}
+
+function cborMap(entries: [Uint8Array, Uint8Array][]): Uint8Array {
+  return concatBytes(cborHead(5, entries.length), ...entries.flatMap(([key, value]) => [key, value]));
+}
+
+function u32(value: number): Uint8Array {
+  return Uint8Array.of((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff);
+}
+
+async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer));
+}
+
+/** A P-256 key pair, a credential id and a counter: what one hardware authenticator would hold. */
+interface SoftwareAuthenticator {
+  credentialId: Uint8Array;
+  /** The COSE `EC2` public key embedded in the attestation. */
+  cose: Uint8Array;
+  signCount: number;
+  sign: (data: Uint8Array) => Promise<Uint8Array>;
+}
+
+async function createSoftwareAuthenticator(): Promise<SoftwareAuthenticator> {
+  const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as { x: string; y: string };
+  const cose = cborMap([
+    [cborUint(1), cborUint(2)], // kty: EC2
+    [cborUint(3), cborNegative(-7)], // alg: ES256
+    [cborNegative(-1), cborUint(1)], // crv: P-256
+    [cborNegative(-2), cborBytes(fromBase64Url(jwk.x))],
+    [cborNegative(-3), cborBytes(fromBase64Url(jwk.y))],
+  ]);
+  return {
+    credentialId: crypto.getRandomValues(new Uint8Array(16)),
+    cose,
+    signCount: 0,
+    async sign(data: Uint8Array): Promise<Uint8Array> {
+      return new Uint8Array(
+        await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, data.buffer as ArrayBuffer),
+      );
+    },
+  };
+}
+
+interface CreationOptionsJSON {
+  challenge: string;
+  rp: { id: string };
+  user: { id: string };
+}
+
+/** What `navigator.credentials.create()` would return, with `attestation: "none"`. */
+async function buildRegistration(
+  authenticator: SoftwareAuthenticator,
+  options: CreationOptionsJSON,
+  origin: string,
+  name: string,
+): Promise<Record<string, unknown>> {
+  const clientData = new TextEncoder().encode(
+    JSON.stringify({ type: "webauthn.create", challenge: options.challenge, origin, crossOrigin: false }),
+  );
+  const rpIdHash = await sha256(new TextEncoder().encode(options.rp.id));
+  const idLength = Uint8Array.of(authenticator.credentialId.length >>> 8, authenticator.credentialId.length & 0xff);
+  // UP | UV | AT, a fresh counter, an all-zero AAGUID, the id and the COSE key.
+  const authData = concatBytes(
+    rpIdHash,
+    Uint8Array.of(0x45),
+    u32(0),
+    new Uint8Array(16),
+    idLength,
+    authenticator.credentialId,
+    authenticator.cose,
+  );
+  const attestation = cborMap([
+    [cborText("fmt"), cborText("none")],
+    [cborText("attStmt"), cborMap([])],
+    [cborText("authData"), cborBytes(authData)],
+  ]);
+  return {
+    rawId: base64Url(authenticator.credentialId),
+    name,
+    response: {
+      clientDataJSON: base64Url(clientData),
+      attestationObject: base64Url(attestation),
+      transports: ["internal"],
+    },
+  };
+}
+
+interface RequestOptionsJSON {
+  challenge: string;
+  rpId: string;
+}
+
+/** What `navigator.credentials.get()` would return, including the user handle. */
+async function buildPasskeyAssertion(
+  authenticator: SoftwareAuthenticator,
+  options: RequestOptionsJSON,
+  origin: string,
+  userHandle: Uint8Array,
+): Promise<Record<string, unknown>> {
+  authenticator.signCount += 1;
+  const clientData = new TextEncoder().encode(
+    JSON.stringify({ type: "webauthn.get", challenge: options.challenge, origin, crossOrigin: false }),
+  );
+  const rpIdHash = await sha256(new TextEncoder().encode(options.rpId));
+  // UP | UV; an assertion carries no attested credential data.
+  const authData = concatBytes(rpIdHash, Uint8Array.of(0x05), u32(authenticator.signCount));
+  const signature = await authenticator.sign(concatBytes(authData, await sha256(clientData)));
+  return {
+    rawId: base64Url(authenticator.credentialId),
+    response: {
+      clientDataJSON: base64Url(clientData),
+      authenticatorData: base64Url(authData),
+      signature: base64Url(signature),
+      userHandle: base64Url(userHandle),
+    },
+  };
+}
+
+/**
+ * Step 12 — passkeys, both as a primary factor and as the second factor.
+ *
+ * The software authenticator above produces exactly what a browser would: an ECDSA P-256 key,
+ * CBOR COSE key and attestation, and signatures over `authData || SHA-256(clientDataJSON)`. The
+ * relying party comes from the deployment, so the origin defaults to the CI value
+ * (`MONACA_AUTH_UI_URL`) rather than the API origin the script talks to.
+ */
+async function passkeyFlow(base: string, adminToken: string, consoleSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const email = `passkey-${runId}@demo.localhost`;
+  const password = `pw-${runId}-passkey-account`;
+  const headers = managementHeaders(adminToken);
+  const origin = new URL(process.env.MONACA_AUTH_UI_URL ?? "http://localhost:5174").origin;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "12",
+    title: "passkeys",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `p-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  try {
+    // --- a dedicated account, already a member of acme ------------------------------------------
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Passkey flow", password }),
+    });
+    const accountId = (account.body as { id?: string })?.id;
+    if (account.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    // The WebAuthn user handle is the account UUID, which `user.id` in the options also carries.
+    const userHandle = new Uint8Array(Buffer.from(typeIdUuid(accountId).replaceAll("-", ""), "hex"));
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    // --- one-factor sign-in, so the session cookie can register the passkey -----------------------
+    const first = await signIn("first");
+    if (first?.cookie === undefined) return fail("the first sign-in set no session cookie");
+    const cookie = { cookie: `monaca_session=${first.cookie}` };
+
+    // --- registration: creation options, then the attestation ------------------------------------
+    const authenticator = await createSoftwareAuthenticator();
+    const options = await call(`${base}/t/${TENANT}/account/passkeys/options`, { method: "POST", headers: cookie });
+    const creation = options.body as Partial<CreationOptionsJSON>;
+    const rpId = creation.rp?.id;
+    if (options.status !== 200 || typeof creation.challenge !== "string" || typeof rpId !== "string") {
+      return fail(`POST /account/passkeys/options → ${options.status} ${text(options.body)}`);
+    }
+    checks.push([
+      "the creation options carry the relying party and a challenge",
+      rpId === new URL(origin).hostname && creation.user?.id === base64Url(userHandle),
+    ]);
+
+    const registered = await call(`${base}/t/${TENANT}/account/passkeys`, {
+      method: "POST",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify(await buildRegistration(authenticator, creation as CreationOptionsJSON, origin, "E2E key")),
+    });
+    const passkeyId = (registered.body as { id?: unknown })?.id;
+    checks.push([
+      "the registration ceremony stores a pky_… passkey",
+      registered.status === 201 && typeof passkeyId === "string" && passkeyId.startsWith("pky_"),
+    ]);
+    if (typeof passkeyId !== "string") {
+      return fail(`POST /account/passkeys → ${registered.status} ${text(registered.body)}`);
+    }
+
+    const list = async (): Promise<{ id?: unknown; name?: unknown; transports?: unknown }[]> => {
+      const response = await call(`${base}/t/${TENANT}/account/passkeys`, { headers: cookie });
+      const items = (response.body as { items?: unknown })?.items;
+      return Array.isArray(items) ? (items as { id?: unknown; name?: unknown; transports?: unknown }[]) : [];
+    };
+    const items = await list();
+    checks.push([
+      "GET /account/passkeys lists it with its transport hint",
+      items.length === 1 &&
+        items[0]?.id === passkeyId &&
+        Array.isArray(items[0]?.transports) &&
+        (items[0]!.transports as string[]).includes("internal"),
+    ]);
+    const passkeyCount = async (): Promise<unknown> => {
+      const response = await call(`${base}/t/${TENANT}/account`, { headers: cookie });
+      return (response.body as { mfa?: { passkeys?: unknown } })?.mfa?.passkeys;
+    };
+    checks.push(["the profile reports one passkey", (await passkeyCount()) === 1]);
+
+    // --- passwordless sign-in --------------------------------------------------------------------
+    const passwordless = await begin("passwordless");
+    if (passwordless === undefined) return fail("");
+    const requestOptions = await call(`${base}/t/${TENANT}/interaction/${passwordless.interaction}/sign-in/passkey/options`, {
+      method: "POST",
+    });
+    const request = requestOptions.body as Partial<RequestOptionsJSON>;
+    if (requestOptions.status !== 200 || typeof request.challenge !== "string" || typeof request.rpId !== "string") {
+      return fail(`POST /sign-in/passkey/options → ${requestOptions.status} ${text(requestOptions.body)}`);
+    }
+    checks.push(["the assertion options name the relying party", request.rpId === rpId]);
+
+    const signedIn = await call(`${base}/t/${TENANT}/interaction/${passwordless.interaction}/sign-in/passkey`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(await buildPasskeyAssertion(authenticator, request as RequestOptionsJSON, origin, userHandle)),
+    });
+    const passkeyToken = await exchange((signedIn.body as { redirect_to?: unknown })?.redirect_to, passwordless.verifier);
+    checks.push([
+      "a passkey signs in without a password and issues a token",
+      signedIn.status === 200 && passkeyToken.status === 200,
+    ]);
+
+    // --- a signature over an old challenge cannot be replayed -----------------------------------
+    const replay = await begin("replay");
+    if (replay === undefined) return fail("");
+    const replayOptions = await call(`${base}/t/${TENANT}/interaction/${replay.interaction}/sign-in/passkey/options`, {
+      method: "POST",
+    });
+    const stale = await buildPasskeyAssertion(authenticator, request as RequestOptionsJSON, origin, userHandle);
+    const replayed = await call(`${base}/t/${TENANT}/interaction/${replay.interaction}/sign-in/passkey`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(stale),
+    });
+    checks.push([
+      "an assertion over a stale challenge is 401",
+      replayOptions.status === 200 && replayed.status === 401,
+    ]);
+
+    // --- the label can be changed ---------------------------------------------------------------
+    const renamed = await call(`${base}/t/${TENANT}/account/passkeys/${passkeyId}`, {
+      method: "PATCH",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Renamed key" }),
+    });
+    checks.push([
+      "PATCH renames the passkey",
+      renamed.status === 200 && (renamed.body as { name?: unknown })?.name === "Renamed key",
+    ]);
+
+    // --- enroll TOTP, then prove the second factor with the passkey -------------------------------
+    const enrollment = await call(`${base}/t/${TENANT}/account/mfa/totp`, { method: "POST", headers: cookie });
+    const secret = (enrollment.body as { secret?: unknown })?.secret;
+    if (typeof secret !== "string") return fail(`POST /account/mfa/totp → ${enrollment.status} ${text(enrollment.body)}`);
+    const confirmed = await call(`${base}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push(["the authenticator is enrolled alongside the passkey", confirmed.status === 200]);
+
+    const challenged = await signIn("challenged");
+    if (challenged === undefined) return fail("");
+    const factors = Array.isArray((challenged.body as { factors?: unknown })?.factors)
+      ? ((challenged.body as { factors: string[] }).factors)
+      : [];
+    checks.push([
+      "a password sign-in offers totp and passkey",
+      challenged.status === 200 &&
+        (challenged.body as { mfa_required?: unknown })?.mfa_required === true &&
+        factors.includes("totp") &&
+        factors.includes("passkey"),
+    ]);
+
+    const mfaOptions = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/passkey/options`, {
+      method: "POST",
+    });
+    const mfaRequest = mfaOptions.body as Partial<RequestOptionsJSON & { allowCredentials?: { id?: unknown }[] }>;
+    checks.push([
+      "the second-factor options allow only this credential",
+      mfaOptions.status === 200 &&
+        typeof mfaRequest.challenge === "string" &&
+        mfaRequest.allowCredentials?.length === 1 &&
+        mfaRequest.allowCredentials[0]?.id === base64Url(authenticator.credentialId),
+    ]);
+    if (mfaOptions.status !== 200 || typeof mfaRequest.challenge !== "string" || typeof mfaRequest.rpId !== "string") {
+      return fail(`POST /mfa/passkey/options → ${mfaOptions.status} ${text(mfaOptions.body)}`);
+    }
+
+    const mfa = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/passkey`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(await buildPasskeyAssertion(authenticator, mfaRequest as RequestOptionsJSON, origin, userHandle)),
+    });
+    const mfaToken = await exchange((mfa.body as { redirect_to?: unknown })?.redirect_to, challenged.verifier);
+    checks.push([
+      "the passkey completes the second factor and issues a token",
+      mfa.status === 200 && mfaToken.status === 200,
+    ]);
+
+    // --- removal returns the account to the authenticator app only -------------------------------
+    const removed = await call(`${base}/t/${TENANT}/account/passkeys/${passkeyId}`, { method: "DELETE", headers: cookie });
+    checks.push(["DELETE /account/passkeys/{id} is 204", removed.status === 204]);
+    checks.push(["GET /account/passkeys is empty", (await list()).length === 0]);
+    checks.push(["the profile reports zero passkeys", (await passkeyCount()) === 0]);
+
+    const plain = await signIn("plain");
+    if (plain === undefined) return fail("");
+    checks.push([
+      "the next challenge offers totp only",
+      Array.isArray((plain.body as { factors?: unknown })?.factors) &&
+        (plain.body as { factors: string[] }).factors.join(",") === "totp",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "12",
+    title: "passkeys",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: register → passwordless sign-in → replay refused → rename → MFA passkey → remove`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 function typeIdUuid(id: string): string {
   const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
   const suffix = id.slice(id.indexOf("_") + 1);
@@ -1906,6 +2365,7 @@ async function main(): Promise<number> {
   push(await mfaFlow(base, adminToken, parsed.consoleSecret));
   push(await accountFlow(base, adminToken));
   push(await backupCodeFlow(base, adminToken, parsed.consoleSecret));
+  push(await passkeyFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

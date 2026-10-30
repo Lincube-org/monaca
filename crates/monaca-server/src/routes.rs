@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Serialize;
 
@@ -111,6 +111,22 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             post(crate::protocol::sign_in_code_verify),
         )
         .route(
+            "/t/{tenant}/interaction/{iid}/sign-in/passkey/options",
+            post(crate::protocol::passkey_sign_in_options),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/sign-in/passkey",
+            post(crate::protocol::passkey_sign_in_verify),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/mfa/passkey/options",
+            post(crate::protocol::mfa_passkey_options),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/mfa/passkey",
+            post(crate::protocol::mfa_passkey_verify),
+        )
+        .route(
             "/t/{tenant}/interaction/{iid}/password/forgot",
             post(crate::protocol::password_forgot),
         )
@@ -167,6 +183,18 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             get(crate::account::list_backup_codes)
                 .post(crate::account::create_backup_codes)
                 .delete(crate::account::remove_backup_codes),
+        )
+        .route(
+            "/t/{tenant}/account/passkeys/options",
+            post(crate::account::begin_passkey_registration),
+        )
+        .route(
+            "/t/{tenant}/account/passkeys",
+            get(crate::account::list_passkeys).post(crate::account::register_passkey),
+        )
+        .route(
+            "/t/{tenant}/account/passkeys/{passkey}",
+            patch(crate::account::rename_passkey).delete(crate::account::delete_passkey),
         )
 }
 

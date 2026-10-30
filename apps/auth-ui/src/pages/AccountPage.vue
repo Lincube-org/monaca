@@ -6,21 +6,28 @@ import { useRoute } from "vue-router";
 
 import {
   AccountError,
+  beginPasskeyRegistration,
   beginTotp,
   changePassword,
+  deletePasskey,
   disableBackupCodes,
   disableTotp,
   generateBackupCodes,
   getAccount,
+  listPasskeys,
   listSessions,
+  registerPasskey,
+  renamePasskey,
   revokeOtherSessions,
   revokeSession,
   updateProfile,
   verifyTotp,
+  type AccountPasskey,
   type AccountProfile,
   type AccountSession,
   type TotpEnrollment,
 } from "@/api/account";
+import { PasskeyError, createPasskey, passkeysSupported } from "@/api/webauthn";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -72,12 +79,26 @@ const backupBusy = ref<"generate" | "disable" | null>(null);
 const backupNotice = ref<MessageKey | null>(null);
 const backupError = ref<string | null>(null);
 
+/** Passkeys, like the authenticator app: listed, added, renamed and removed from here. */
+const passkeys = ref<AccountPasskey[] | null>(null);
+const passkeysSupportedHere = ref(passkeysSupported());
+const passkeyBusy = ref<"add" | "rename" | "delete" | null>(null);
+const passkeyError = ref<string | null>(null);
+const passkeyNotice = ref<MessageKey | null>(null);
+const passkeyName = ref("");
+/** The `pky_…` id being relabelled, if a row is in edit mode. */
+const renaming = ref<string | null>(null);
+const renameValue = ref("");
+const renameBusyId = ref<string | null>(null);
+
 const codeInput = ref<InstanceType<typeof Input> | null>(null);
 
 const totpEnabled = computed(() => account.value?.mfa.totp === true);
 const hasPassword = computed(() => account.value?.has_password === true);
 const otherSessions = computed(() => sessions.value?.filter((row) => !row.current) ?? []);
 const backupRemaining = computed(() => account.value?.mfa.backup_codes ?? 0);
+const passkeyCount = computed(() => passkeys.value?.length ?? 0);
+const passkeyLimitReached = computed(() => passkeyCount.value >= 10);
 
 const loadErrorMessage = computed<MessageKey>(() =>
   loadError.value?.status === 401 ? "account.sessionRequired" : "account.loadFailed",
@@ -105,6 +126,16 @@ async function loadSessions(): Promise<void> {
   }
 }
 
+async function loadPasskeys(): Promise<void> {
+  try {
+    passkeys.value = (await listPasskeys(tenant.value)).items;
+    passkeyError.value = null;
+  } catch (error) {
+    passkeys.value = null;
+    passkeyError.value = messageOf(error);
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   try {
@@ -113,6 +144,7 @@ async function load(): Promise<void> {
     displayName.value = profile.display_name;
     loadError.value = null;
     await loadSessions();
+    await loadPasskeys();
   } catch (error) {
     account.value = null;
     loadError.value = error instanceof AccountError ? error : new AccountError(0, String(error));
@@ -322,6 +354,92 @@ function cancelEnrollment(): void {
   code.value = "";
   fieldError.value = null;
   submitError.value = null;
+}
+
+/** Add a passkey: mint the options, run the browser ceremony, then store the verified result. */
+async function addPasskey(): Promise<void> {
+  passkeyError.value = null;
+  passkeyNotice.value = null;
+  passkeyBusy.value = "add";
+  try {
+    const options = await beginPasskeyRegistration(tenant.value);
+    const credential = await createPasskey(options, passkeyName.value.trim() || undefined);
+    const created = await registerPasskey(tenant.value, credential);
+    passkeys.value = [created, ...(passkeys.value ?? [])];
+    passkeyName.value = "";
+    passkeyNotice.value = "account.passkeyCreated";
+    if (account.value) {
+      account.value = {
+        ...account.value,
+        mfa: { ...account.value.mfa, passkeys: passkeyCount.value },
+      };
+    }
+  } catch (error) {
+    if (error instanceof PasskeyError) {
+      // A dismissed prompt is not a failure; only a real refusal gets an explanation.
+      passkeyError.value = error.reason === "cancelled" ? null : t("errors.passkeyFailed");
+    } else {
+      passkeyError.value = messageOf(error);
+    }
+  } finally {
+    passkeyBusy.value = null;
+  }
+}
+
+function startRename(passkey: AccountPasskey): void {
+  renaming.value = passkey.id;
+  renameValue.value = passkey.name ?? "";
+  passkeyError.value = null;
+  passkeyNotice.value = null;
+}
+
+function cancelRename(): void {
+  renaming.value = null;
+  renameValue.value = "";
+}
+
+async function saveRename(passkey: AccountPasskey): Promise<void> {
+  const name = renameValue.value.trim();
+  if (name === "") {
+    passkeyError.value = t("errors.passkeyNameRequired");
+    return;
+  }
+  renameBusyId.value = passkey.id;
+  passkeyError.value = null;
+  passkeyNotice.value = null;
+  try {
+    const updated = await renamePasskey(tenant.value, passkey.id, name);
+    passkeys.value = (passkeys.value ?? []).map((row) => (row.id === updated.id ? updated : row));
+    renaming.value = null;
+    renameValue.value = "";
+    passkeyNotice.value = "account.passkeyRenamed";
+  } catch (error) {
+    passkeyError.value = messageOf(error);
+  } finally {
+    renameBusyId.value = null;
+  }
+}
+
+async function removePasskey(passkey: AccountPasskey): Promise<void> {
+  if (renaming.value === passkey.id) cancelRename();
+  passkeyBusy.value = "delete";
+  passkeyError.value = null;
+  passkeyNotice.value = null;
+  try {
+    await deletePasskey(tenant.value, passkey.id);
+    passkeys.value = (passkeys.value ?? []).filter((row) => row.id !== passkey.id);
+    passkeyNotice.value = "account.passkeyDeleted";
+    if (account.value) {
+      account.value = {
+        ...account.value,
+        mfa: { ...account.value.mfa, passkeys: passkeyCount.value },
+      };
+    }
+  } catch (error) {
+    passkeyError.value = messageOf(error);
+  } finally {
+    passkeyBusy.value = null;
+  }
 }
 </script>
 
@@ -632,6 +750,129 @@ function cancelEnrollment(): void {
                 {{ backupBusy === "disable" ? t("account.backupDisabling") : t("account.backupDisable") }}
               </Button>
             </div>
+          </div>
+
+          <!-- Passkeys: passwordless credentials the account can sign in with. -->
+          <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <div class="flex items-center justify-between gap-3">
+              <div class="flex items-center gap-1.5">
+                <KeyRound class="size-3.5 text-ink-faint" aria-hidden="true" />
+                <h2 class="text-[13px] font-semibold text-ink">{{ t("account.passkeysTitle") }}</h2>
+              </div>
+              <Badge variant="muted">{{ passkeyCount }}</Badge>
+            </div>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.passkeysNote") }}</p>
+
+            <p v-if="passkeys && passkeys.length === 0" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t("account.passkeyEmpty") }}
+            </p>
+
+            <div v-else-if="passkeys" class="flex flex-col divide-y divide-rule">
+              <div v-for="passkey in passkeys" :key="passkey.id" class="flex flex-col gap-1.5 py-2">
+                <div v-if="renaming === passkey.id" class="flex items-end gap-2">
+                  <div class="flex min-w-0 flex-1 flex-col gap-1">
+                    <Label :for="`passkey-name-${passkey.id}`">{{ t("account.passkeyNameLabel") }}</Label>
+                    <Input
+                      :id="`passkey-name-${passkey.id}`"
+                      v-model="renameValue"
+                      type="text"
+                      maxlength="80"
+                      :placeholder="t('account.passkeyNamePlaceholder')"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    :disabled="renameBusyId !== null"
+                    :aria-busy="renameBusyId === passkey.id"
+                    @click="saveRename(passkey)"
+                  >
+                    <Loader2 v-if="renameBusyId === passkey.id" class="animate-spin" />
+                    {{ t("account.passkeySaving") }}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" :disabled="renameBusyId !== null" @click="cancelRename">
+                    {{ t("signIn.cancel") }}
+                  </Button>
+                </div>
+                <div v-else class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="truncate text-[12.5px] text-ink">
+                      {{ passkey.name ?? t("account.passkeyNoName") }}
+                    </p>
+                    <p class="text-[11.5px] leading-snug text-ink-faint">
+                      {{
+                        passkey.last_used_at
+                          ? t("account.passkeyLastUsed", { when: formatDate(passkey.last_used_at) })
+                          : t("account.passkeyNeverUsed")
+                      }}
+                    </p>
+                  </div>
+                  <div class="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      :disabled="passkeyBusy !== null"
+                      @click="startRename(passkey)"
+                    >
+                      {{ t("account.passkeyRename") }}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      :disabled="passkeyBusy !== null"
+                      :aria-busy="passkeyBusy === 'delete'"
+                      @click="removePasskey(passkey)"
+                    >
+                      <Loader2 v-if="passkeyBusy === 'delete'" class="animate-spin" />
+                      {{ t("account.passkeyDelete") }}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <p v-if="passkeyError" role="alert" class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny">
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ passkeyError }}
+            </p>
+            <p v-else-if="passkeyNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(passkeyNotice) }}
+            </p>
+
+            <div v-if="passkeysSupportedHere" class="flex flex-col gap-1.5">
+              <div class="flex flex-col gap-1.5">
+                <Label for="account-passkey-name">{{ t("account.passkeyNameLabel") }}</Label>
+                <Input
+                  id="account-passkey-name"
+                  v-model="passkeyName"
+                  type="text"
+                  maxlength="80"
+                  :placeholder="t('account.passkeyNamePlaceholder')"
+                  :disabled="passkeyBusy !== null || passkeyLimitReached"
+                />
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                block
+                :disabled="passkeyBusy !== null || passkeyLimitReached"
+                :aria-busy="passkeyBusy === 'add'"
+                @click="addPasskey"
+              >
+                <Loader2 v-if="passkeyBusy === 'add'" class="animate-spin" />
+                <KeyRound v-else />
+                {{ passkeyBusy === "add" ? t("account.passkeyAdding") : t("account.passkeyAdd") }}
+              </Button>
+              <p v-if="passkeyLimitReached" class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t("account.passkeyLimit") }}
+              </p>
+            </div>
+            <p v-else class="text-[11.5px] leading-snug text-ink-faint">
+              {{ t("errors.passkeyUnsupported") }}
+            </p>
           </div>
 
           <!-- Sessions: every browser that can currently act as this account. -->

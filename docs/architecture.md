@@ -84,7 +84,7 @@ mt_<tenant_short> (每租户一个 DB)
 | crate | 职责 |
 |---|---|
 | `monaca-types` | 类型化 ID 及前缀编解码、`TenantCtx`/`OrgCtx`、RFC 9457 problem 错误模型、时钟抽象 |
-| `monaca-crypto` | JWS（`jsonwebtoken`，后端用 RustCrypto，Windows 友好；`aws-lc-rs` 作为 FIPS 特性开关）、ES256/EdDSA 密钥、argon2id（`spawn_blocking` 加并发上限）、信封加密（租户 DEK 由 KEK 加密，`KeyProvider` trait：dev 读环境变量，生产接 KMS/Vault）、`subtle` 常量时间比较 |
+| `monaca-crypto` | JWS（`jsonwebtoken`，后端用 RustCrypto，Windows 友好；`aws-lc-rs` 作为 FIPS 特性开关）、ES256/EdDSA 密钥、argon2id（`spawn_blocking` 加并发上限）、信封加密（租户 DEK 由 KEK 加密，`KeyProvider` trait：dev 读环境变量，生产接 KMS/Vault）、`subtle` 常量时间比较、WebAuthn 注册/断言校验（`none` attestation + ES256） |
 | `monaca-store` | control/tenant/org 三套迁移、编排器、租户/组织 provisioner、路由缓存、`with_org_tx(ctx, fn)`、outbox |
 | `monaca-oidc` | discovery（同时提供 RFC 8414 的 `/.well-known/oauth-authorization-server/t/{tenant}` 和 OIDC 的 `/t/{tenant}/.well-known/openid-configuration`）、JWKS、authorize + interaction、code+PKCE（强制）、refresh、client_credentials、`private_key_jwt`、RAR（RFC 9396）、id_token。M1 增加 PAR/DPoP/内省/吊销 |
 | `monaca-agent` | agent 注册表、grant、**权限衰减代数**（scope 只交不并、aud 只收窄、exp 只缩短、深度上限），委托 token 铸造（嵌套 `act`）。M3 增加 RFC 8693 多跳交换和 CIBA |
@@ -188,7 +188,7 @@ monaca/
 
 ## 11. 后续里程碑（概要）
 
-- **M1 OIDC 基线**：完整 OIDC Core（nonce/prompt/max_age/userinfo）、refresh 轮换与重用检测、PAR、DPoP（agent token 强制绑定发送方）、内省与吊销、密钥自动轮换、passkey（`webauthn-rs`）与 TOTP、邮件模块（验证邮件与魔法链接）、Cedar 同时进 napi 与 server、限流和暴力破解防护、边缘分流、内部通信改 mTLS、通过 OpenID 官方 conformance suite（Basic/Config OP），控制台增加客户端、密钥、会话页面。
+- **M1 OIDC 基线**：完整 OIDC Core（nonce/prompt/max_age/userinfo）、refresh 轮换与重用检测、PAR、DPoP（agent token 强制绑定发送方）、内省与吊销、密钥自动轮换、passkey（`monaca-crypto` 内自研 WebAuthn 校验：COSE/ES256 + 最小 CBOR，不引入 `webauthn-rs`）与 TOTP、邮件模块（验证邮件与魔法链接）、Cedar 同时进 napi 与 server、限流和暴力破解防护、边缘分流、内部通信改 mTLS、通过 OpenID 官方 conformance suite（Basic/Config OP），控制台增加客户端、密钥、会话页面。
 - **M2 开发者平台**：SDK 流水线、`@monaca/node` 与框架适配器、`@monaca/vue` 可嵌入组件、按租户品牌化托管页、组织邀请、API key、同步 hooks（Actions）、webhooks 模块（outbox relay + 事件订阅）、DCR 与 Client ID Metadata、wasm 版 core（edge/浏览器）、文档站。
 - **M3 Agent 深度**：CIBA 人在回路审批、多跳 8693 与深度上限、吊销集推送到验证端、MCP 网关模块（按工具配 Cedar 策略、逐次调用审计）、工作负载身份联邦（RFC 7523：GitHub Actions、K8s、云厂商 OIDC 签发的 token 换 agent 身份）、可选 Biscuit 离线衰减凭证、审计检查点签名与委托图浏览器、审计链批量封签（缓解链头锁竞争）。
 - **M4 联邦与企业**：上游 OIDC 与社交登录、SAML（Bun 模块）、SCIM 2.0（Bun 模块调 Rust API）、租户跨集群迁移与数据驻留、Helm、HA、备份与 PITR 指南。

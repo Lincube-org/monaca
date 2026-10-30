@@ -179,6 +179,7 @@ fn is_known_prefix(prefix: &str) -> bool {
             | "apr"
             | "int"
             | "key"
+            | "pky"
     )
 }
 
@@ -325,6 +326,11 @@ typed_id!(
     /// Tenant signing key (`key_…`); this value is the JWS `kid`.
     KeyId,
     "key"
+);
+typed_id!(
+    /// Passkey credential (`pky_…`); the raw WebAuthn credential id is a separate column.
+    PasskeyId,
+    "pky"
 );
 
 #[cfg(test)]
@@ -500,5 +506,6 @@ mod tests {
         check::<ApprovalId>("apr_");
         check::<InteractionId>("int_");
         check::<KeyId>("key_");
+        check::<PasskeyId>("pky_");
     }
 }

@@ -1416,12 +1416,14 @@ dependencies = [
  "argon2",
  "data-encoding",
  "hex",
+ "hmac 0.12.1",
  "jsonwebtoken",
  "monaca-types",
  "p256",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "subtle",
  "thiserror",
@@ -1446,6 +1448,7 @@ name = "monaca-oidc"
 version = "0.0.0"
 dependencies = [
  "data-encoding",
+ "monaca-crypto",
  "monaca-types",
  "serde",
  "serde_json",
@@ -2206,6 +2209,17 @@ dependencies = [
 
 [[package]]
 name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
@@ -2436,7 +2450,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "serde",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.1",
  "sqlx-core",
  "thiserror",

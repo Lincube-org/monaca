@@ -64,6 +64,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "MFA backup codes (M1)",
         include_str!("../migrations/tenant_5.sql"),
     ),
+    (
+        6,
+        "WebAuthn passkeys (M1)",
+        include_str!("../migrations/tenant_6.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

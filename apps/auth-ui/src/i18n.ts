@@ -62,6 +62,14 @@ export const messages = {
     backupCodePlaceholder: "xxxxx-xxxxx",
     backupNote:
       "Enter one of the single-use codes you saved when you turned on two-step verification.",
+    usePasskey: "Use a passkey instead",
+  },
+  /** Passkeys, the passwordless factor: a device-bound credential instead of a typed secret. */
+  passkey: {
+    signIn: "Sign in with a passkey",
+    signingIn: "Waiting for your passkey",
+    or: "or",
+    mfaNote: "Confirm with the screen lock or security key you registered for this account.",
   },
   account: {
     title: "Account security",
@@ -119,6 +127,25 @@ export const messages = {
     backupDisabling: "Removing",
     backupGenerated: "Ten backup codes were generated. Store them somewhere safe.",
     backupRemoved: "Backup codes were removed.",
+    passkeysTitle: "Passkeys",
+    passkeysNote:
+      "Sign in with this device's screen lock or a security key instead of a password. Up to 10.",
+    passkeyEmpty: "No passkeys yet.",
+    passkeyAdd: "Add a passkey",
+    passkeyAdding: "Waiting for your device",
+    passkeyNameLabel: "Name (optional)",
+    passkeyNamePlaceholder: "e.g. This laptop",
+    passkeyRename: "Rename",
+    passkeyDelete: "Remove",
+    passkeySaving: "Saving",
+    passkeyRemoving: "Removing",
+    passkeyCreated: "Your passkey was added.",
+    passkeyRenamed: "The passkey was renamed.",
+    passkeyDeleted: "The passkey was removed.",
+    passkeyNoName: "Unnamed passkey",
+    passkeyNeverUsed: "Never used",
+    passkeyLastUsed: "Last used {when}",
+    passkeyLimit: "You can add at most 10 passkeys.",
   },
   emailCode: {
     title: "Sign in with an email code",
@@ -182,6 +209,10 @@ export const messages = {
     mfaInvalidCode: "That code is not valid. Check your authenticator app and try again.",
     mfaInvalidBackupCode: "That backup code is not valid or has already been used.",
     mfaTooManyAttempts: "Too many wrong codes. Start the sign-in again from the application.",
+    passkeyUnsupported: "This browser cannot use passkeys.",
+    passkeyFailed: "The passkey could not be verified. Try again, or use another method.",
+    passkeyRejected: "That passkey was not accepted. Try again, or use another method.",
+    passkeyNameRequired: "Enter a name for this passkey, or cancel.",
     missingInteraction: "This page needs a sign-in request id.",
     missingInteractionHint:
       "It is opened by an application as part of a sign-in flow, and cannot be used on its own.",

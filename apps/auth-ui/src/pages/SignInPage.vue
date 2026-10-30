@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, ScopeBadge, Skeleton } from "@monaca/ui";
-import { AlertCircle, ArrowLeft, Check, Eye, EyeOff, Loader2, LockKeyhole, Mail, ShieldCheck } from "lucide-vue-next";
+import {
+  AlertCircle,
+  ArrowLeft,
+  Check,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Loader2,
+  LockKeyhole,
+  Mail,
+  ShieldCheck,
+} from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 
 import {
@@ -8,6 +19,10 @@ import {
   getInteraction,
   submitSignIn,
   verifyMfa,
+  getPasskeySignInOptions,
+  verifyPasskeySignIn,
+  getMfaPasskeyOptions,
+  verifyMfaPasskey,
   submitConsent,
   abortInteraction,
   navigateTo,
@@ -20,6 +35,7 @@ import {
   type InteractionDetails,
   type SignInResult,
 } from "@/api/interaction";
+import { PasskeyError, getPasskeyAssertion, passkeysSupported } from "@/api/webauthn";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -71,6 +87,49 @@ const useBackupCode = ref(false);
 
 /** The recovery-code toggle is offered only when the account actually has unused codes. */
 const backupCodeAvailable = computed(() => mfaFactors.value.includes("backup_code"));
+
+/** Passkey support is a browser fact, resolved once; a browser without it never sees the option. */
+const passkeyAvailable = ref(passkeysSupported());
+const passkeyBusy = ref(false);
+const passkeyError = ref<PasskeyError | null>(null);
+/** The second-factor answer by passkey, kept apart so it does not overwrite the code form's state. */
+const mfaPasskeyBusy = ref(false);
+const mfaPasskeyError = ref<PasskeyError | InteractionError | null>(null);
+
+/** Only an account that registered a passkey is offered it, and not while a backup code is in use. */
+const mfaPasskeyAvailable = computed(
+  () => passkeyAvailable.value && mfaFactors.value.includes("passkey") && !useBackupCode.value,
+);
+
+/** A dismissed system prompt is not a failure; nothing is shown for it. */
+const passkeyErrorMessage = computed<MessageKey | null>(() => {
+  const error = passkeyError.value;
+  if (!error || error.reason === "cancelled") return null;
+  return error.reason === "unavailable" ? "errors.passkeyUnsupported" : "errors.passkeyFailed";
+});
+
+const mfaPasskeyErrorMessage = computed<MessageKey | null>(() => {
+  const error = mfaPasskeyError.value;
+  if (!error) return null;
+  if (error instanceof PasskeyError) {
+    if (error.reason === "cancelled") return null;
+    return error.reason === "unavailable" ? "errors.passkeyUnsupported" : "errors.passkeyFailed";
+  }
+  switch (error.code) {
+    case "MONACA_TOO_MANY_ATTEMPTS":
+      return "errors.mfaTooManyAttempts";
+    case "MONACA_INTERACTION_EXPIRED":
+      return "errors.interactionExpired";
+    case "MONACA_INTERACTION_CONSUMED":
+      return "errors.interactionConsumed";
+    case "MONACA_INTERACTION_NOT_FOUND":
+      return "errors.interactionNotFound";
+    case "MONACA_UNREACHABLE":
+      return "errors.network";
+    default:
+      return "errors.passkeyRejected";
+  }
+});
 
 /**
  * Which authentication flow the page is showing. The interaction is the same in all four; only the
@@ -295,6 +354,7 @@ function switchMode(next: Mode): void {
   displayName.value = "";
   fieldError.value = null;
   submitError.value = null;
+  passkeyError.value = null;
   void nextTick(() => {
     if (next === "password") passwordInput.value?.$el?.focus?.();
     else emailInput.value?.$el?.focus?.();
@@ -323,6 +383,7 @@ function handleResult(result: SignInResult): void {
     mfaRequired.value = true;
     mfaFactors.value = result.factors;
     useBackupCode.value = false;
+    mfaPasskeyError.value = null;
     password.value = "";
     void nextTick(() => mfaInput.value?.$el?.focus?.());
     return;
@@ -387,7 +448,54 @@ function toggleBackupCode(): void {
   mfaCode.value = "";
   fieldError.value = null;
   mfaError.value = null;
+  mfaPasskeyError.value = null;
   void nextTick(() => mfaInput.value?.$el?.focus?.());
+}
+
+/**
+ * Sign in without a password: the browser offers the passkeys it holds for this site, the
+ * authenticator signs the server's challenge, and the answer is verified like any other primary
+ * factor. An enrolled second factor still applies afterwards.
+ */
+async function signInWithPasskey(): Promise<void> {
+  if (!tenantFromUrl.value || !interactionId.value) return;
+  fieldError.value = null;
+  submitError.value = null;
+  passkeyError.value = null;
+  passkeyBusy.value = true;
+  try {
+    const options = await getPasskeySignInOptions(tenantFromUrl.value, interactionId.value);
+    const credential = await getPasskeyAssertion(options);
+    handleResult(await verifyPasskeySignIn(tenantFromUrl.value, interactionId.value, credential));
+  } catch (error) {
+    if (error instanceof PasskeyError) passkeyError.value = error;
+    else if (error instanceof InteractionError) submitError.value = error;
+    else loadError.value = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    passkeyBusy.value = false;
+  }
+}
+
+/** Answer the second factor with a registered passkey instead of a typed code. */
+async function verifyWithMfaPasskey(): Promise<void> {
+  if (!tenantFromUrl.value || !interactionId.value) return;
+  fieldError.value = null;
+  mfaError.value = null;
+  mfaPasskeyError.value = null;
+  mfaPasskeyBusy.value = true;
+  try {
+    const options = await getMfaPasskeyOptions(tenantFromUrl.value, interactionId.value);
+    const credential = await getPasskeyAssertion(options);
+    handleResult(await verifyMfaPasskey(tenantFromUrl.value, interactionId.value, credential));
+  } catch (error) {
+    if (error instanceof PasskeyError || error instanceof InteractionError) {
+      mfaPasskeyError.value = error;
+    } else {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+  } finally {
+    mfaPasskeyBusy.value = false;
+  }
 }
 
 async function signIn(): Promise<void> {
@@ -711,6 +819,31 @@ async function cancel(): Promise<void> {
                 {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
               </Button>
             </div>
+
+            <!-- A passkey can stand in for the six-digit code when the account registered one. -->
+            <div v-if="mfaPasskeyAvailable" class="flex flex-col gap-1.5">
+              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t("passkey.mfaNote") }}</p>
+              <Button
+                type="button"
+                variant="secondary"
+                block
+                :disabled="mfaSubmitting || mfaPasskeyBusy"
+                :aria-busy="mfaPasskeyBusy"
+                @click="verifyWithMfaPasskey"
+              >
+                <Loader2 v-if="mfaPasskeyBusy" class="animate-spin" />
+                <KeyRound v-else />
+                {{ mfaPasskeyBusy ? t("passkey.signingIn") : t("mfa.usePasskey") }}
+              </Button>
+              <p
+                v-if="mfaPasskeyErrorMessage"
+                role="alert"
+                class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+              >
+                <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                {{ t(mfaPasskeyErrorMessage) }}
+              </p>
+            </div>
           </form>
 
           <form v-else class="flex flex-col gap-4" @submit.prevent="submit">
@@ -858,6 +991,35 @@ async function cancel(): Promise<void> {
                 <ArrowLeft />
                 {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
               </Button>
+            </div>
+
+            <!-- A passkey replaces the typed secret; hidden when the browser cannot run a ceremony. -->
+            <div v-if="mode === 'password' && passkeyAvailable" class="flex flex-col gap-2">
+              <div class="flex items-center gap-2 text-[11px] text-ink-faint">
+                <span class="h-px flex-1 bg-rule" aria-hidden="true" />
+                {{ t("passkey.or") }}
+                <span class="h-px flex-1 bg-rule" aria-hidden="true" />
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                block
+                :disabled="passkeyBusy || submitting"
+                :aria-busy="passkeyBusy"
+                @click="signInWithPasskey"
+              >
+                <Loader2 v-if="passkeyBusy" class="animate-spin" />
+                <KeyRound v-else />
+                {{ passkeyBusy ? t("passkey.signingIn") : t("passkey.signIn") }}
+              </Button>
+              <p
+                v-if="passkeyErrorMessage"
+                role="alert"
+                class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+              >
+                <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                {{ t(passkeyErrorMessage) }}
+              </p>
             </div>
 
             <!-- Four ways in, one interaction; the links only appear once no code is in flight. -->

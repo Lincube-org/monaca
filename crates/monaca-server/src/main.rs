@@ -16,6 +16,7 @@ mod internal;
 mod management;
 mod oauth;
 mod openapi;
+mod passkey;
 mod protocol;
 mod routes;
 mod session;

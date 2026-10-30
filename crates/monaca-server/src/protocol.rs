@@ -9,14 +9,15 @@ use axum::{Form, Json};
 use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
-    DEFAULT_CODE_DIGITS, generate_numeric_code, hash_password, hash_secret, normalize_backup_code,
-    open, verify_password, verify_secret, verify_totp,
+    DEFAULT_CODE_DIGITS, assertion_user_verified, generate_challenge, generate_numeric_code,
+    hash_password, hash_secret, normalize_backup_code, open, verify_assertion, verify_password,
+    verify_secret, verify_totp,
 };
 use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
     Interaction, TokenErrorCode, TokenForm, TokenRequest, at_hash, scope_subset, verify_pkce_s256,
 };
-use monaca_store::{AccountRow, OrgRow, TenantRow, topics};
+use monaca_store::{AccountRow, OrgRow, PasskeyRow, TenantRow, topics};
 use monaca_types::{AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -327,6 +328,12 @@ async fn mfa_factors(
         if state.store.backup_code_count(tenant, account_id).await? > 0 {
             factors.push("backup_code");
         }
+    }
+    // A passkey is a second factor too, but only when one is actually enrolled: an empty list
+    // would render a button that cannot work. It is offered without TOTP as well — an account that
+    // chose passkeys as its only second factor has no authenticator app to fall back on.
+    if !state.store.passkeys(tenant, account_id).await?.is_empty() {
+        factors.push("passkey");
     }
     Ok(factors)
 }
@@ -1032,6 +1039,365 @@ pub async fn mfa_verify(
         .await
         .map_err(ApiError::Interaction)?;
 
+    complete_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// Record a rejected passkey sign-in.
+///
+/// The password path audits denials inline; a passkey denial happens before any address is known
+/// (the credential is the identifier), so the credential-bearing account's email is only recorded
+/// when the credential itself resolved.
+async fn audit_passkey_denial(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    interaction: &Interaction,
+    email: &str,
+    reason: &str,
+) {
+    let Ok(org) = state
+        .store
+        .org_by_slug(tenant, &interaction.organization)
+        .await
+    else {
+        return;
+    };
+    let ctx = org.ctx(tenant);
+    let event = sign_in_event(state.now(), &ctx.org_id, AuditDecision::Deny, email, reason);
+    if let Err(err) = state.audit_org(&ctx, &event).await {
+        tracing::warn!(%err, "could not append sign-in.failed audit event");
+    }
+}
+
+/// Resolve a sign-in interaction that may still take a primary factor.
+///
+/// A passkey is a *primary* factor here. Once the interaction is signed in (consent only) or
+/// waiting for a second factor, the discoverable-credential path would be a way around the factor
+/// the page is currently asking for, so both are refused rather than silently accepted.
+async fn passkey_sign_in_interaction(
+    state: &Arc<AppState>,
+    iid: &str,
+) -> Result<(Interaction, TenantRow), ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(state, iid).await?;
+    let (_, signed_in) = state
+        .peek_interaction_state(iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    if signed_in.is_some() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is already signed in",
+        ));
+    }
+    if state
+        .mfa_pending(iid)
+        .await
+        .map_err(ApiError::Interaction)?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is waiting for a second factor",
+        ));
+    }
+    Ok((interaction, tenant))
+}
+
+/// Decrypt the sealed public key and check one assertion against the stored credential.
+///
+/// `Ok(None)` is every *attacker-controlled* failure — bad signature, no user verification, a
+/// replayed or cloned counter — because the two callers render it differently (a `401` for primary
+/// sign-in, a counted refusal for the second factor). Decryption failing is not attacker-shaped and
+/// stays an `Err`.
+fn verify_passkey_assertion(
+    state: &AppState,
+    tenant: &TenantRow,
+    row: &PasskeyRow,
+    assertion: &crate::passkey::Assertion,
+    challenge: &[u8],
+    rp: &crate::passkey::RelyingParty,
+) -> Result<Option<u64>, ApiError> {
+    let dek = state.tenant_dek(tenant)?;
+    let public_key = open(&dek, &row.secret_enc)
+        .map_err(|err| ApiError::internal(format!("passkey public key: {err}")))?;
+
+    let Ok(sign_count) = verify_assertion(
+        &assertion.client_data_json,
+        &assertion.authenticator_data,
+        &assertion.signature,
+        &public_key,
+        challenge,
+        &rp.id,
+        &rp.origin,
+    ) else {
+        return Ok(None);
+    };
+    if !assertion_user_verified(&assertion.authenticator_data) {
+        return Ok(None);
+    }
+    if !crate::passkey::counter_is_acceptable(row.sign_count, sign_count) {
+        return Ok(None);
+    }
+    Ok(Some(sign_count))
+}
+
+/// Store the counter a verified assertion reported, so a cloned authenticator shows up next time.
+async fn record_passkey_counter(
+    state: &AppState,
+    tenant: &TenantRow,
+    row: &PasskeyRow,
+    sign_count: u64,
+) -> Result<(), ApiError> {
+    state
+        .store
+        .record_passkey_use(
+            tenant,
+            row.id,
+            sign_count.min(i64::MAX as u64) as i64,
+            state.now(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-in/passkey/options` — start a passwordless sign-in.
+///
+/// `allowCredentials` is empty on purpose: the page cannot name an account, so the browser offers
+/// the discoverable passkeys it holds for this host and reports the user handle with the result.
+pub async fn passkey_sign_in_options(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    passkey_sign_in_interaction(&state, &iid).await?;
+    let rp = crate::passkey::relying_party(&state.config)?;
+    let challenge = generate_challenge();
+    state
+        .put_passkey_challenge(
+            format!("in:{iid}"),
+            challenge.clone(),
+            state.now() + Duration::seconds(crate::passkey::CHALLENGE_TTL_SECS),
+        )
+        .await;
+    Ok(Json(crate::passkey::assertion_options(
+        &rp.id,
+        &challenge,
+        Vec::new(),
+    )))
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-in/passkey` — complete a passwordless sign-in.
+///
+/// The account is resolved from the credential the authenticator signed with; the `userHandle` must
+/// name the same account, otherwise one account's credential could assert an interaction into
+/// another account. Everything after that is shared with the password path, so a passkey sign-in
+/// still honours an enrolled second factor.
+pub async fn passkey_sign_in_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<crate::passkey::CeremonyBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = passkey_sign_in_interaction(&state, &iid).await?;
+    let Some(challenge) = state.take_passkey_challenge(&format!("in:{iid}")).await else {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "no passkey sign-in is pending; start again",
+        ));
+    };
+    let Some(assertion) = crate::passkey::parse_assertion(&body) else {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the browser's passkey response is malformed",
+        ));
+    };
+    let Some(row) = state
+        .store
+        .passkey_by_credential_id(&tenant, &assertion.credential_id)
+        .await?
+    else {
+        audit_passkey_denial(&state, &tenant, &interaction, "", "unknown_passkey").await;
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the passkey did not sign in",
+        ));
+    };
+    // A discoverable credential always carries the user handle; without it the assertion cannot
+    // name the account the signature was meant for.
+    if !assertion
+        .user_handle
+        .as_deref()
+        .and_then(|handle| Uuid::from_slice(handle).ok())
+        .is_some_and(|handle| handle == row.account_id)
+    {
+        audit_passkey_denial(&state, &tenant, &interaction, "", "passkey_user_handle").await;
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the passkey did not sign in",
+        ));
+    }
+    let Some(account) = state
+        .store
+        .account_by_id(&tenant, AccountId::from_uuid(row.account_id))
+        .await?
+    else {
+        audit_passkey_denial(&state, &tenant, &interaction, "", "passkey_account_gone").await;
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the passkey did not sign in",
+        ));
+    };
+    if account.state != "active" {
+        audit_passkey_denial(
+            &state,
+            &tenant,
+            &interaction,
+            &account.primary_email,
+            "account_disabled",
+        )
+        .await;
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the passkey did not sign in",
+        ));
+    }
+
+    let rp = crate::passkey::relying_party(&state.config)?;
+    let Some(sign_count) =
+        verify_passkey_assertion(&state, &tenant, &row, &assertion, &challenge, &rp)?
+    else {
+        audit_passkey_denial(
+            &state,
+            &tenant,
+            &interaction,
+            &account.primary_email,
+            "invalid_passkey",
+        )
+        .await;
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the passkey did not sign in",
+        ));
+    };
+    record_passkey_counter(&state, &tenant, &row, sign_count).await?;
+
+    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/mfa/passkey/options` — offer a passkey as the second factor.
+///
+/// Only the passkeys of the account waiting on this interaction are allowed, so the authenticator
+/// cannot answer with someone else's credential.
+pub async fn mfa_passkey_options(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let (_, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let Some(account_id) = state
+        .mfa_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is not waiting for a second factor",
+        ));
+    };
+    let rows = state
+        .store
+        .passkeys(&tenant, AccountId::from_uuid(account_id))
+        .await?;
+    if rows.is_empty() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this account has no passkeys",
+        ));
+    }
+
+    let rp = crate::passkey::relying_party(&state.config)?;
+    let challenge = generate_challenge();
+    state
+        .put_passkey_challenge(
+            format!("mfa:{iid}"),
+            challenge.clone(),
+            state.now() + Duration::seconds(crate::passkey::CHALLENGE_TTL_SECS),
+        )
+        .await;
+    let allow = rows
+        .iter()
+        .map(crate::passkey::credential_descriptor)
+        .collect();
+    Ok(Json(crate::passkey::assertion_options(
+        &rp.id, &challenge, allow,
+    )))
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/mfa/passkey` — prove the second factor with a passkey.
+///
+/// Every rejection is counted exactly like a wrong code: the two factors share the interaction's
+/// five-attempt budget, so a passkey cannot be used to reset the TOTP counter (or the reverse).
+pub async fn mfa_passkey_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<crate::passkey::CeremonyBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let Some(account_id) = state
+        .mfa_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is not waiting for a second factor",
+        ));
+    };
+
+    let Some(challenge) = state.take_passkey_challenge(&format!("mfa:{iid}")).await else {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    };
+    let Some(assertion) = crate::passkey::parse_assertion(&body) else {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    };
+    let Some(account) = state
+        .store
+        .account_by_id(&tenant, AccountId::from_uuid(account_id))
+        .await?
+    else {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    };
+    if account.state != "active" {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    }
+    let Some(row) = state
+        .store
+        .passkey_by_credential_id(&tenant, &assertion.credential_id)
+        .await?
+    else {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    };
+    // The credential must belong to the account this interaction is proving; otherwise a valid
+    // passkey of a different account would satisfy the challenge.
+    if row.account_id != account.id {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    }
+    if let Some(handle) = assertion.user_handle.as_deref()
+        && !Uuid::from_slice(handle).is_ok_and(|handle| handle == account.id)
+    {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    }
+
+    let rp = crate::passkey::relying_party(&state.config)?;
+    let Some(sign_count) =
+        verify_passkey_assertion(&state, &tenant, &row, &assertion, &challenge, &rp)?
+    else {
+        return Err(refuse_mfa_code(&state, &iid).await?);
+    };
+    record_passkey_counter(&state, &tenant, &row, sign_count).await?;
+
+    state
+        .clear_mfa_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
     complete_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
 

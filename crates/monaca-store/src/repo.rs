@@ -216,6 +216,41 @@ impl SessionRow {
     }
 }
 
+/// A WebAuthn credential in `tenant.credentials` with `kind = 'passkey'`.
+///
+/// `secret_enc` is the COSE public key sealed by the caller, like every other credential blob;
+/// `credential_id` is the raw (not base64url) id the authenticator chose.
+#[derive(Debug, Clone, FromRow)]
+pub struct PasskeyRow {
+    /// Row id, exposed as `pky_…`.
+    pub id: Uuid,
+    /// The account the passkey belongs to.
+    pub account_id: Uuid,
+    /// Raw credential id reported as `rawId` by the browser.
+    pub credential_id: Vec<u8>,
+    /// Sealed COSE public key.
+    pub secret_enc: Vec<u8>,
+    /// The last accepted signature counter; `0` means the authenticator does not count.
+    pub sign_count: i64,
+    /// Transport hints (`usb`, `nfc`, `ble`, `internal`, `hybrid`).
+    pub transports: Vec<String>,
+    /// User-chosen label.
+    pub name: Option<String>,
+    /// The authenticator's model id, when it reported one.
+    pub aaguid: Option<Uuid>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Last successful assertion.
+    pub last_used_at: Option<OffsetDateTime>,
+}
+
+impl PasskeyRow {
+    /// The passkey's typed id.
+    pub fn passkey_id(&self) -> monaca_types::PasskeyId {
+        monaca_types::PasskeyId::from_uuid(self.id)
+    }
+}
+
 /// An agent row.
 #[derive(Debug, Clone, FromRow)]
 pub struct AgentRow {
@@ -653,6 +688,149 @@ impl Store {
              WHERE account_id = $1 AND kind = 'totp'",
         )
         .bind(account_id.uuid())
+        .bind(at)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ WebAuthn passkeys
+
+    /// Every passkey of an account, oldest first.
+    pub async fn passkeys(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Vec<PasskeyRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, PasskeyRow>(
+            "SELECT id, account_id, credential_id, secret_enc, sign_count, transports, name,
+                    aaguid, created_at, last_used_at
+             FROM tenant.credentials
+             WHERE account_id = $1 AND kind = 'passkey'
+             ORDER BY created_at",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// The passkey that owns a credential id, for the assertion ceremonies.
+    ///
+    /// The lookup is tenant-wide because the browser sends only the id: the account is discovered
+    /// from the row, never from a value the client chose.
+    pub async fn passkey_by_credential_id(
+        &self,
+        tenant: &TenantRow,
+        credential_id: &[u8],
+    ) -> Result<Option<PasskeyRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, PasskeyRow>(
+            "SELECT id, account_id, credential_id, secret_enc, sign_count, transports, name,
+                    aaguid, created_at, last_used_at
+             FROM tenant.credentials
+             WHERE kind = 'passkey' AND credential_id = $1",
+        )
+        .bind(credential_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Store a new passkey. The caller seals the COSE public key before calling.
+    ///
+    /// A duplicate credential id is rejected by the unique index, which is what keeps one
+    /// authenticator from being enrolled for two accounts.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a passkey insert carries exactly the WebAuthn fields; a struct would only move them"
+    )]
+    pub async fn insert_passkey(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        credential_id: &[u8],
+        sealed: &[u8],
+        sign_count: i64,
+        transports: &[String],
+        name: Option<&str>,
+        aaguid: Option<Uuid>,
+    ) -> Result<PasskeyRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, PasskeyRow>(
+            "INSERT INTO tenant.credentials
+                (id, account_id, kind, secret_enc, credential_id, sign_count, transports, name, aaguid)
+             VALUES ($1,$2,'passkey',$3,$4,$5,$6,$7,$8)
+             RETURNING id, account_id, credential_id, secret_enc, sign_count, transports, name,
+                       aaguid, created_at, last_used_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(account_id.uuid())
+        .bind(sealed)
+        .bind(credential_id)
+        .bind(sign_count)
+        .bind(transports.to_vec())
+        .bind(name)
+        .bind(aaguid)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Rename a passkey, scoped to its owner. `None` when the id is not this account's.
+    pub async fn rename_passkey(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        passkey_id: Uuid,
+        name: &str,
+    ) -> Result<Option<PasskeyRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, PasskeyRow>(
+            "UPDATE tenant.credentials SET name = $3
+             WHERE id = $1 AND account_id = $2 AND kind = 'passkey'
+             RETURNING id, account_id, credential_id, secret_enc, sign_count, transports, name,
+                       aaguid, created_at, last_used_at",
+        )
+        .bind(passkey_id)
+        .bind(account_id.uuid())
+        .bind(name)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Delete a passkey, scoped to its owner. `true` when one was removed.
+    pub async fn delete_passkey(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        passkey_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "DELETE FROM tenant.credentials
+             WHERE id = $1 AND account_id = $2 AND kind = 'passkey'",
+        )
+        .bind(passkey_id)
+        .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record a successful assertion: the new counter and the use time.
+    pub async fn record_passkey_use(
+        &self,
+        tenant: &TenantRow,
+        passkey_id: Uuid,
+        sign_count: i64,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "UPDATE tenant.credentials SET sign_count = $2, last_used_at = $3
+             WHERE id = $1 AND kind = 'passkey'",
+        )
+        .bind(passkey_id)
+        .bind(sign_count)
         .bind(at)
         .execute(&pool)
         .await?;

@@ -11,6 +11,8 @@
  * browser only ever sees the origin it loaded from.
  */
 
+import type { CeremonyJSON, RequestOptionsJSON } from "./webauthn";
+
 /** One shape per documented error, so a page can branch without matching on strings. */
 export type InteractionErrorCode =
   | "MONACA_INVALID_CREDENTIALS"
@@ -36,7 +38,7 @@ export interface InteractionDetails {
   signed_in: boolean;
   /** Whether the primary factor passed and the account still owes an authenticator code. */
   mfa_required: boolean;
-  /** Which factors the second-factor step accepts: `totp` and/or `backup_code`. */
+  /** Which factors the second-factor step accepts: `totp`, `backup_code` and/or `passkey`. */
   mfa_factors: string[];
   expires_at: string;
 }
@@ -252,6 +254,56 @@ export function verifyMfa(
   return call<SignInResult>(`${base(tenant, iid)}/mfa/verify`, {
     method: "POST",
     body: JSON.stringify({ code, factor }),
+  });
+}
+
+/**
+ * Start a passwordless sign-in: the browser is offered every discoverable passkey it holds for this
+ * site, and the resulting assertion names the account it belongs to.
+ */
+export function getPasskeySignInOptions(
+  tenant: string,
+  iid: string,
+): Promise<RequestOptionsJSON> {
+  return call<RequestOptionsJSON>(`${base(tenant, iid)}/sign-in/passkey/options`, {
+    method: "POST",
+  });
+}
+
+/** Complete the passwordless sign-in with the assertion the authenticator produced. */
+export function verifyPasskeySignIn(
+  tenant: string,
+  iid: string,
+  body: CeremonyJSON,
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/sign-in/passkey`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Offer the account's own passkeys as the second factor. The allow-list is server-side, so the
+ * authenticator cannot answer the challenge with another account's credential.
+ */
+export function getMfaPasskeyOptions(
+  tenant: string,
+  iid: string,
+): Promise<RequestOptionsJSON> {
+  return call<RequestOptionsJSON>(`${base(tenant, iid)}/mfa/passkey/options`, {
+    method: "POST",
+  });
+}
+
+/** Prove the second factor with a passkey assertion. */
+export function verifyMfaPasskey(
+  tenant: string,
+  iid: string,
+  body: CeremonyJSON,
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/mfa/passkey`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 

@@ -6,14 +6,30 @@
  * stale cookie is a `401` and the page sends the visitor back to sign in.
  */
 
+import type { CeremonyJSON, CreationOptionsJSON } from "./webauthn";
+
 export interface AccountProfile {
   id: string;
   email: string;
   display_name: string;
   /** False for a passwordless account; the page hides the change-password form then. */
   has_password: boolean;
-  /** `backup_codes` is how many unused recovery codes remain. */
-  mfa: { totp: boolean; backup_codes: number };
+  /** `backup_codes` is how many unused recovery codes remain; `passkeys` how many are registered. */
+  mfa: { totp: boolean; backup_codes: number; passkeys: number };
+}
+
+/**
+ * One registered passkey, as the account centre lists it.
+ *
+ * The credential id is deliberately absent: the server keeps it, and the page has no use for it —
+ * naming a passkey and removing it only needs the `pky_…` id.
+ */
+export interface AccountPasskey {
+  id: string;
+  name: string | null;
+  transports: string[];
+  created_at: string;
+  last_used_at: string | null;
 }
 
 /** A freshly generated sheet of recovery codes; the plaintext is shown only in this response. */
@@ -113,6 +129,41 @@ export function generateBackupCodes(tenant: string): Promise<BackupCodeSheet> {
 
 export function disableBackupCodes(tenant: string): Promise<void> {
   return call<void>(`${base(tenant)}/mfa/backup-codes`, { method: "DELETE" });
+}
+
+/**
+ * Start a registration: the server mints the challenge and the browser runs the ceremony.
+ *
+ * `excludeCredentials` comes back filled with the account's existing passkeys, so an authenticator
+ * that already holds one refuses to enrol it a second time.
+ */
+export function beginPasskeyRegistration(tenant: string): Promise<CreationOptionsJSON> {
+  return call<CreationOptionsJSON>(`${base(tenant)}/passkeys/options`, { method: "POST" });
+}
+
+/** Submit the ceremony result; the server verifies the attestation before storing anything. */
+export function registerPasskey(tenant: string, body: CeremonyJSON): Promise<AccountPasskey> {
+  return call<AccountPasskey>(`${base(tenant)}/passkeys`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listPasskeys(tenant: string): Promise<{ items: AccountPasskey[] }> {
+  return call<{ items: AccountPasskey[] }>(`${base(tenant)}/passkeys`);
+}
+
+export function renamePasskey(tenant: string, passkeyId: string, name: string): Promise<AccountPasskey> {
+  return call<AccountPasskey>(`${base(tenant)}/passkeys/${encodeURIComponent(passkeyId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deletePasskey(tenant: string, passkeyId: string): Promise<void> {
+  return call<void>(`${base(tenant)}/passkeys/${encodeURIComponent(passkeyId)}`, {
+    method: "DELETE",
+  });
 }
 
 /** Change the display name applications show; the server trims and bounds it. */

@@ -11,11 +11,12 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use monaca_crypto::{
-    BACKUP_CODE_COUNT, format_backup_code, generate_backup_codes, generate_totp_secret,
-    hash_password, hash_secret, seal, totp_base32, totp_otpauth_url, verify_password, verify_totp,
+    BACKUP_CODE_COUNT, format_backup_code, generate_backup_codes, generate_challenge,
+    generate_totp_secret, hash_password, hash_secret, seal, totp_base32, totp_otpauth_url,
+    verify_password, verify_registration, verify_totp,
 };
-use monaca_store::{AccountRow, SessionRow, TenantRow};
-use monaca_types::{AccountId, SessionId, TypedId};
+use monaca_store::{AccountRow, PasskeyRow, SessionRow, TenantRow};
+use monaca_types::{AccountId, PasskeyId, SessionId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::Duration;
@@ -30,10 +31,17 @@ use crate::state::AppState;
 const ENROLLMENT_TTL_SECS: i64 = 600;
 
 /// The issuer an authenticator app displays; the contract fixes it (§6.1 `mfa`).
-const ISSUER: &str = "Monaca";
+pub(crate) const ISSUER: &str = "Monaca";
 
 /// The longest display name an account may set, in characters.
 const MAX_DISPLAY_NAME_LEN: usize = 80;
+
+/// How many passkeys one account may register. A person has a handful of devices; ten leaves room
+/// for a spare key without letting a script fill the table.
+const MAX_PASSKEYS: usize = 10;
+
+/// The longest label an account may give a passkey, in characters.
+const MAX_PASSKEY_NAME_LEN: usize = 80;
 
 /// The account behind the request's SSO cookie.
 async fn signed_in_account(
@@ -85,6 +93,11 @@ async fn profile_json(
         .store
         .backup_code_count(tenant, account.account_id())
         .await?;
+    let passkeys = state
+        .store
+        .passkeys(tenant, account.account_id())
+        .await?
+        .len();
     let has_password = state
         .store
         .account_by_email(tenant, &account.primary_email)
@@ -96,7 +109,7 @@ async fn profile_json(
         "email": account.primary_email,
         "display_name": account.display_name,
         "has_password": has_password,
-        "mfa": { "totp": totp, "backup_codes": backup_codes },
+        "mfa": { "totp": totp, "backup_codes": backup_codes, "passkeys": passkeys },
     }))
 }
 
@@ -455,6 +468,232 @@ pub async fn remove_backup_codes(
         .store
         .delete_backup_codes(&tenant, account.account_id())
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -----------------------------------------------------------------------------------------
+// Passkeys
+//
+// A passkey is a WebAuthn credential the account registers here and can later use either as the
+// primary sign-in factor or as a second factor. Registration is two calls because the challenge
+// must be minted server-side and redeemed once: options, then the browser's result.
+
+/// Trim and bound the optional label, treating a blank one as no label.
+fn check_passkey_name(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let name = raw.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.chars().count() > MAX_PASSKEY_NAME_LEN {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("a passkey name must be at most {MAX_PASSKEY_NAME_LEN} characters"),
+        ));
+    }
+    Ok(Some(name.to_owned()))
+}
+
+/// The public shape of one passkey. The credential id stays server-side: the page never needs it,
+/// and handing it out only widens the surface a script can probe.
+fn passkey_json(row: &PasskeyRow) -> Value {
+    json!({
+        "id": row.passkey_id().to_typed_string(),
+        "name": row.name,
+        "transports": row.transports,
+        "created_at": crate::management::ts(row.created_at),
+        "last_used_at": row.last_used_at.map(crate::management::ts),
+    })
+}
+
+/// `POST /t/{tenant}/account/passkeys/options` — start a passkey registration.
+///
+/// The challenge is held for [`crate::passkey::CHALLENGE_TTL_SECS`] under `reg:{account}`, and the
+/// existing passkeys are sent back as `excludeCredentials` so the authenticator refuses to enrol
+/// the same credential twice.
+pub async fn begin_passkey_registration(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let existing = state.store.passkeys(&tenant, account.account_id()).await?;
+    if existing.len() >= MAX_PASSKEYS {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("an account may register at most {MAX_PASSKEYS} passkeys"),
+        ));
+    }
+
+    let rp = crate::passkey::relying_party(&state.config)?;
+    let challenge = generate_challenge();
+    state
+        .put_passkey_challenge(
+            format!("reg:{}", account.id),
+            challenge.clone(),
+            state.now() + Duration::seconds(crate::passkey::CHALLENGE_TTL_SECS),
+        )
+        .await;
+    let exclude = existing
+        .iter()
+        .map(crate::passkey::credential_descriptor)
+        .collect();
+    Ok(Json(crate::passkey::registration_options(
+        &rp, &account, &challenge, exclude,
+    )))
+}
+
+/// `POST /t/{tenant}/account/passkeys` — verify the browser's registration and store it.
+///
+/// Nothing is written until the attestation verifies: a credential that cannot produce a valid
+/// signature is useless, and a failed attempt must not consume one of the ten slots.
+pub async fn register_passkey(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<crate::passkey::CeremonyBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let existing = state.store.passkeys(&tenant, account.account_id()).await?;
+    if existing.len() >= MAX_PASSKEYS {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("an account may register at most {MAX_PASSKEYS} passkeys"),
+        ));
+    }
+
+    let Some(challenge) = state
+        .take_passkey_challenge(&format!("reg:{}", account.id))
+        .await
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "no passkey registration is pending; start again",
+        ));
+    };
+    let malformed = || {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the browser's passkey response is malformed",
+        )
+    };
+    let Some(registration) = crate::passkey::parse_registration(&body) else {
+        return Err(malformed());
+    };
+
+    let rp = crate::passkey::relying_party(&state.config)?;
+    let credential = verify_registration(
+        &registration.client_data_json,
+        &registration.attestation_object,
+        &challenge,
+        &rp.id,
+        &rp.origin,
+    )
+    .map_err(|err| {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("the passkey registration did not verify: {err}"),
+        )
+    })?;
+    // `rawId` is what the browser will send back later; if it disagrees with the id inside the
+    // attestation, the two halves of one ceremony describe different credentials.
+    if credential.credential_id != registration.credential_id {
+        return Err(malformed());
+    }
+    if state
+        .store
+        .passkey_by_credential_id(&tenant, &credential.credential_id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this passkey is already registered",
+        ));
+    }
+
+    let name = check_passkey_name(body.name.as_deref())?;
+    let sealed = seal(&state.tenant_dek(&tenant)?, &credential.public_key)
+        .map_err(|err| ApiError::internal(format!("passkey public key: {err}")))?;
+    let sign_count = credential.sign_count.min(i64::MAX as u64) as i64;
+    let row = state
+        .store
+        .insert_passkey(
+            &tenant,
+            account.account_id(),
+            &credential.credential_id,
+            &sealed,
+            sign_count,
+            &registration.transports,
+            name.as_deref(),
+            credential.aaguid,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(passkey_json(&row))))
+}
+
+/// `GET /t/{tenant}/account/passkeys` — every passkey of the signed-in account.
+pub async fn list_passkeys(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let rows = state.store.passkeys(&tenant, account.account_id()).await?;
+    Ok(Json(json!({
+        "items": rows.iter().map(passkey_json).collect::<Vec<_>>(),
+    })))
+}
+
+/// The body of `PATCH /t/{tenant}/account/passkeys/{passkey}`.
+#[derive(Debug, Deserialize)]
+pub struct RenamePasskeyBody {
+    /// The new label.
+    pub name: String,
+}
+
+/// `PATCH /t/{tenant}/account/passkeys/{passkey}` — relabel one passkey.
+pub async fn rename_passkey(
+    State(state): State<Arc<AppState>>,
+    Path((tenant, passkey)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<RenamePasskeyBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let passkey_id = PasskeyId::parse(&passkey)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a passkey id"))?;
+    let name = check_passkey_name(Some(&body.name))?.ok_or_else(|| {
+        ApiError::problem(kinds::INVALID_REQUEST, "a passkey name must not be empty")
+    })?;
+    let row = state
+        .store
+        .rename_passkey(&tenant, account.account_id(), passkey_id.uuid(), &name)
+        .await?
+        .ok_or_else(|| ApiError::not_found("passkey"))?;
+    Ok(Json(passkey_json(&row)))
+}
+
+/// `DELETE /t/{tenant}/account/passkeys/{passkey}` — remove one passkey.
+///
+/// Removing the last passkey only removes an optional factor; a password (or an enrolled
+/// authenticator app) still protects the account, so no confirmation beyond the session is asked.
+pub async fn delete_passkey(
+    State(state): State<Arc<AppState>>,
+    Path((tenant, passkey)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let passkey_id = PasskeyId::parse(&passkey)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a passkey id"))?;
+    if !state
+        .store
+        .delete_passkey(&tenant, account.account_id(), passkey_id.uuid())
+        .await?
+    {
+        return Err(ApiError::not_found("passkey"));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
