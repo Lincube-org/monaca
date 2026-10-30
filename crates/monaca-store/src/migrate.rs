@@ -38,11 +38,18 @@ const CONTROL: &[(i64, &str, &str)] = &[(
 )];
 
 /// The tenant set (§5.6). Applied to each tenant database after `CREATE DATABASE`.
-const TENANT: &[(i64, &str, &str)] = &[(
-    1,
-    "tenant schema (§5.6)",
-    include_str!("../migrations/tenant.sql"),
-)];
+const TENANT: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "tenant schema (§5.6)",
+        include_str!("../migrations/tenant.sql"),
+    ),
+    (
+        2,
+        "protocol completeness: PAR, DPoP, refresh families, token revocation (M1)",
+        include_str!("../migrations/tenant_2.sql"),
+    ),
+];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.
 const ORG: &[(i64, &str, &str)] = &[(

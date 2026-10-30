@@ -24,6 +24,8 @@ pub enum TokenErrorCode {
     UnsupportedGrantType,
     /// The requested scope exceeds what the grant allows.
     InvalidScope,
+    /// The request carried no DPoP proof, or the proof did not verify (RFC 9449 §7.1).
+    InvalidDpopProof,
 }
 
 impl TokenErrorCode {
@@ -36,6 +38,7 @@ impl TokenErrorCode {
             TokenErrorCode::UnauthorizedClient => "unauthorized_client",
             TokenErrorCode::UnsupportedGrantType => "unsupported_grant_type",
             TokenErrorCode::InvalidScope => "invalid_scope",
+            TokenErrorCode::InvalidDpopProof => "invalid_dpop_proof",
         }
     }
 
@@ -320,6 +323,8 @@ pub struct AccessTokenClaims {
     pub act: Option<Value>,
     /// `grant_id`, present on delegated tokens.
     pub grant_id: Option<String>,
+    /// `cnf`, the proof-of-possession binding (RFC 7800); `{"jkt": …}` for DPoP tokens.
+    pub cnf: Option<Value>,
 }
 
 impl AccessTokenClaims {
@@ -341,6 +346,9 @@ impl AccessTokenClaims {
         }
         if let Some(grant_id) = &self.grant_id {
             value["grant_id"] = Value::String(grant_id.clone());
+        }
+        if let Some(cnf) = &self.cnf {
+            value["cnf"] = cnf.clone();
         }
         value
     }
@@ -369,6 +377,10 @@ pub struct IdTokenClaims {
     pub email: Option<String>,
     /// `name`, only for `scope` containing `profile`.
     pub name: Option<String>,
+    /// `auth_time`, the instant the user actually authenticated (OIDC Core §2).
+    pub auth_time: Option<i64>,
+    /// `at_hash`, the access token's left-half digest (OIDC Core §3.1.3.6).
+    pub at_hash: Option<String>,
 }
 
 impl IdTokenClaims {
@@ -392,8 +404,52 @@ impl IdTokenClaims {
         if let Some(name) = &self.name {
             value["name"] = Value::String(name.clone());
         }
+        if let Some(auth_time) = self.auth_time {
+            value["auth_time"] = Value::from(auth_time);
+        }
+        if let Some(at_hash) = &self.at_hash {
+            value["at_hash"] = Value::String(at_hash.clone());
+        }
         value
     }
+}
+
+/// The UserInfo response — OIDC Core §5.3.
+#[derive(Debug, Clone)]
+pub struct UserInfoClaims {
+    /// `sub`, the account (`acc_…`). Always present.
+    pub sub: String,
+    /// `name`, only for `scope` containing `profile`.
+    pub name: Option<String>,
+    /// `email`, only for `scope` containing `email`.
+    pub email: Option<String>,
+    /// `email_verified`, alongside `email`.
+    pub email_verified: Option<bool>,
+}
+
+impl UserInfoClaims {
+    /// The JSON body.
+    pub fn to_json(&self) -> Value {
+        let mut value = json!({ "sub": self.sub });
+        if let Some(name) = &self.name {
+            value["name"] = Value::String(name.clone());
+        }
+        if let Some(email) = &self.email {
+            value["email"] = Value::String(email.clone());
+        }
+        if let Some(verified) = self.email_verified {
+            value["email_verified"] = Value::from(verified);
+        }
+        value
+    }
+}
+
+/// `base64url(left-half(SHA-256(access_token)))` — OIDC Core §3.1.3.6.
+pub fn at_hash(access_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(access_token.as_bytes());
+    data_encoding::BASE64URL_NOPAD.encode(&digest[..digest.len() / 2])
 }
 
 #[cfg(test)]
@@ -528,10 +584,81 @@ mod tests {
             exp: 1_767_226_500,
             act: None,
             grant_id: None,
+            cnf: None,
         };
         let value = claims.to_json();
         assert_eq!(value["scope"], json!(["tools:read"]));
         assert!(value.get("act").is_none());
         assert!(value.get("grant_id").is_none());
+        assert!(value.get("cnf").is_none());
+    }
+
+    #[test]
+    fn a_dpop_binding_appears_as_cnf() {
+        let claims = AccessTokenClaims {
+            iss: "http://localhost:8080/t/demo".into(),
+            sub: "acc_x".into(),
+            aud: "http://localhost:8080/v1".into(),
+            tid: "ten_x".into(),
+            org: "org_x".into(),
+            scope: vec!["openid".into()],
+            jti: "j".into(),
+            iat: 0,
+            exp: 1,
+            act: None,
+            grant_id: None,
+            cnf: Some(json!({ "jkt": "jkt" })),
+        };
+        assert_eq!(claims.to_json()["cnf"], json!({ "jkt": "jkt" }));
+    }
+
+    #[test]
+    fn the_id_token_carries_auth_time_and_at_hash() {
+        let claims = IdTokenClaims {
+            iss: "http://localhost:8080/t/demo".into(),
+            sub: "acc_x".into(),
+            aud: "monaca-console".into(),
+            tid: "ten_x".into(),
+            org: "org_x".into(),
+            iat: 100,
+            exp: 200,
+            nonce: None,
+            email: None,
+            name: None,
+            auth_time: Some(90),
+            at_hash: Some(at_hash("access-token")),
+        };
+        let value = claims.to_json();
+        assert_eq!(value["auth_time"], json!(90));
+        assert_eq!(value["at_hash"], json!(at_hash("access-token")));
+    }
+
+    #[test]
+    fn at_hash_is_the_left_half_of_the_digest() {
+        // 32-byte digest, so the left half is 16 bytes and the encoding is 22 characters.
+        assert_eq!(at_hash("x").len(), 22);
+        assert_ne!(at_hash("a"), at_hash("b"));
+    }
+
+    #[test]
+    fn userinfo_only_echoes_scoped_claims() {
+        let claims = UserInfoClaims {
+            sub: "acc_x".into(),
+            name: Some("Ada".into()),
+            email: Some("ada@example.test".into()),
+            email_verified: Some(true),
+        };
+        let value = claims.to_json();
+        assert_eq!(value["sub"], "acc_x");
+        assert_eq!(value["name"], "Ada");
+        assert_eq!(value["email_verified"], json!(true));
+
+        let bare = UserInfoClaims {
+            sub: "acc_x".into(),
+            name: None,
+            email: None,
+            email_verified: None,
+        };
+        assert_eq!(bare.to_json(), json!({ "sub": "acc_x" }));
     }
 }

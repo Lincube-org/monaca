@@ -26,8 +26,16 @@ export interface InteractionDetails {
   client: { client_id: string; name: string };
   scopes: string[];
   organization: string | null;
+  /** Whether the flow must show the consent screen before a code is issued. */
+  consent_required: boolean;
   expires_at: string;
 }
+
+/**
+ * The sign-in result is a union because a third-party client (or `prompt=consent`) pauses after
+ * authentication: the server has not minted a code yet and waits for `submitConsent`.
+ */
+export type SignInResult = { redirect_to: string } | { consent_required: true };
 
 export class InteractionError extends Error {
   readonly code: InteractionErrorCode;
@@ -131,10 +139,25 @@ export function submitSignIn(
   tenant: string,
   iid: string,
   credentials: { email: string; password: string },
-): Promise<{ redirect_to: string }> {
-  return call<{ redirect_to: string }>(`${base(tenant, iid)}/sign-in`, {
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/sign-in`, {
     method: "POST",
     body: JSON.stringify(credentials),
+  });
+}
+
+/**
+ * The consent half of the handshake. `allow` mints the code and returns the redirect; `deny`
+ * returns an `error=access_denied` redirect for the client.
+ */
+export function submitConsent(
+  tenant: string,
+  iid: string,
+  decision: "allow" | "deny",
+): Promise<{ redirect_to: string }> {
+  return call<{ redirect_to: string }>(`${base(tenant, iid)}/consent`, {
+    method: "POST",
+    body: JSON.stringify({ decision }),
   });
 }
 

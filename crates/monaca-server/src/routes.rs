@@ -72,12 +72,26 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
         )
         .route("/t/{tenant}/oauth2/token", post(crate::protocol::token))
         .route(
+            "/t/{tenant}/oauth2/userinfo",
+            get(crate::oauth::userinfo).post(crate::oauth::userinfo),
+        )
+        .route(
+            "/t/{tenant}/oauth2/introspect",
+            post(crate::oauth::introspect),
+        )
+        .route("/t/{tenant}/oauth2/revoke", post(crate::oauth::revoke))
+        .route("/t/{tenant}/oauth2/par", post(crate::oauth::par))
+        .route(
             "/t/{tenant}/interaction/{iid}",
             get(crate::protocol::interaction_details),
         )
         .route(
             "/t/{tenant}/interaction/{iid}/sign-in",
             post(crate::protocol::sign_in),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/consent",
+            post(crate::protocol::consent),
         )
         .route(
             "/t/{tenant}/interaction/{iid}/abort",

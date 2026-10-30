@@ -26,6 +26,8 @@ pub struct Config {
     pub id_token_ttl: Duration,
     /// Interaction TTL (`MONACA_INTERACTION_TTL_SECS`, 600).
     pub interaction_ttl: Duration,
+    /// Pushed authorization request TTL (`MONACA_PAR_REQUEST_TTL_SECS`, 60).
+    pub par_request_ttl: Duration,
     /// The tenant the console signs into (`MONACA_CONSOLE_TENANT`, `demo`).
     pub console_tenant: String,
     /// The org the console resolves when the flow names none (`MONACA_BFF_DEFAULT_ORG`, `acme`).
@@ -64,6 +66,7 @@ impl Config {
             auth_code_ttl: secs("MONACA_AUTH_CODE_TTL_SECS", 60),
             id_token_ttl: secs("MONACA_ID_TOKEN_TTL_SECS", 900),
             interaction_ttl: secs("MONACA_INTERACTION_TTL_SECS", 600),
+            par_request_ttl: secs("MONACA_PAR_REQUEST_TTL_SECS", 60),
             console_tenant: env("MONACA_CONSOLE_TENANT").unwrap_or_else(|| "demo".to_owned()),
             default_org: env("MONACA_BFF_DEFAULT_ORG").unwrap_or_else(|| "acme".to_owned()),
             console_client_id: env("MONACA_CONSOLE_CLIENT_ID")
@@ -88,6 +91,26 @@ impl Config {
     /// The token endpoint for a tenant.
     pub fn token_endpoint(&self, tenant: &str) -> String {
         format!("{}/oauth2/token", self.issuer(tenant))
+    }
+
+    /// The UserInfo endpoint for a tenant.
+    pub fn userinfo_endpoint(&self, tenant: &str) -> String {
+        format!("{}/oauth2/userinfo", self.issuer(tenant))
+    }
+
+    /// The introspection endpoint for a tenant.
+    pub fn introspection_endpoint(&self, tenant: &str) -> String {
+        format!("{}/oauth2/introspect", self.issuer(tenant))
+    }
+
+    /// The revocation endpoint for a tenant.
+    pub fn revocation_endpoint(&self, tenant: &str) -> String {
+        format!("{}/oauth2/revoke", self.issuer(tenant))
+    }
+
+    /// The pushed authorization request endpoint for a tenant.
+    pub fn par_endpoint(&self, tenant: &str) -> String {
+        format!("{}/oauth2/par", self.issuer(tenant))
     }
 
     /// The management API audience.
@@ -141,6 +164,7 @@ mod tests {
             auth_code_ttl: Duration::from_secs(60),
             id_token_ttl: Duration::from_secs(900),
             interaction_ttl: Duration::from_secs(600),
+            par_request_ttl: Duration::from_secs(60),
             console_tenant: "demo".into(),
             default_org: "acme".into(),
             console_client_id: "monaca-console".into(),
@@ -156,6 +180,14 @@ mod tests {
             "http://localhost:8080/t/demo/oauth2/token"
         );
         assert_eq!(config.management_audience(), "http://localhost:8080/v1");
+        assert_eq!(
+            config.userinfo_endpoint("demo"),
+            "http://localhost:8080/t/demo/oauth2/userinfo"
+        );
+        assert_eq!(
+            config.par_endpoint("demo"),
+            "http://localhost:8080/t/demo/oauth2/par"
+        );
     }
 
     #[test]

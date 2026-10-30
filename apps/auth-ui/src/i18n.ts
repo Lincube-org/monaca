@@ -32,8 +32,18 @@ export const messages = {
     /** The security note, kept short and factual rather than reassuring. */
     footnote: "Your password is sent only to this tenant's sign-in service.",
   },
+  consent: {
+    title: "Approve access",
+    request: "{client} is asking to access your account",
+    note: "You are signed in. Review what this application will be allowed to do.",
+    allow: "Allow access",
+    allowSubmitting: "Approving",
+    deny: "Deny",
+    denySubmitting: "Denying",
+  },
   errors: {
     invalidCredentials: "That email and password combination is not recognised.",
+    consentFailed: "Could not record your decision. Try again.",
     interactionNotFound: "This sign-in request no longer exists. Start again from the application.",
     interactionExpired: "This sign-in request has expired. Start again from the application.",
     interactionConsumed: "This sign-in request has already been used. Start again from the application.",

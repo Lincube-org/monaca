@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, ScopeBadge, Skeleton } from "@monaca/ui";
-import { AlertCircle, ArrowLeft, Eye, EyeOff, Loader2, LockKeyhole } from "lucide-vue-next";
+import { AlertCircle, ArrowLeft, Check, Eye, EyeOff, Loader2, LockKeyhole } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 
-import { InteractionError, getInteraction, submitSignIn, abortInteraction, navigateTo, type InteractionDetails } from "@/api/interaction";
+import { InteractionError, getInteraction, submitSignIn, submitConsent, abortInteraction, navigateTo, type InteractionDetails } from "@/api/interaction";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -37,6 +37,11 @@ const submitting = ref(false);
 const cancelling = ref(false);
 const fieldError = ref<MessageKey | null>(null);
 const submitError = ref<InteractionError | null>(null);
+
+/** Set once sign-in succeeds for a flow that still needs approval. */
+const consentRequired = ref(false);
+const consentSubmitting = ref(false);
+const consentError = ref<Error | null>(null);
 
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
@@ -139,11 +144,16 @@ async function signIn(): Promise<void> {
 
   submitting.value = true;
   try {
-    const { redirect_to } = await submitSignIn(tenantFromUrl.value, interactionId.value, {
+    const result = await submitSignIn(tenantFromUrl.value, interactionId.value, {
       email: email.value.trim(),
       password: password.value,
     });
-    navigateTo(redirect_to);
+    if ("consent_required" in result) {
+      // Authenticated, but the code is withheld until the user approves the scopes.
+      consentRequired.value = true;
+      return;
+    }
+    navigateTo(result.redirect_to);
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
     // Clear the password but keep the email: the user is about to try again.
@@ -155,6 +165,20 @@ async function signIn(): Promise<void> {
     passwordInput.value?.$el?.focus?.();
   } finally {
     submitting.value = false;
+  }
+}
+
+async function decideConsent(decision: "allow" | "deny"): Promise<void> {
+  if (!tenantFromUrl.value || !interactionId.value) return;
+  consentError.value = null;
+  consentSubmitting.value = true;
+  try {
+    const { redirect_to } = await submitConsent(tenantFromUrl.value, interactionId.value, decision);
+    navigateTo(redirect_to);
+  } catch (error) {
+    consentError.value = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    consentSubmitting.value = false;
   }
 }
 
@@ -213,16 +237,16 @@ async function cancel(): Promise<void> {
           </Alert>
         </div>
 
-        <!-- The form. -->
-        <form v-else class="flex flex-col gap-4" @submit.prevent="signIn">
+        <!-- Sign-in, then consent when the client or `prompt=consent` asks for it. -->
+        <div v-else class="flex flex-col gap-4">
           <div>
             <h1 class="text-[17px] font-semibold leading-snug tracking-[-0.01em] text-ink">
-              {{ t("signIn.title") }}
+              {{ consentRequired ? t("consent.title") : t("signIn.title") }}
             </h1>
             <p class="mt-1 text-[12.5px] leading-snug text-ink-muted">
               {{
                 details
-                  ? t("signIn.request", { client: details.client.name })
+                  ? t(consentRequired ? "consent.request" : "signIn.request", { client: details.client.name })
                   : t("signIn.requestFallback")
               }}
             </p>
@@ -251,82 +275,113 @@ async function cancel(): Promise<void> {
             </div>
           </dl>
 
-          <div class="flex flex-col gap-1.5">
-            <Label for="signin-email">{{ t("signIn.email") }}</Label>
-            <Input
-              id="signin-email"
-              ref="emailInput"
-              v-model="email"
-              type="email"
-              name="email"
-              autocomplete="username"
-              inputmode="email"
-              spellcheck="false"
-              autocapitalize="none"
-              :placeholder="t('signIn.emailPlaceholder')"
-              :invalid="fieldError === 'errors.emailRequired'"
-              :aria-describedby="fieldError ? 'signin-error' : undefined"
-            />
-          </div>
-
-          <div class="flex flex-col gap-1.5">
-            <Label for="signin-password">{{ t("signIn.password") }}</Label>
-            <div class="relative">
-              <Input
-                id="signin-password"
-                ref="passwordInput"
-                v-model="password"
-                :type="revealPassword ? 'text' : 'password'"
-                name="password"
-                autocomplete="current-password"
-                class="pr-9"
-                :invalid="fieldError === 'errors.passwordRequired' || submitError !== null"
-                :aria-describedby="fieldError || submitError ? 'signin-error' : undefined"
-              />
-              <button
-                type="button"
-                class="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-surface-muted hover:text-ink"
-                :aria-label="revealPassword ? t('signIn.hidePassword') : t('signIn.showPassword')"
-                :aria-pressed="revealPassword"
-                @click="revealPassword = !revealPassword"
-              >
-                <EyeOff v-if="revealPassword" class="size-3.5" aria-hidden="true" />
-                <Eye v-else class="size-3.5" aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-
-          <!-- Field-level or submission error, in one place, wired through aria-describedby. -->
-          <p
-            v-if="fieldError || submitError"
-            id="signin-error"
-            role="alert"
-            class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
-          >
-            <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
-            {{ t(fieldError ?? submitErrorMessage) }}
-          </p>
-
-          <div class="flex flex-col gap-2">
-            <Button type="submit" variant="primary" block :disabled="submitting" :aria-busy="submitting">
-              <Loader2 v-if="submitting" class="animate-spin" />
-              <LockKeyhole v-else />
-              {{ submitting ? t("signIn.submitting") : t("signIn.submit") }}
-            </Button>
+          <!-- Consent: signed in, but the code is withheld until the scopes are approved. -->
+          <div v-if="consentRequired" class="flex flex-col gap-2">
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("consent.note") }}</p>
             <Button
               type="button"
-              variant="ghost"
+              variant="primary"
               block
-              :disabled="cancelling || submitting"
-              @click="cancel"
+              :disabled="consentSubmitting"
+              :aria-busy="consentSubmitting"
+              @click="decideConsent('allow')"
             >
-              <ArrowLeft />
-              {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
+              <Loader2 v-if="consentSubmitting" class="animate-spin" />
+              <Check v-else />
+              {{ consentSubmitting ? t("consent.allowSubmitting") : t("consent.allow") }}
             </Button>
+            <Button type="button" variant="ghost" block :disabled="consentSubmitting" @click="decideConsent('deny')">
+              <ArrowLeft />
+              {{ t("consent.deny") }}
+            </Button>
+            <p
+              v-if="consentError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ t("errors.consentFailed") }}
+            </p>
           </div>
 
-          <p class="text-center text-[11.5px] leading-relaxed text-ink-faint">{{ t("signIn.footnote") }}</p>
-        </form>
+          <form v-else class="flex flex-col gap-4" @submit.prevent="signIn">
+            <div class="flex flex-col gap-1.5">
+              <Label for="signin-email">{{ t("signIn.email") }}</Label>
+              <Input
+                id="signin-email"
+                ref="emailInput"
+                v-model="email"
+                type="email"
+                name="email"
+                autocomplete="username"
+                inputmode="email"
+                spellcheck="false"
+                autocapitalize="none"
+                :placeholder="t('signIn.emailPlaceholder')"
+                :invalid="fieldError === 'errors.emailRequired'"
+                :aria-describedby="fieldError ? 'signin-error' : undefined"
+              />
+            </div>
+
+            <div class="flex flex-col gap-1.5">
+              <Label for="signin-password">{{ t("signIn.password") }}</Label>
+              <div class="relative">
+                <Input
+                  id="signin-password"
+                  ref="passwordInput"
+                  v-model="password"
+                  :type="revealPassword ? 'text' : 'password'"
+                  name="password"
+                  autocomplete="current-password"
+                  class="pr-9"
+                  :invalid="fieldError === 'errors.passwordRequired' || submitError !== null"
+                  :aria-describedby="fieldError || submitError ? 'signin-error' : undefined"
+                />
+                <button
+                  type="button"
+                  class="absolute right-1 top-1 inline-flex size-6 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-surface-muted hover:text-ink"
+                  :aria-label="revealPassword ? t('signIn.hidePassword') : t('signIn.showPassword')"
+                  :aria-pressed="revealPassword"
+                  @click="revealPassword = !revealPassword"
+                >
+                  <EyeOff v-if="revealPassword" class="size-3.5" aria-hidden="true" />
+                  <Eye v-else class="size-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <!-- Field-level or submission error, in one place, wired through aria-describedby. -->
+            <p
+              v-if="fieldError || submitError"
+              id="signin-error"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ t(fieldError ?? submitErrorMessage) }}
+            </p>
+
+            <div class="flex flex-col gap-2">
+              <Button type="submit" variant="primary" block :disabled="submitting" :aria-busy="submitting">
+                <Loader2 v-if="submitting" class="animate-spin" />
+                <LockKeyhole v-else />
+                {{ submitting ? t("signIn.submitting") : t("signIn.submit") }}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                block
+                :disabled="cancelling || submitting"
+                @click="cancel"
+              >
+                <ArrowLeft />
+                {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
+              </Button>
+            </div>
+
+            <p class="text-center text-[11.5px] leading-relaxed text-ink-faint">{{ t("signIn.footnote") }}</p>
+          </form>
+        </div>
       </div>
 
       <p class="mt-4 text-center text-[11.5px] text-ink-faint">

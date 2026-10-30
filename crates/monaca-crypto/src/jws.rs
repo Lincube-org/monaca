@@ -186,7 +186,7 @@ fn verify_inner(
     Ok(data.claims)
 }
 
-fn classify(err: &jsonwebtoken::errors::Error) -> CryptoError {
+pub(crate) fn classify(err: &jsonwebtoken::errors::Error) -> CryptoError {
     use jsonwebtoken::errors::ErrorKind as Kind;
     match err.kind() {
         Kind::ExpiredSignature => CryptoError::Claims("token has expired".into()),

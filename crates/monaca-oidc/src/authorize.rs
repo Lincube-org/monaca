@@ -5,13 +5,13 @@
 //! while every other failure redirects with `error=invalid_request`. [`AuthorizeError`] therefore
 //! carries whether the request is safe to redirect.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::parse_scope;
 
 /// The query parameters of an authorize request. Every member is optional so a missing one is a
 /// protocol error rather than an extractor rejection with the wrong shape.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AuthorizeParams {
     /// Must be `code`.
     pub response_type: Option<String>,
@@ -33,8 +33,12 @@ pub struct AuthorizeParams {
     pub resource: Option<String>,
     /// Monaca extension: the org slug the flow issues into.
     pub organization: Option<String>,
-    /// `none` | `login` | `consent`; M0 only records it.
+    /// `none` | `login` | `consent`, space-delimited.
     pub prompt: Option<String>,
+    /// RFC 9126: a pushed request to redeem instead of the inline parameters.
+    pub request_uri: Option<String>,
+    /// RFC 9449 §10: the JWK thumbprint the authorization code is bound to.
+    pub dpop_jkt: Option<String>,
 }
 
 /// A validated authorize request.
@@ -56,6 +60,28 @@ pub struct AuthorizeRequest {
     pub resource: Option<String>,
     /// The requested org slug.
     pub organization: Option<String>,
+    /// Validated prompt values.
+    pub prompt: Vec<String>,
+    /// RFC 9449 §10 key binding.
+    pub dpop_jkt: Option<String>,
+}
+
+impl AuthorizeRequest {
+    /// `prompt=consent` forces the consent step even for a first-party client.
+    pub fn forces_consent(&self) -> bool {
+        self.prompt.iter().any(|value| value == "consent")
+    }
+
+    /// `prompt=none` asks for a silent authentication. Without a cross-application session,
+    /// monaca has to answer `login_required`.
+    pub fn is_silent(&self) -> bool {
+        self.prompt.iter().any(|value| value == "none")
+    }
+
+    /// Whether this request must show the consent screen before a code is issued.
+    pub fn requires_consent(&self, client_is_third_party: bool) -> bool {
+        client_is_third_party || self.forces_consent()
+    }
 }
 
 /// Why an authorize request was refused.
@@ -131,6 +157,9 @@ impl AuthorizeParams {
             ));
         }
 
+        let prompt = parse_prompt(self.prompt.as_deref())?;
+        let dpop_jkt = parse_dpop_jkt(self.dpop_jkt.as_deref())?;
+
         Ok(AuthorizeRequest {
             client_id,
             redirect_uri,
@@ -140,8 +169,52 @@ impl AuthorizeParams {
             nonce: self.nonce.clone().filter(|value| !value.is_empty()),
             resource: self.resource.clone().filter(|value| !value.is_empty()),
             organization: self.organization.clone().filter(|value| !value.is_empty()),
+            prompt,
+            dpop_jkt,
         })
     }
+}
+
+/// Validate `prompt` — OpenID Connect Core §3.1.2.1.
+///
+/// `none` must be the only value; `select_account` is not implemented, because monaca has no
+/// cross-application session to select an account from.
+fn parse_prompt(raw: Option<&str>) -> Result<Vec<String>, AuthorizeError> {
+    let values = raw.unwrap_or_default();
+    let prompt: Vec<String> = values
+        .split_ascii_whitespace()
+        .map(str::to_owned)
+        .collect();
+    for value in &prompt {
+        if !matches!(value.as_str(), "none" | "login" | "consent") {
+            return Err(AuthorizeError::InvalidRequest(format!(
+                "unsupported prompt value `{value}`"
+            )));
+        }
+    }
+    if prompt.iter().any(|value| value == "none") && prompt.len() > 1 {
+        return Err(AuthorizeError::InvalidRequest(
+            "prompt=none cannot be combined with other values".into(),
+        ));
+    }
+    Ok(prompt)
+}
+
+/// Validate an RFC 9449 §10 `dpop_jkt`: base64url(SHA-256(JWK)), 43 characters.
+fn parse_dpop_jkt(raw: Option<&str>) -> Result<Option<String>, AuthorizeError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() != 43
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(AuthorizeError::InvalidRequest(
+            "dpop_jkt is not a JWK thumbprint".into(),
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn required(value: &Option<String>, name: &str) -> Result<String, AuthorizeError> {
@@ -182,6 +255,8 @@ mod tests {
             resource: Some("http://localhost:8080/v1".into()),
             organization: Some("acme".into()),
             prompt: None,
+            request_uri: None,
+            dpop_jkt: None,
         }
     }
 
@@ -237,5 +312,51 @@ mod tests {
         assert!(!is_absolute_http_url("/mcp/demo"));
         assert!(!is_absolute_http_url("ftp://a.test"));
         assert!(!is_absolute_http_url("http://"));
+    }
+
+    #[test]
+    fn prompt_values_are_validated() {
+        let mut params = valid();
+        params.prompt = Some("consent login".into());
+        let request = params.validate().expect("valid");
+        assert!(request.forces_consent());
+        assert!(!request.is_silent());
+
+        let mut params = valid();
+        params.prompt = Some("none".into());
+        assert!(params.validate().expect("valid").is_silent());
+
+        let mut params = valid();
+        params.prompt = Some("none login".into());
+        assert!(params.validate().is_err());
+
+        let mut params = valid();
+        params.prompt = Some("select_account".into());
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn a_third_party_client_always_consents() {
+        let request = valid().validate().expect("valid");
+        assert!(!request.requires_consent(false));
+        assert!(request.requires_consent(true));
+
+        let mut params = valid();
+        params.prompt = Some("consent".into());
+        assert!(params.validate().expect("valid").requires_consent(false));
+    }
+
+    #[test]
+    fn dpop_jkt_must_be_a_thumbprint() {
+        let mut params = valid();
+        params.dpop_jkt = Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into());
+        assert_eq!(
+            params.validate().expect("valid").dpop_jkt.as_deref(),
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+        );
+
+        let mut params = valid();
+        params.dpop_jkt = Some("short".into());
+        assert!(params.validate().is_err());
     }
 }

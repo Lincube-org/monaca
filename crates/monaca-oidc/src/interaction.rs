@@ -38,6 +38,10 @@ pub struct Interaction {
     pub resource: Option<String>,
     /// The `state` to echo on the final redirect.
     pub state: String,
+    /// RFC 9449 §10 key binding for the code this flow will mint.
+    pub dpop_jkt: Option<String>,
+    /// Whether the consent screen must be shown before a code is issued.
+    pub consent_required: bool,
     /// When the interaction stops being usable.
     pub expires_at: OffsetDateTime,
 }
@@ -51,6 +55,7 @@ impl Interaction {
             "client": { "client_id": self.client_id, "name": self.client_name },
             "scopes": self.scopes,
             "organization": self.organization,
+            "consent_required": self.consent_required,
             "expires_at": self.expires_at,
         })
     }
@@ -73,6 +78,9 @@ pub enum InteractionError {
     /// The interaction was already used.
     #[error("interaction already consumed")]
     Consumed,
+    /// Consent was requested before sign-in completed.
+    #[error("interaction has not been signed in")]
+    NotSignedIn,
 }
 
 impl InteractionError {
@@ -82,6 +90,7 @@ impl InteractionError {
             InteractionError::NotFound => "MONACA_INTERACTION_NOT_FOUND",
             InteractionError::Expired => "MONACA_INTERACTION_EXPIRED",
             InteractionError::Consumed => "MONACA_INTERACTION_CONSUMED",
+            InteractionError::NotSignedIn => "MONACA_INTERACTION_NOT_SIGNED_IN",
         }
     }
 
@@ -91,6 +100,7 @@ impl InteractionError {
             InteractionError::NotFound => 404,
             InteractionError::Expired => 410,
             InteractionError::Consumed => 409,
+            InteractionError::NotSignedIn => 409,
         }
     }
 }
@@ -113,6 +123,8 @@ mod tests {
             nonce: None,
             resource: None,
             state: "s".into(),
+            dpop_jkt: None,
+            consent_required: false,
             expires_at: OffsetDateTime::from_unix_timestamp(1_767_225_600).expect("ts"),
         }
     }
@@ -125,10 +137,12 @@ mod tests {
         assert_eq!(value["client"]["name"], "Monaca Console");
         assert_eq!(value["scopes"], json!(["openid"]));
         assert_eq!(value["organization"], "acme");
+        assert_eq!(value["consent_required"], json!(false));
         // Never expose the challenge, the state or the nonce to the page.
         assert!(value.get("code_challenge").is_none());
         assert!(value.get("state").is_none());
         assert!(value.get("nonce").is_none());
+        assert!(value.get("dpop_jkt").is_none());
     }
 
     #[test]
@@ -146,5 +160,9 @@ mod tests {
         );
         assert_eq!(InteractionError::Expired.status(), 410);
         assert_eq!(InteractionError::Consumed.status(), 409);
+        assert_eq!(
+            InteractionError::NotSignedIn.code(),
+            "MONACA_INTERACTION_NOT_SIGNED_IN"
+        );
     }
 }

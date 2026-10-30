@@ -10,10 +10,10 @@ use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::verify_password;
 use monaca_oidc::{
-    AccessTokenClaims, AuthorizeParams, DiscoveryDocument, GrantType, IdTokenClaims, Interaction,
-    TokenErrorCode, TokenForm, TokenRequest, scope_subset, verify_pkce_s256,
+    AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
+    Interaction, TokenErrorCode, TokenForm, TokenRequest, at_hash, scope_subset, verify_pkce_s256,
 };
-use monaca_store::TenantRow;
+use monaca_store::{AccountRow, TenantRow};
 use monaca_types::{AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -57,9 +57,32 @@ pub async fn jwks(
 pub async fn authorize(
     State(state): State<Arc<AppState>>,
     Path(tenant_slug): Path<String>,
-    Query(params): Query<AuthorizeParams>,
+    Query(mut params): Query<AuthorizeParams>,
 ) -> Result<Response, ApiError> {
     let tenant = state.tenant(&tenant_slug).await?;
+
+    // RFC 9126: a pushed request replaces the inline parameters entirely.
+    let mut pushed_for: Option<Uuid> = None;
+    if let Some(request_uri) = params
+        .request_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let Some(row) = state
+            .store
+            .par_take(&tenant, &sha256_hex(request_uri))
+            .await?
+        else {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "request_uri is unknown or expired",
+            ));
+        };
+        params = serde_json::from_value(row.params)
+            .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "request_uri is malformed"))?;
+        pushed_for = Some(row.client_id);
+    }
 
     // The client and the redirect URI are checked before anything is validated, because an
     // unregistered redirect must produce an error page and never a redirect (§6.1).
@@ -78,6 +101,16 @@ pub async fn authorize(
                 format!("unknown client `{client_id}`"),
             )
         })?;
+
+    // A pushed request may only be redeemed by the client that pushed it.
+    if let Some(row_id) = pushed_for
+        && client.id != row_id
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "request_uri belongs to another client",
+        ));
+    }
 
     let redirect_uri = params.redirect_uri.as_deref().unwrap_or_default();
     let registered = state.store.client_redirect_uris(&tenant, client.id).await?;
@@ -99,6 +132,15 @@ pub async fn authorize(
         return Ok(redirect_error(
             &request.redirect_uri,
             "invalid_scope",
+            &request.state,
+        ));
+    }
+
+    // monaca has no cross-application session yet, so `prompt=none` can never be satisfied.
+    if request.is_silent() {
+        return Ok(redirect_error(
+            &request.redirect_uri,
+            "login_required",
             &request.state,
         ));
     }
@@ -131,6 +173,8 @@ pub async fn authorize(
         nonce: request.nonce.clone(),
         resource: request.resource.clone(),
         state: request.state.clone(),
+        dpop_jkt: request.dpop_jkt.clone(),
+        consent_required: request.requires_consent(client.is_third_party),
         expires_at: state.now() + Duration::seconds(state.config.interaction_ttl.as_secs() as i64),
     };
 
@@ -170,7 +214,7 @@ pub async fn sign_in(
     State(state): State<Arc<AppState>>,
     Path((_tenant, iid)): Path<(String, String)>,
     Json(body): Json<SignInBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let interaction = state
         .peek_interaction(&iid)
         .await
@@ -226,14 +270,87 @@ pub async fn sign_in(
         ));
     }
 
+    // A third-party client (or `prompt=consent`) pauses here: the page must ask the user to
+    // approve the scopes before a code is minted. Sign-in is recorded but not consumed, so the
+    // consent step can redeem it.
+    if interaction.consent_required {
+        state
+            .mark_interaction_signed_in(&iid, account.id)
+            .await
+            .map_err(ApiError::Interaction)?;
+        return Ok(Json(json!({ "consent_required": true })).into_response());
+    }
+
     // Consume only after authentication succeeds, so a typo does not burn the interaction.
     let interaction = state
         .consume_interaction(&iid)
         .await
         .map_err(ApiError::Interaction)?;
 
+    approve_interaction(state, tenant, interaction, account).await
+}
+
+/// The consent body.
+#[derive(Debug, Deserialize)]
+pub struct ConsentBody {
+    /// `allow` | `deny`.
+    pub decision: String,
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/consent` — the second half of the login/consent challenge.
+pub async fn consent(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    Json(body): Json<ConsentBody>,
+) -> Result<Response, ApiError> {
+    if body.decision != "allow" {
+        if body.decision != "deny" {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "decision must be `allow` or `deny`",
+            ));
+        }
+        let interaction = state
+            .consume_interaction(&iid)
+            .await
+            .map_err(ApiError::Interaction)?;
+        return Ok(Json(json!({
+            "redirect_to": append_query(
+                &interaction.redirect_uri,
+                &[("error", "access_denied"), ("state", interaction.state.as_str())],
+            )
+        }))
+        .into_response());
+    }
+
+    let (interaction, account_id) = state
+        .take_signed_in_interaction(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    let tenant = state.tenant(&interaction.tenant).await?;
+    let account = state
+        .store
+        .account_by_id(&tenant, AccountId::from_uuid(account_id))
+        .await?
+        .ok_or_else(|| ApiError::problem(kinds::INVALID_REQUEST, "account is gone"))?;
+
+    approve_interaction(state, tenant, interaction, account).await
+}
+
+/// Mint the authorization code for an approved interaction and return the client redirect.
+async fn approve_interaction(
+    state: Arc<AppState>,
+    tenant: TenantRow,
+    interaction: Interaction,
+    account: AccountRow,
+) -> Result<Response, ApiError> {
+    let org_slug = interaction.organization.clone();
+    let org = state.store.org_by_slug(&tenant, &org_slug).await?;
+    let org_ctx = org.ctx(&tenant);
+
     let code = issue_code();
     let code_hash = sha256_hex(&code);
+    let now = state.now();
     state
         .store
         .insert_auth_code(
@@ -248,13 +365,15 @@ pub async fn sign_in(
             interaction.nonce.as_deref(),
             interaction.resource.as_deref(),
             None,
-            state.now() + Duration::seconds(state.config.auth_code_ttl.as_secs() as i64),
+            interaction.dpop_jkt.as_deref(),
+            now,
+            now + Duration::seconds(state.config.auth_code_ttl.as_secs() as i64),
         )
         .await?;
 
     let event = AuditEvent {
         id: EventId::new(),
-        at: state.now(),
+        at: now,
         action: "interaction.sign_in.succeeded".into(),
         actor_chain: vec![AuditActor::account(account.account_id())],
         subject: AuditSubject {
@@ -277,7 +396,7 @@ pub async fn sign_in(
             ("state", interaction.state.as_str()),
         ],
     );
-    Ok(Json(json!({ "redirect_to": redirect_to })))
+    Ok(Json(json!({ "redirect_to": redirect_to })).into_response())
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/abort`.
@@ -327,15 +446,35 @@ pub async fn token(
         .await?
         .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidClient, "unknown client"))?;
 
-    authenticate_client(&state, &client, &request, basic.as_ref(), &endpoint).await?;
+    // `client_secret_basic` carries the secret in the `Authorization` header, so anything sent in
+    // the body is only a fallback for `client_secret_post`.
+    let secret = basic
+        .as_ref()
+        .map(|(_, secret)| secret.clone())
+        .or_else(|| request.client_secret.clone());
+
+    authenticate_client(
+        &state,
+        &client,
+        secret.as_deref(),
+        request.client_assertion.as_deref(),
+        &endpoint,
+    )
+    .await?;
+
+    // After the caller is known to be the client, so an unauthenticated request cannot burn a
+    // proof's `jti`.
+    let dpop = verify_dpop(&state, &tenant, &headers, "POST", &endpoint, None).await?;
 
     match request.grant_type {
         GrantType::AuthorizationCode => {
-            authorization_code_grant(state, tenant, request, client, &endpoint).await
+            authorization_code_grant(state, tenant, request, client, &endpoint, dpop).await
         }
-        GrantType::RefreshToken => refresh_grant(state, tenant, request, client, &endpoint).await,
+        GrantType::RefreshToken => {
+            refresh_grant(state, tenant, request, client, &endpoint, dpop).await
+        }
         GrantType::ClientCredentials => {
-            client_credentials_grant(state, tenant, request, client, &endpoint).await
+            client_credentials_grant(state, tenant, request, client, &endpoint, dpop).await
         }
     }
 }
@@ -346,6 +485,7 @@ async fn authorization_code_grant(
     request: TokenRequest,
     client: monaca_store::ClientRow,
     _endpoint: &str,
+    dpop: Option<DpopProof>,
 ) -> Result<Response, ApiError> {
     let code = request.code.as_deref().unwrap_or_default();
     let code_hash = sha256_hex(code);
@@ -377,6 +517,20 @@ async fn authorization_code_grant(
         ));
     }
 
+    // RFC 9449 §9: the code's binding decides whether a proof is required. A code bound at the
+    // authorization endpoint cannot be redeemed without proving the same key.
+    let jkt = match (row.dpop_jkt.as_deref(), dpop.as_ref()) {
+        (Some(bound), Some(proof)) if proof.jkt == bound => Some(bound.to_owned()),
+        (Some(_), _) => {
+            return Err(ApiError::token(
+                TokenErrorCode::InvalidDpopProof,
+                "the authorization code is bound to a different DPoP key",
+            ));
+        }
+        (None, Some(proof)) => Some(proof.jkt.clone()),
+        (None, None) => None,
+    };
+
     let org = state
         .store
         .org_by_id(&tenant, OrgId::from_uuid(row.org_id))
@@ -407,6 +561,7 @@ async fn authorization_code_grant(
         exp: access_exp,
         act: None,
         grant_id: None,
+        cnf: jkt.as_deref().map(binding),
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -432,6 +587,8 @@ async fn authorization_code_grant(
                 .iter()
                 .any(|scope| scope == "profile")
                 .then(|| account.display_name.clone()),
+            auth_time: Some(row.auth_time.unix_timestamp()),
+            at_hash: Some(at_hash(&access_token)),
         };
         Some(
             key.sign("JWT", &id_claims.to_json())
@@ -451,20 +608,20 @@ async fn authorization_code_grant(
                 org.id,
                 row.scope.clone(),
                 row.resource.clone(),
+                None,
+                Uuid::now_v7(),
+                jkt.clone(),
+                row.auth_time,
             )
-            .await,
+            .await?,
         )
     } else {
         None
     };
-    let refresh_token = match refresh_token {
-        Some(value) => Some(value?),
-        None => None,
-    };
 
     let mut body = json!({
         "access_token": access_token,
-        "token_type": "Bearer",
+        "token_type": token_type(&jkt),
         "expires_in": state.config.access_token_ttl.as_secs(),
         "scope": row.scope,
     });
@@ -483,6 +640,7 @@ async fn refresh_grant(
     request: TokenRequest,
     client: monaca_store::ClientRow,
     _endpoint: &str,
+    dpop: Option<DpopProof>,
 ) -> Result<Response, ApiError> {
     let raw = request.refresh_token.as_deref().unwrap_or_default();
     let hash = sha256_hex(raw);
@@ -493,8 +651,9 @@ async fn refresh_grant(
         .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidGrant, "refresh token is invalid"))?;
 
     if row.revoked_at.is_some() {
-        // Reuse detection: a revoked token presented again kills the whole family.
-        state.store.revoke_refresh_family(&tenant, row.id).await?;
+        // Reuse detection: a revoked token presented again kills the whole rotation family.
+        let family = row.family_id.unwrap_or(row.id);
+        state.store.revoke_refresh_family(&tenant, family).await?;
         return Err(ApiError::token(
             TokenErrorCode::InvalidGrant,
             "refresh token was already used",
@@ -526,6 +685,16 @@ async fn refresh_grant(
         None => row.scope.clone(),
     };
 
+    // RFC 9449 §5: a token bound to a key may only be refreshed by proving that key. A refresh
+    // that starts using DPoP binds the rotated tokens to the proof's key.
+    monaca_oidc::check_binding(row.dpop_jkt.as_deref(), dpop.as_ref())
+        .map_err(|err| ApiError::token(TokenErrorCode::InvalidDpopProof, err.to_string()))?;
+    let jkt = row
+        .dpop_jkt
+        .clone()
+        .or_else(|| dpop.as_ref().map(|proof| proof.jkt.clone()));
+
+    let family = row.family_id.unwrap_or(row.id);
     state.store.revoke_refresh_token(&tenant, row.id).await?;
     let refresh_token = issue_refresh(
         Arc::clone(&state),
@@ -535,6 +704,10 @@ async fn refresh_grant(
         row.org_id,
         scope.clone(),
         row.resource.clone(),
+        Some(row.id),
+        family,
+        jkt.clone(),
+        row.auth_time,
     )
     .await?;
 
@@ -561,19 +734,58 @@ async fn refresh_grant(
         exp: now + state.config.access_token_ttl.as_secs() as i64,
         act: None,
         grant_id: None,
+        cnf: jkt.as_deref().map(binding),
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
         .map_err(ApiError::internal)?;
 
-    Ok(Json(json!({
+    let id_token = if scope.iter().any(|scope| scope == "openid") {
+        let account = state
+            .store
+            .account_by_id(&tenant, AccountId::from_uuid(row.account_id))
+            .await?
+            .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidGrant, "account is gone"))?;
+        let id_claims = IdTokenClaims {
+            iss: tenant.issuer.clone(),
+            sub: account.account_id().to_typed_string(),
+            aud: client.client_id.clone(),
+            tid: tenant.tenant_id().to_typed_string(),
+            org: org.org_id().to_typed_string(),
+            iat: now,
+            exp: now + state.config.id_token_ttl.as_secs() as i64,
+            // The nonce belongs to the original authentication only.
+            nonce: None,
+            email: scope
+                .iter()
+                .any(|scope| scope == "email")
+                .then(|| account.primary_email.clone()),
+            name: scope
+                .iter()
+                .any(|scope| scope == "profile")
+                .then(|| account.display_name.clone()),
+            auth_time: Some(row.auth_time.unix_timestamp()),
+            at_hash: Some(at_hash(&access_token)),
+        };
+        Some(
+            key.sign("JWT", &id_claims.to_json())
+                .map_err(ApiError::internal)?,
+        )
+    } else {
+        None
+    };
+
+    let mut body = json!({
         "access_token": access_token,
-        "token_type": "Bearer",
+        "token_type": token_type(&jkt),
         "expires_in": state.config.access_token_ttl.as_secs(),
         "scope": scope,
         "refresh_token": refresh_token,
-    }))
-    .into_response())
+    });
+    if let Some(id_token) = id_token {
+        body["id_token"] = Value::String(id_token);
+    }
+    Ok(Json(body).into_response())
 }
 
 async fn client_credentials_grant(
@@ -582,6 +794,7 @@ async fn client_credentials_grant(
     request: TokenRequest,
     client: monaca_store::ClientRow,
     _endpoint: &str,
+    dpop: Option<DpopProof>,
 ) -> Result<Response, ApiError> {
     let requested = request.scope.clone().unwrap_or_default();
     if !requested.is_empty() && !scope_subset(&requested, &client.scopes) {
@@ -609,6 +822,7 @@ async fn client_credentials_grant(
 
     let key = state.signing_key(&tenant).await?;
     let now = state.now().unix_timestamp();
+    let jkt = dpop.as_ref().map(|proof| proof.jkt.clone());
     let claims = AccessTokenClaims {
         iss: tenant.issuer.clone(),
         sub: ClientId::from_uuid(client.id).to_typed_string(),
@@ -621,6 +835,7 @@ async fn client_credentials_grant(
         exp: now + state.config.access_token_ttl.as_secs() as i64,
         act: None,
         grant_id: None,
+        cnf: jkt.as_deref().map(binding),
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -628,7 +843,7 @@ async fn client_credentials_grant(
 
     Ok(Json(json!({
         "access_token": access_token,
-        "token_type": "Bearer",
+        "token_type": token_type(&jkt),
         "expires_in": state.config.access_token_ttl.as_secs(),
         "scope": scope,
     }))
@@ -781,6 +996,7 @@ async fn agent_token(
         exp: child_expiry.unix_timestamp(),
         act: Some(json!({ "sub": agent_id.to_typed_string() })),
         grant_id: Some(grant_id.to_typed_string()),
+        cnf: None,
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -816,6 +1032,7 @@ async fn agent_token(
     .into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn issue_refresh(
     state: Arc<AppState>,
     tenant: TenantRow,
@@ -824,6 +1041,10 @@ async fn issue_refresh(
     org_id: Uuid,
     scope: Vec<String>,
     resource: Option<String>,
+    rotated_from: Option<Uuid>,
+    family_id: Uuid,
+    dpop_jkt: Option<String>,
+    auth_time: OffsetDateTime,
 ) -> Result<String, ApiError> {
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let hash = sha256_hex(&token);
@@ -837,35 +1058,34 @@ async fn issue_refresh(
             org_id,
             &scope,
             resource.as_deref(),
+            rotated_from,
+            family_id,
+            dpop_jkt.as_deref(),
+            auth_time,
             state.now() + Duration::seconds(state.config.refresh_token_ttl.as_secs() as i64),
         )
         .await?;
     Ok(token)
 }
 
-async fn authenticate_client(
+/// Authenticate a client at a token-like endpoint — §7.4.
+pub(crate) async fn authenticate_client(
     state: &Arc<AppState>,
     client: &monaca_store::ClientRow,
-    request: &TokenRequest,
-    basic: Option<&(String, String)>,
+    client_secret: Option<&str>,
+    client_assertion: Option<&str>,
     endpoint: &str,
 ) -> Result<(), ApiError> {
     match client.token_auth_method.as_str() {
         "none" => Ok(()),
-        "client_secret_basic" => {
-            let (_, secret) = basic.ok_or_else(|| {
-                ApiError::token(TokenErrorCode::InvalidClient, "HTTP Basic is required")
-            })?;
-            check_secret(state, client, secret).await
-        }
-        "client_secret_post" => {
-            let secret = request.client_secret.as_deref().ok_or_else(|| {
+        "client_secret_basic" | "client_secret_post" => {
+            let secret = client_secret.ok_or_else(|| {
                 ApiError::token(TokenErrorCode::InvalidClient, "client_secret is required")
             })?;
             check_secret(state, client, secret).await
         }
         "private_key_jwt" => {
-            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
+            let assertion = client_assertion.ok_or_else(|| {
                 ApiError::token(
                     TokenErrorCode::InvalidClient,
                     "client_assertion is required",
@@ -920,6 +1140,54 @@ async fn check_secret(
         .map_err(|_| ApiError::token(TokenErrorCode::InvalidClient, "invalid client secret"))
 }
 
+/// Verify the request's `DPoP` header, if any, and record its `jti` against replay.
+///
+/// `access_token` is `Some` only for resource requests, where RFC 9449 §7.1 requires `ath`.
+pub(crate) async fn verify_dpop(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    headers: &HeaderMap,
+    method: &str,
+    url: &str,
+    access_token: Option<&str>,
+) -> Result<Option<DpopProof>, ApiError> {
+    let Some(raw) = headers.get("dpop").and_then(|value| value.to_str().ok()) else {
+        return Ok(None);
+    };
+    let proof = monaca_oidc::verify_proof(
+        raw,
+        method,
+        url,
+        access_token,
+        state.now().unix_timestamp(),
+    )
+    .map_err(|err| ApiError::token(TokenErrorCode::InvalidDpopProof, err.to_string()))?;
+
+    let expires_at =
+        state.now() + Duration::seconds(monaca_oidc::PROOF_WINDOW_SECS);
+    if !state
+        .store
+        .dpop_replay_add(tenant, &proof.jti, expires_at)
+        .await?
+    {
+        return Err(ApiError::token(
+            TokenErrorCode::InvalidDpopProof,
+            "the DPoP proof was already used",
+        ));
+    }
+    Ok(Some(proof))
+}
+
+/// The RFC 7800 `cnf` claim for a DPoP-bound token.
+fn binding(jkt: &str) -> Value {
+    json!({ "jkt": jkt })
+}
+
+/// RFC 9449 §5: a DPoP-bound token is `token_type` `DPoP`.
+fn token_type(jkt: &Option<String>) -> &'static str {
+    if jkt.is_some() { "DPoP" } else { "Bearer" }
+}
+
 fn sign_in_event(
     at: OffsetDateTime,
     org: &OrgId,
@@ -947,11 +1215,12 @@ fn issue_code() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-fn sha256_hex(value: &str) -> String {
+pub(crate) fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+/// Parse HTTP Basic credentials into `(client_id, secret)`.
+pub(crate) fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let encoded = value.strip_prefix("Basic ")?;
     let decoded = data_encoding::BASE64.decode(encoded.as_bytes()).ok()?;

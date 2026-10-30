@@ -33,8 +33,8 @@ use tokio::sync::Mutex;
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
-    AccountRow, AgentKeyRow, AgentRow, AuditRow, AuthCodeRow, ClientRow, GrantRow, RefreshRow,
-    SigningKeyRow,
+    AccountRow, AgentKeyRow, AgentRow, AuditRow, AuthCodeRow, ClientRow, GrantRow, ParRow,
+    RefreshRow, SigningKeyRow,
 };
 
 /// A storage failure.

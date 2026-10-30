@@ -61,6 +61,8 @@ pub struct ClientRow {
     pub jwks: Option<Value>,
     /// Scopes this client may ask for.
     pub scopes: Vec<String>,
+    /// A third-party application must show a consent screen.
+    pub is_third_party: bool,
 }
 
 /// One signing key row.
@@ -97,6 +99,10 @@ pub struct AuthCodeRow {
     pub resource: Option<String>,
     /// The BFF session that signed in, when any.
     pub session_id: Option<Uuid>,
+    /// DPoP key thumbprint the code is bound to, when the authorize request supplied `dpop_jkt`.
+    pub dpop_jkt: Option<String>,
+    /// When the user authenticated, echoed as the id_token's `auth_time`.
+    pub auth_time: OffsetDateTime,
     /// Expiry.
     pub expires_at: OffsetDateTime,
     /// When it was redeemed.
@@ -126,6 +132,27 @@ pub struct RefreshRow {
     pub revoked_at: Option<OffsetDateTime>,
     /// The token this one replaced.
     pub rotated_from: Option<Uuid>,
+    /// The rotation family; every descendant shares it.
+    pub family_id: Option<Uuid>,
+    /// DPoP key thumbprint this refresh token is bound to, if any.
+    pub dpop_jkt: Option<String>,
+    /// The original authentication instant, for the refreshed id_token.
+    pub auth_time: OffsetDateTime,
+    /// Issuance time, reported by introspection as `iat`.
+    pub created_at: OffsetDateTime,
+}
+
+/// A stored pushed authorization request (RFC 9126).
+#[derive(Debug, Clone, FromRow)]
+pub struct ParRow {
+    /// The client row the request was pushed for.
+    pub client_id: Uuid,
+    /// The validated authorize parameters.
+    pub params: Value,
+    /// Expiry.
+    pub expires_at: OffsetDateTime,
+    /// When it was redeemed.
+    pub consumed_at: Option<OffsetDateTime>,
 }
 
 /// An agent row.
@@ -476,7 +503,8 @@ impl Store {
     ) -> Result<Option<ClientRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
-            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes
+            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
+                    is_third_party
              FROM tenant.clients WHERE client_id = $1",
         )
         .bind(client_id)
@@ -492,7 +520,8 @@ impl Store {
     ) -> Result<Option<ClientRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
-            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes
+            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
+                    is_third_party
              FROM tenant.clients WHERE id = $1",
         )
         .bind(id)
@@ -614,14 +643,16 @@ impl Store {
         nonce: Option<&str>,
         resource: Option<&str>,
         session_id: Option<Uuid>,
+        dpop_jkt: Option<&str>,
+        auth_time: OffsetDateTime,
         expires_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         sqlx::query(
             "INSERT INTO tenant.auth_codes
                (id, code_hash, client_id, account_id, org_id, redirect_uri, scope,
-                code_challenge, nonce, resource, session_id, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                code_challenge, nonce, resource, session_id, dpop_jkt, auth_time, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
         )
         .bind(Uuid::now_v7())
         .bind(code_hash)
@@ -634,6 +665,8 @@ impl Store {
         .bind(nonce)
         .bind(resource)
         .bind(session_id)
+        .bind(dpop_jkt)
+        .bind(auth_time)
         .bind(expires_at)
         .execute(&pool)
         .await?;
@@ -651,7 +684,8 @@ impl Store {
             "UPDATE tenant.auth_codes SET consumed_at = now()
              WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
              RETURNING code_hash, client_id, account_id, org_id, redirect_uri, scope,
-                       code_challenge, nonce, resource, session_id, expires_at, consumed_at",
+                       code_challenge, nonce, resource, session_id, dpop_jkt, auth_time,
+                       expires_at, consumed_at",
         )
         .bind(code_hash)
         .fetch_optional(&pool)
@@ -671,14 +705,19 @@ impl Store {
         org_id: Uuid,
         scope: &[String],
         resource: Option<&str>,
+        rotated_from: Option<Uuid>,
+        family_id: Uuid,
+        dpop_jkt: Option<&str>,
+        auth_time: OffsetDateTime,
         expires_at: OffsetDateTime,
     ) -> Result<Uuid, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO tenant.refresh_tokens
-               (id, token_hash, client_id, account_id, org_id, scope, resource, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+               (id, token_hash, client_id, account_id, org_id, scope, resource, rotated_from,
+                family_id, dpop_jkt, auth_time, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
         )
         .bind(id)
         .bind(token_hash)
@@ -687,13 +726,17 @@ impl Store {
         .bind(org_id)
         .bind(scope)
         .bind(resource)
+        .bind(rotated_from)
+        .bind(family_id)
+        .bind(dpop_jkt)
+        .bind(auth_time)
         .bind(expires_at)
         .execute(&pool)
         .await?;
         Ok(id)
     }
 
-    /// A live refresh token by hash.
+    /// A refresh token by hash. Revoked rows are returned so reuse can be detected.
     pub async fn refresh_by_hash(
         &self,
         tenant: &TenantRow,
@@ -702,7 +745,8 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, RefreshRow>(
             "SELECT id, token_hash, client_id, account_id, org_id, scope, resource,
-                    expires_at, revoked_at, rotated_from
+                    expires_at, revoked_at, rotated_from, family_id, dpop_jkt, auth_time,
+                    created_at
              FROM tenant.refresh_tokens WHERE token_hash = $1",
         )
         .bind(token_hash)
@@ -724,26 +768,137 @@ impl Store {
         Ok(())
     }
 
-    /// Revoke every live refresh token descended from `id` (reuse detection, §11 M1).
+    /// Revoke every live refresh token in a rotation family (reuse detection, RFC 6749 §10.4).
+    ///
+    /// A family is created when the authorization code is exchanged and every rotated token
+    /// carries the same `family_id`, so one statement kills the whole chain. Legacy rows with a
+    /// `NULL` family fall back to their own id.
     pub async fn revoke_refresh_family(
         &self,
         tenant: &TenantRow,
-        id: Uuid,
+        family_id: Uuid,
     ) -> Result<(), StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         sqlx::query(
             "WITH RECURSIVE family AS (
-                SELECT id FROM tenant.refresh_tokens WHERE id = $1
+                SELECT id FROM tenant.refresh_tokens
+                WHERE id = $1 OR family_id = $1
                 UNION ALL
                 SELECT t.id FROM tenant.refresh_tokens t JOIN family f ON t.rotated_from = f.id
              )
              UPDATE tenant.refresh_tokens SET revoked_at = now()
              WHERE id IN (SELECT id FROM family) AND revoked_at IS NULL",
         )
-        .bind(id)
+        .bind(family_id)
         .execute(&pool)
         .await?;
         Ok(())
+    }
+
+    // -------------------------------------------------- protocol support tables
+
+    /// Remember a DPoP proof's `jti` until its freshness window ends.
+    ///
+    /// Returns `false` when the `jti` was already seen — a replay, which the caller must reject.
+    pub async fn dpop_replay_add(
+        &self,
+        tenant: &TenantRow,
+        jti: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let inserted = sqlx::query(
+            "INSERT INTO tenant.dpop_replays (jti, expires_at) VALUES ($1,$2)
+             ON CONFLICT (jti) DO NOTHING",
+        )
+        .bind(jti)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?
+        .rows_affected();
+        sqlx::query("DELETE FROM tenant.dpop_replays WHERE expires_at < now()")
+            .execute(&pool)
+            .await?;
+        Ok(inserted == 1)
+    }
+
+    /// Record a revoked access-token `jti` until the token would have expired.
+    pub async fn revoke_access_token(
+        &self,
+        tenant: &TenantRow,
+        jti: Uuid,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.revoked_access_tokens (jti, expires_at) VALUES ($1,$2)
+             ON CONFLICT (jti) DO NOTHING",
+        )
+        .bind(jti)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether `jti` was revoked and has not yet reached its expiry.
+    pub async fn access_token_revoked(
+        &self,
+        tenant: &TenantRow,
+        jti: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1::bigint FROM tenant.revoked_access_tokens
+             WHERE jti = $1 AND expires_at > now()",
+        )
+        .bind(jti)
+        .fetch_optional(&pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Store a pushed authorization request (RFC 9126), keyed by the hash of its `request_uri`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn par_insert(
+        &self,
+        tenant: &TenantRow,
+        request_uri_hash: &str,
+        client_row_id: Uuid,
+        params: &Value,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.par_requests
+               (id, request_uri_hash, client_id, params, expires_at)
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(request_uri_hash)
+        .bind(client_row_id)
+        .bind(params)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Atomically consume a pushed authorization request.
+    pub async fn par_take(
+        &self,
+        tenant: &TenantRow,
+        request_uri_hash: &str,
+    ) -> Result<Option<ParRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ParRow>(
+            "UPDATE tenant.par_requests SET consumed_at = now()
+             WHERE request_uri_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+             RETURNING client_id, params, expires_at, consumed_at",
+        )
+        .bind(request_uri_hash)
+        .fetch_optional(&pool)
+        .await?)
     }
 
     // ------------------------------------------------------------------- agents

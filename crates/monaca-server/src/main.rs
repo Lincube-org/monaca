@@ -13,6 +13,7 @@ mod config;
 mod error;
 mod internal;
 mod management;
+mod oauth;
 mod openapi;
 mod protocol;
 mod routes;

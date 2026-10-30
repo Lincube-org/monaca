@@ -36,20 +36,53 @@ impl DiscoveryDocument {
         format!("{}/.well-known/jwks.json", self.issuer)
     }
 
+    /// The UserInfo endpoint (OIDC Core §5.3).
+    pub fn userinfo_endpoint(&self) -> String {
+        format!("{}/oauth2/userinfo", self.issuer)
+    }
+
+    /// The token introspection endpoint (RFC 7662).
+    pub fn introspection_endpoint(&self) -> String {
+        format!("{}/oauth2/introspect", self.issuer)
+    }
+
+    /// The token revocation endpoint (RFC 7009).
+    pub fn revocation_endpoint(&self) -> String {
+        format!("{}/oauth2/revoke", self.issuer)
+    }
+
+    /// The pushed authorization request endpoint (RFC 9126).
+    pub fn pushed_authorization_request_endpoint(&self) -> String {
+        format!("{}/oauth2/par", self.issuer)
+    }
+
     /// Render the document.
     pub fn to_json(&self) -> Value {
+        let auth_methods = json!([
+            "none", "client_secret_basic", "client_secret_post", "private_key_jwt"
+        ]);
         json!({
             "issuer": self.issuer,
             "authorization_endpoint": self.authorization_endpoint(),
             "token_endpoint": self.token_endpoint(),
+            "userinfo_endpoint": self.userinfo_endpoint(),
+            "introspection_endpoint": self.introspection_endpoint(),
+            "revocation_endpoint": self.revocation_endpoint(),
+            "pushed_authorization_request_endpoint": self.pushed_authorization_request_endpoint(),
             "jwks_uri": self.jwks_uri(),
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
             "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": [
-                "none", "client_secret_basic", "client_secret_post", "private_key_jwt"
-            ],
+            "token_endpoint_auth_methods_supported": auth_methods,
+            "introspection_endpoint_auth_methods_supported": auth_methods,
+            "revocation_endpoint_auth_methods_supported": auth_methods,
             "authorization_details_types_supported": ["monaca_grant"],
+            "dpop_signing_alg_values_supported": ["ES256"],
+            "prompt_values_supported": ["none", "login", "consent"],
+            "claims_supported": [
+                "iss", "sub", "aud", "exp", "iat", "auth_time", "nonce", "tid", "org",
+                "email", "email_verified", "name"
+            ],
             "scopes_supported": [
                 "openid", "profile", "email", "offline_access", "tools:read", "tools:write",
                 "monaca:admin"
@@ -79,6 +112,30 @@ mod tests {
         assert_eq!(
             value["jwks_uri"],
             "http://localhost:8080/t/demo/.well-known/jwks.json"
+        );
+        assert_eq!(
+            value["userinfo_endpoint"],
+            "http://localhost:8080/t/demo/oauth2/userinfo"
+        );
+        assert_eq!(
+            value["introspection_endpoint"],
+            "http://localhost:8080/t/demo/oauth2/introspect"
+        );
+        assert_eq!(
+            value["revocation_endpoint"],
+            "http://localhost:8080/t/demo/oauth2/revoke"
+        );
+        assert_eq!(
+            value["pushed_authorization_request_endpoint"],
+            "http://localhost:8080/t/demo/oauth2/par"
+        );
+        assert_eq!(
+            value["dpop_signing_alg_values_supported"],
+            json!(["ES256"])
+        );
+        assert_eq!(
+            value["prompt_values_supported"],
+            json!(["none", "login", "consent"])
         );
         assert_eq!(value["response_types_supported"], json!(["code"]));
         assert_eq!(

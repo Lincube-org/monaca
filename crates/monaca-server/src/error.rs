@@ -71,6 +71,15 @@ pub enum ApiError {
     },
     /// An interaction that is gone, expired or consumed.
     Interaction(InteractionError),
+    /// A resource-server rejection — RFC 6750, answered with a `WWW-Authenticate: Bearer` header.
+    Bearer {
+        /// The HTTP status (401 or 403).
+        status: u16,
+        /// `invalid_token` | `insufficient_scope`.
+        code: &'static str,
+        /// A short explanation.
+        detail: String,
+    },
 }
 
 impl ApiError {
@@ -100,6 +109,15 @@ impl ApiError {
     pub fn not_found(what: &str) -> Self {
         ApiError::problem(kinds::NOT_FOUND, format!("{what} not found"))
     }
+
+    /// An RFC 6750 bearer-token rejection for a protected resource.
+    pub fn bearer(status: u16, code: &'static str, detail: impl Into<String>) -> Self {
+        ApiError::Bearer {
+            status,
+            code,
+            detail: detail.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -107,6 +125,7 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::Problem(problem) => write!(f, "{}: {}", problem.code(), problem.title),
             ApiError::Token { code, detail } => write!(f, "{}: {detail}", code.as_str()),
+            ApiError::Bearer { code, detail, .. } => write!(f, "{code}: {detail}"),
             ApiError::Interaction(err) => write!(f, "{err}"),
         }
     }
@@ -163,6 +182,22 @@ impl IntoResponse for ApiError {
                         header::WWW_AUTHENTICATE,
                         HeaderValue::from_static("Basic realm=\"monaca\""),
                     );
+                }
+                response
+            }
+            ApiError::Bearer {
+                status,
+                code,
+                detail,
+            } => {
+                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::UNAUTHORIZED);
+                let body = json!({ "error": code, "error_description": detail });
+                let mut response = (status, Json(body)).into_response();
+                // Only the code goes in the header: `detail` is free-form and may contain
+                // characters a header value cannot carry.
+                let challenge = format!("Bearer error=\"{code}\"");
+                if let Ok(value) = HeaderValue::from_str(&challenge) {
+                    response.headers_mut().insert(header::WWW_AUTHENTICATE, value);
                 }
                 response
             }

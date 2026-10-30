@@ -22,6 +22,8 @@ pub struct StoredInteraction {
     pub interaction: InteractionRequest,
     /// Set the moment sign-in succeeds, so a replay is a 409 rather than a 404.
     pub consumed: bool,
+    /// The account that signed in, when the flow is waiting for consent.
+    pub signed_in_account: Option<Uuid>,
 }
 
 /// Everything a handler needs.
@@ -143,6 +145,7 @@ impl AppState {
             StoredInteraction {
                 interaction,
                 consumed: false,
+                signed_in_account: None,
             },
         );
     }
@@ -182,6 +185,50 @@ impl AppState {
         }
         stored.consumed = true;
         Ok(stored.interaction.clone())
+    }
+
+    /// Record that `account` authenticated, leaving the interaction redeemable by the consent step.
+    pub async fn mark_interaction_signed_in(
+        &self,
+        id: &str,
+        account: Uuid,
+    ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        stored.signed_in_account = Some(account);
+        Ok(stored.interaction.clone())
+    }
+
+    /// Redeem an interaction that has signed in, returning the account awaiting consent.
+    pub async fn take_signed_in_interaction(
+        &self,
+        id: &str,
+    ) -> Result<(InteractionRequest, Uuid), monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        let account = stored
+            .signed_in_account
+            .ok_or(monaca_oidc::InteractionError::NotSignedIn)?;
+        stored.consumed = true;
+        Ok((stored.interaction.clone(), account))
     }
 
     /// Append an audit event to an org chain in its own transaction.

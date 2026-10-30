@@ -16,15 +16,20 @@
 
 mod authorize;
 mod discovery;
+mod dpop;
 mod interaction;
 mod token;
 
 pub use authorize::{AuthorizeError, AuthorizeParams, AuthorizeRequest, is_absolute_http_url};
 pub use discovery::DiscoveryDocument;
+pub use dpop::{
+    DpopError, DpopProof, PROOF_WINDOW_SECS, access_token_hash, check_binding,
+    verify as verify_proof,
+};
 pub use interaction::{Interaction, InteractionError};
 pub use token::{
     AccessTokenClaims, AssertionError, ClientAssertion, GrantType, IdTokenClaims, TokenErrorCode,
-    TokenForm, TokenRequest, validate_assertion_claims,
+    TokenForm, TokenRequest, UserInfoClaims, at_hash, validate_assertion_claims,
 };
 
 /// Verify a PKCE `S256` challenge — RFC 7636 §4.6.
