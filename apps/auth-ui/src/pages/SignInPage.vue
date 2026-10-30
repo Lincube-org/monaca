@@ -65,6 +65,12 @@ const mfaCode = ref("");
 const mfaSubmitting = ref(false);
 const mfaError = ref<InteractionError | null>(null);
 const mfaInput = ref<InstanceType<typeof Input> | null>(null);
+/** Which factors this challenge accepts; `backup_code` unlocks the recovery-code form. */
+const mfaFactors = ref<string[]>([]);
+const useBackupCode = ref(false);
+
+/** The recovery-code toggle is offered only when the account actually has unused codes. */
+const backupCodeAvailable = computed(() => mfaFactors.value.includes("backup_code"));
 
 /**
  * Which authentication flow the page is showing. The interaction is the same in all four; only the
@@ -110,7 +116,10 @@ const pageTitle = computed<MessageKey>(() => {
 /** The line under the title: what this flow will do. */
 const modeNote = computed<MessageKey>(() => {
   if (consentRequired.value) return "consent.request";
-  if (mfaRequired.value) return details.value ? "mfa.note" : "mfa.noteFallback";
+  if (mfaRequired.value) {
+    if (useBackupCode.value) return "mfa.backupNote";
+    return details.value ? "mfa.note" : "mfa.noteFallback";
+  }
   switch (mode.value) {
     case "code":
       return "emailCode.note";
@@ -191,7 +200,7 @@ const mfaErrorMessage = computed<MessageKey>(() => {
   if (!error) return "errors.generic";
   switch (error.code) {
     case "MONACA_INVALID_VERIFICATION_CODE":
-      return "errors.mfaInvalidCode";
+      return useBackupCode.value ? "errors.mfaInvalidBackupCode" : "errors.mfaInvalidCode";
     case "MONACA_TOO_MANY_ATTEMPTS":
       return "errors.mfaTooManyAttempts";
     case "MONACA_INTERACTION_EXPIRED":
@@ -261,6 +270,7 @@ onMounted(async () => {
     // ask for the password again (§6.1 `mfa`).
     if (details.value.mfa_required) {
       mfaRequired.value = true;
+      mfaFactors.value = details.value.mfa_factors;
     }
   } catch (error) {
     loadError.value = error instanceof Error ? error : new Error(String(error));
@@ -311,6 +321,8 @@ function handleResult(result: SignInResult): void {
   }
   if ("mfa_required" in result) {
     mfaRequired.value = true;
+    mfaFactors.value = result.factors;
+    useBackupCode.value = false;
     password.value = "";
     void nextTick(() => mfaInput.value?.$el?.focus?.());
     return;
@@ -326,12 +338,18 @@ async function submit(): Promise<void> {
   return verifyCode();
 }
 
-/** The second-factor step: six digits from the authenticator app (§6.1 `mfa`). */
+/** The second-factor step: an authenticator code or a saved backup code (§6.1 `mfa`). */
 async function verifySecondFactor(): Promise<void> {
   fieldError.value = null;
   mfaError.value = null;
   const submitted = mfaCode.value.trim();
-  if (!/^[0-9]{6}$/.test(submitted)) {
+  if (useBackupCode.value) {
+    // Case, spaces and the display hyphen are all accepted; the server normalises the same way.
+    if (submitted.toLowerCase().replace(/[^a-z0-9]/g, "").length !== 10) {
+      fieldError.value = "errors.backupCodeRequired";
+      return;
+    }
+  } else if (!/^[0-9]{6}$/.test(submitted)) {
     fieldError.value = "errors.mfaCodeRequired";
     return;
   }
@@ -339,7 +357,14 @@ async function verifySecondFactor(): Promise<void> {
 
   mfaSubmitting.value = true;
   try {
-    handleResult(await verifyMfa(tenantFromUrl.value, interactionId.value, submitted));
+    handleResult(
+      await verifyMfa(
+        tenantFromUrl.value,
+        interactionId.value,
+        submitted,
+        useBackupCode.value ? "backup_code" : "totp",
+      ),
+    );
   } catch (error) {
     mfaError.value = error instanceof InteractionError ? error : null;
     if (!(error instanceof InteractionError)) {
@@ -354,6 +379,15 @@ async function verifySecondFactor(): Promise<void> {
   } finally {
     mfaSubmitting.value = false;
   }
+}
+
+/** Swap between the authenticator form and the recovery-code form without leaving the step. */
+function toggleBackupCode(): void {
+  useBackupCode.value = !useBackupCode.value;
+  mfaCode.value = "";
+  fieldError.value = null;
+  mfaError.value = null;
+  void nextTick(() => mfaInput.value?.$el?.focus?.());
 }
 
 async function signIn(): Promise<void> {
@@ -621,22 +655,33 @@ async function cancel(): Promise<void> {
           <!-- Second factor: the password was right, the authenticator code is the last step. -->
           <form v-else-if="mfaRequired" class="flex flex-col gap-4" @submit.prevent="submit">
             <div class="flex flex-col gap-1.5">
-              <Label for="signin-mfa-code">{{ t("mfa.code") }}</Label>
+              <Label for="signin-mfa-code">
+                {{ t(useBackupCode ? "mfa.backupCode" : "mfa.code") }}
+              </Label>
               <Input
                 id="signin-mfa-code"
                 ref="mfaInput"
                 v-model="mfaCode"
                 type="text"
                 name="code"
-                inputmode="numeric"
-                autocomplete="one-time-code"
-                maxlength="6"
-                pattern="[0-9]{6}"
+                :inputmode="useBackupCode ? 'text' : 'numeric'"
+                :autocomplete="useBackupCode ? 'off' : 'one-time-code'"
+                :maxlength="useBackupCode ? 11 : 6"
+                :pattern="useBackupCode ? '[A-Za-z0-9-]{10,11}' : '[0-9]{6}'"
                 spellcheck="false"
-                :placeholder="t('mfa.codePlaceholder')"
-                :invalid="fieldError === 'errors.mfaCodeRequired' || mfaError !== null"
+                autocapitalize="none"
+                :placeholder="t(useBackupCode ? 'mfa.backupCodePlaceholder' : 'mfa.codePlaceholder')"
+                :invalid="fieldError !== null || mfaError !== null"
                 :aria-describedby="fieldError || mfaError ? 'signin-error' : undefined"
               />
+              <button
+                v-if="backupCodeAvailable"
+                type="button"
+                class="self-start text-[11.5px] font-medium text-brand-strong hover:underline"
+                @click="toggleBackupCode"
+              >
+                {{ t(useBackupCode ? "mfa.useTotp" : "mfa.useBackupCode") }}
+              </button>
             </div>
 
             <p

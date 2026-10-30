@@ -11,8 +11,8 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use monaca_crypto::{
-    generate_totp_secret, hash_password, seal, totp_base32, totp_otpauth_url, verify_password,
-    verify_totp,
+    BACKUP_CODE_COUNT, format_backup_code, generate_backup_codes, generate_totp_secret,
+    hash_password, hash_secret, seal, totp_base32, totp_otpauth_url, verify_password, verify_totp,
 };
 use monaca_store::{AccountRow, SessionRow, TenantRow};
 use monaca_types::{AccountId, SessionId, TypedId};
@@ -81,6 +81,10 @@ async fn profile_json(
         .totp_secret(tenant, account.account_id())
         .await?
         .is_some();
+    let backup_codes = state
+        .store
+        .backup_code_count(tenant, account.account_id())
+        .await?;
     let has_password = state
         .store
         .account_by_email(tenant, &account.primary_email)
@@ -92,7 +96,7 @@ async fn profile_json(
         "email": account.primary_email,
         "display_name": account.display_name,
         "has_password": has_password,
-        "mfa": { "totp": totp },
+        "mfa": { "totp": totp, "backup_codes": backup_codes },
     }))
 }
 
@@ -380,7 +384,77 @@ pub async fn disable_totp(
         .store
         .delete_totp_secret(&tenant, account.account_id())
         .await?;
+    // Backup codes recover a lost authenticator; with no authenticator left they are dead weight and
+    // must not stay usable.
+    state
+        .store
+        .delete_backup_codes(&tenant, account.account_id())
+        .await?;
     state.drop_totp_enrollment(account.id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /t/{tenant}/account/mfa/backup-codes` — how many recovery codes remain unused.
+pub async fn list_backup_codes(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let remaining = state
+        .store
+        .backup_code_count(&tenant, account.account_id())
+        .await?;
+    Ok(Json(json!({ "remaining": remaining })))
+}
+
+/// `POST /t/{tenant}/account/mfa/backup-codes` — mint a fresh sheet of single-use codes.
+///
+/// The plaintext is shown exactly once, in this response; only SHA-256 digests reach storage, exactly
+/// like the email codes. Generating replaces the previous sheet, and requires an enrolled
+/// authenticator: backup codes recover a lost device, they do not replace the factor itself.
+pub async fn create_backup_codes(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    if state
+        .store
+        .totp_secret(&tenant, account.account_id())
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "enroll an authenticator app before generating backup codes",
+        ));
+    }
+
+    let codes = generate_backup_codes(BACKUP_CODE_COUNT);
+    let hashes: Vec<String> = codes.iter().map(|code| hash_secret(code)).collect();
+    state
+        .store
+        .replace_backup_codes(&tenant, account.account_id(), &hashes)
+        .await?;
+
+    Ok(Json(json!({
+        "codes": codes.iter().map(|code| format_backup_code(code)).collect::<Vec<_>>(),
+        "remaining": codes.len(),
+    })))
+}
+
+/// `DELETE /t/{tenant}/account/mfa/backup-codes` — remove every recovery code.
+pub async fn remove_backup_codes(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    state
+        .store
+        .delete_backup_codes(&tenant, account.account_id())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

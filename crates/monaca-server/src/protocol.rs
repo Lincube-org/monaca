@@ -9,8 +9,8 @@ use axum::{Form, Json};
 use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
-    DEFAULT_CODE_DIGITS, generate_numeric_code, hash_password, hash_secret, open, verify_password,
-    verify_secret, verify_totp,
+    DEFAULT_CODE_DIGITS, generate_numeric_code, hash_password, hash_secret, normalize_backup_code,
+    open, verify_password, verify_secret, verify_totp,
 };
 use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
@@ -292,14 +292,43 @@ pub async fn interaction_details(
         .peek_interaction_state(&iid)
         .await
         .map_err(ApiError::Interaction)?;
-    let mfa_required = state
+    let pending = state
         .mfa_pending(&iid)
         .await
-        .map_err(ApiError::Interaction)?
-        .is_some();
+        .map_err(ApiError::Interaction)?;
     let mut body = interaction.to_public_json(signed_in.is_some());
-    body["mfa_required"] = json!(mfa_required);
+    body["mfa_required"] = json!(pending.is_some());
+    // A reload resumes the second-factor step, so the page needs to know which factor forms to offer
+    // without asking the account endpoint (which the browser may not be signed in to yet).
+    let factors = match pending {
+        Some(account_id) => {
+            let tenant = state.tenant(&interaction.tenant).await?;
+            mfa_factors(&state, &tenant, account_id).await?
+        }
+        None => Vec::new(),
+    };
+    body["mfa_factors"] = json!(factors);
     Ok(Json(body))
+}
+
+/// The factors a paused interaction may be completed with, in the order the page offers them.
+///
+/// `backup_code` is only listed when the account actually has unused codes: offering a form that
+/// cannot succeed would be a dead end.
+async fn mfa_factors(
+    state: &AppState,
+    tenant: &TenantRow,
+    account_id: Uuid,
+) -> Result<Vec<&'static str>, ApiError> {
+    let account_id = AccountId::from_uuid(account_id);
+    let mut factors = Vec::new();
+    if state.store.totp_secret(tenant, account_id).await?.is_some() {
+        factors.push("totp");
+        if state.store.backup_code_count(tenant, account_id).await? > 0 {
+            factors.push("backup_code");
+        }
+    }
+    Ok(factors)
 }
 
 /// The sign-in body.
@@ -387,9 +416,10 @@ async fn finish_sign_in(
             .mark_mfa_pending(iid, account.id)
             .await
             .map_err(ApiError::Interaction)?;
+        let factors = mfa_factors(&state, &tenant, account.id).await?;
         return Ok(Json(json!({
             "mfa_required": true,
-            "factors": ["totp"],
+            "factors": factors,
         }))
         .into_response());
     }
@@ -891,14 +921,39 @@ pub async fn password_reset(
 /// The second-factor body.
 #[derive(Debug, Deserialize)]
 pub struct MfaVerifyBody {
-    /// The six-digit TOTP from the authenticator app.
+    /// The six-digit TOTP from the authenticator app, or one of the saved backup codes.
     pub code: String,
+    /// `totp` (default) or `backup_code`.
+    pub factor: Option<String>,
+}
+
+/// Refuse a second-factor attempt, counting it against the interaction's limit.
+///
+/// Both factors share one counter: trying five backup codes must not leave the TOTP form with a
+/// fresh budget.
+async fn refuse_mfa_code(state: &AppState, iid: &str) -> Result<ApiError, ApiError> {
+    let attempts = state
+        .record_mfa_failure(iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    if attempts >= MAX_MFA_ATTEMPTS {
+        Ok(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "too many wrong second-factor codes",
+        ))
+    } else {
+        Ok(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ))
+    }
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/mfa/verify` — prove the second factor.
 ///
 /// The interaction remembers which account passed the primary factor, so this handler needs no
-/// credential of its own; it only proves possession of the authenticator enrolled for that account.
+/// credential of its own; it only proves possession of an authenticator or a backup code enrolled
+/// for that account. A backup code is burned on use, so the same sheet cannot be replayed.
 pub async fn mfa_verify(
     State(state): State<Arc<AppState>>,
     Path((_tenant, iid)): Path<(String, String)>,
@@ -922,57 +977,60 @@ pub async fn mfa_verify(
         .account_by_id(&tenant, AccountId::from_uuid(account_id))
         .await?
     else {
-        return Err(ApiError::problem(
-            kinds::INVALID_VERIFICATION_CODE,
-            "the code is incorrect or expired",
-        ));
+        return Err(refuse_mfa_code(&state, &iid).await?);
     };
     if account.state != "active" {
-        return Err(ApiError::problem(
-            kinds::INVALID_VERIFICATION_CODE,
-            "the code is incorrect or expired",
-        ));
+        return Err(refuse_mfa_code(&state, &iid).await?);
     }
 
-    let Some(sealed) = state
-        .store
-        .totp_secret(&tenant, account.account_id())
-        .await?
-    else {
-        return Err(ApiError::problem(
-            kinds::INVALID_VERIFICATION_CODE,
-            "the code is incorrect or expired",
-        ));
-    };
-    let dek = state.tenant_dek(&tenant)?;
-    let secret =
-        open(&dek, &sealed).map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
+    match body.factor.as_deref().unwrap_or("totp") {
+        "totp" => {
+            let Some(sealed) = state
+                .store
+                .totp_secret(&tenant, account.account_id())
+                .await?
+            else {
+                return Err(refuse_mfa_code(&state, &iid).await?);
+            };
+            let dek = state.tenant_dek(&tenant)?;
+            let secret = open(&dek, &sealed)
+                .map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
 
-    if !verify_totp(&secret, &body.code, state.now()) {
-        let attempts = state
-            .record_mfa_failure(&iid)
-            .await
-            .map_err(ApiError::Interaction)?;
-        if attempts >= MAX_MFA_ATTEMPTS {
+            if !verify_totp(&secret, &body.code, state.now()) {
+                return Err(refuse_mfa_code(&state, &iid).await?);
+            }
+            state
+                .store
+                .touch_totp(&tenant, account.account_id(), state.now())
+                .await?;
+        }
+        "backup_code" => {
+            // A malformed code is indistinguishable from a used or unknown one: both are a single
+            // attempt and the same `401`.
+            let Some(hash) = normalize_backup_code(&body.code).map(|code| hash_secret(&code))
+            else {
+                return Err(refuse_mfa_code(&state, &iid).await?);
+            };
+            if !state
+                .store
+                .consume_backup_code(&tenant, account.account_id(), &hash)
+                .await?
+            {
+                return Err(refuse_mfa_code(&state, &iid).await?);
+            }
+        }
+        _ => {
             return Err(ApiError::problem(
-                kinds::TOO_MANY_ATTEMPTS,
-                "too many wrong second-factor codes",
+                kinds::INVALID_REQUEST,
+                "unknown second factor",
             ));
         }
-        return Err(ApiError::problem(
-            kinds::INVALID_VERIFICATION_CODE,
-            "the code is incorrect or expired",
-        ));
     }
 
     state
         .clear_mfa_pending(&iid)
         .await
         .map_err(ApiError::Interaction)?;
-    state
-        .store
-        .touch_totp(&tenant, account.account_id(), state.now())
-        .await?;
 
     complete_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }

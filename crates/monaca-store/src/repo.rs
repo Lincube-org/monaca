@@ -551,6 +551,95 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    // ------------------------------------------------------------ MFA backup codes
+
+    /// Replace every backup code of an account with the supplied digests, in one transaction.
+    ///
+    /// Regenerating is a full replacement of the previous set rather than an append: the account
+    /// asked for a fresh sheet and the old one must stop working.
+    pub async fn replace_backup_codes(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        code_hashes: &[String],
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query("DELETE FROM tenant.backup_codes WHERE account_id = $1")
+            .bind(account_id.uuid())
+            .execute(&mut *tx)
+            .await?;
+
+        for code_hash in code_hashes {
+            sqlx::query(
+                "INSERT INTO tenant.backup_codes (id, account_id, code_hash)
+                 VALUES ($1,$2,$3)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(account_id.uuid())
+            .bind(code_hash)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// How many backup codes of an account are still unused.
+    pub async fn backup_code_count(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<i64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM tenant.backup_codes
+             WHERE account_id = $1 AND used_at IS NULL",
+        )
+        .bind(account_id.uuid())
+        .fetch_one(&pool)
+        .await?;
+        Ok(count)
+    }
+
+    /// Burn one backup code. `true` when it existed and had not been used yet.
+    ///
+    /// The update *is* the check: two racing requests can only succeed when they update different
+    /// rows, because the second one no longer finds `used_at IS NULL`.
+    pub async fn consume_backup_code(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        code_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.backup_codes SET used_at = now()
+             WHERE account_id = $1 AND code_hash = $2 AND used_at IS NULL",
+        )
+        .bind(account_id.uuid())
+        .bind(code_hash)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove every backup code of an account. `true` when at least one was deleted.
+    pub async fn delete_backup_codes(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.backup_codes WHERE account_id = $1")
+            .bind(account_id.uuid())
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Record a successful TOTP use, so an operator can see the factor is live.
     pub async fn touch_totp(
         &self,

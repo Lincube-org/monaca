@@ -36,6 +36,8 @@ export interface InteractionDetails {
   signed_in: boolean;
   /** Whether the primary factor passed and the account still owes an authenticator code. */
   mfa_required: boolean;
+  /** Which factors the second-factor step accepts: `totp` and/or `backup_code`. */
+  mfa_factors: string[];
   expires_at: string;
 }
 
@@ -240,15 +242,16 @@ export function resetPassword(
   });
 }
 
-/** Prove the second factor with the six-digit code from the authenticator app. */
+/** Prove the second factor with a six-digit authenticator code or a saved backup code. */
 export function verifyMfa(
   tenant: string,
   iid: string,
   code: string,
+  factor: "totp" | "backup_code" = "totp",
 ): Promise<SignInResult> {
   return call<SignInResult>(`${base(tenant, iid)}/mfa/verify`, {
     method: "POST",
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ code, factor }),
   });
 }
 

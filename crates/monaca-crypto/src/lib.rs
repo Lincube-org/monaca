@@ -27,7 +27,11 @@ pub use jwk::{jwk_thumbprint, verify_embedded_jwk};
 pub use jws::{SigningKeyPair, decode_unverified, verify_jws, verify_jws_with_audience};
 pub use keys::{DevEnvKeyProvider, Jwks, generate_pkcs8_der, open, public_jwk_from_der, seal};
 pub use password::{Argon2Params, hash_password, verify_password};
-pub use secret::{DEFAULT_CODE_DIGITS, generate_numeric_code, hash_secret, verify_secret};
+pub use secret::{
+    BACKUP_CODE_COUNT, BACKUP_CODE_LEN, DEFAULT_CODE_DIGITS, format_backup_code,
+    generate_backup_codes, generate_numeric_code, hash_secret, normalize_backup_code,
+    verify_secret,
+};
 pub use totp::{
     DIGITS as TOTP_DIGITS, PERIOD_SECS as TOTP_PERIOD_SECS, SECRET_LEN as TOTP_SECRET_LEN,
     base32_secret as totp_base32, code_at as totp_code, generate_secret as generate_totp_secret,

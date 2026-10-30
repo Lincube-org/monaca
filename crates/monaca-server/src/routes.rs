@@ -162,6 +162,12 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             "/t/{tenant}/account/mfa/totp/verify",
             post(crate::account::verify_totp_enrollment),
         )
+        .route(
+            "/t/{tenant}/account/mfa/backup-codes",
+            get(crate::account::list_backup_codes)
+                .post(crate::account::create_backup_codes)
+                .delete(crate::account::remove_backup_codes),
+        )
 }
 
 /// The `/v1` management API — §6.2.

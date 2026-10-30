@@ -8,7 +8,9 @@ import {
   AccountError,
   beginTotp,
   changePassword,
+  disableBackupCodes,
   disableTotp,
+  generateBackupCodes,
   getAccount,
   listSessions,
   revokeOtherSessions,
@@ -64,11 +66,18 @@ const submitError = ref<string | null>(null);
 const busy = ref<"begin" | "verify" | "disable" | null>(null);
 const mfaNotice = ref<MessageKey | null>(null);
 
+/** The plaintext sheet from the last generation; `null` once it has been dismissed or replaced. */
+const backupCodes = ref<string[] | null>(null);
+const backupBusy = ref<"generate" | "disable" | null>(null);
+const backupNotice = ref<MessageKey | null>(null);
+const backupError = ref<string | null>(null);
+
 const codeInput = ref<InstanceType<typeof Input> | null>(null);
 
 const totpEnabled = computed(() => account.value?.mfa.totp === true);
 const hasPassword = computed(() => account.value?.has_password === true);
 const otherSessions = computed(() => sessions.value?.filter((row) => !row.current) ?? []);
+const backupRemaining = computed(() => account.value?.mfa.backup_codes ?? 0);
 
 const loadErrorMessage = computed<MessageKey>(() =>
   loadError.value?.status === 401 ? "account.sessionRequired" : "account.loadFailed",
@@ -254,12 +263,57 @@ async function disable(): Promise<void> {
   busy.value = "disable";
   try {
     await disableTotp(tenant.value);
+    // Removing the authenticator also removes the recovery codes it stood behind.
+    backupCodes.value = null;
+    backupNotice.value = null;
     await load();
     mfaNotice.value = "account.disabled";
   } catch (error) {
     submitError.value = messageOf(error);
   } finally {
     busy.value = null;
+  }
+}
+
+async function generateBackup(): Promise<void> {
+  backupBusy.value = "generate";
+  backupError.value = null;
+  backupNotice.value = null;
+  try {
+    const sheet = await generateBackupCodes(tenant.value);
+    backupCodes.value = sheet.codes;
+    if (account.value) {
+      account.value = {
+        ...account.value,
+        mfa: { ...account.value.mfa, backup_codes: sheet.remaining },
+      };
+    }
+    backupNotice.value = "account.backupGenerated";
+  } catch (error) {
+    backupError.value = messageOf(error);
+  } finally {
+    backupBusy.value = null;
+  }
+}
+
+async function removeBackup(): Promise<void> {
+  backupBusy.value = "disable";
+  backupError.value = null;
+  backupNotice.value = null;
+  try {
+    await disableBackupCodes(tenant.value);
+    backupCodes.value = null;
+    if (account.value) {
+      account.value = {
+        ...account.value,
+        mfa: { ...account.value.mfa, backup_codes: 0 },
+      };
+    }
+    backupNotice.value = "account.backupRemoved";
+  } catch (error) {
+    backupError.value = messageOf(error);
+  } finally {
+    backupBusy.value = null;
   }
 }
 
@@ -511,6 +565,74 @@ function cancelEnrollment(): void {
           <p v-if="mfaNotice" class="text-[12.5px] leading-snug text-ink-muted" role="status">
             {{ t(mfaNotice) }}
           </p>
+
+          <!-- Recovery codes: a way back in when the authenticator app is lost. -->
+          <div
+            v-if="totpEnabled"
+            class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.backupTitle") }}</h2>
+              <Badge variant="muted">
+                {{ t("account.backupRemaining", { remaining: backupRemaining }) }}
+              </Badge>
+            </div>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.backupNote") }}</p>
+
+            <!-- The plaintext sheet exists only in the response to a generation. -->
+            <div v-if="backupCodes" class="flex flex-col gap-1.5">
+              <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.backupShownOnce") }}</p>
+              <div class="grid grid-cols-2 gap-x-3 gap-y-1 rounded-md border border-rule bg-surface px-3 py-2">
+                <span
+                  v-for="backupCode in backupCodes"
+                  :key="backupCode"
+                  class="mono-data select-all text-[12px] text-ink"
+                >
+                  {{ backupCode }}
+                </span>
+              </div>
+            </div>
+
+            <p
+              v-if="backupError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ backupError }}
+            </p>
+            <p v-else-if="backupNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(backupNotice) }}
+            </p>
+
+            <div class="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                block
+                :disabled="backupBusy !== null"
+                :aria-busy="backupBusy === 'generate'"
+                @click="generateBackup"
+              >
+                <Loader2 v-if="backupBusy === 'generate'" class="animate-spin" />
+                <KeyRound v-else />
+                {{ backupBusy === "generate" ? t("account.backupGenerating") : t("account.backupGenerate") }}
+              </Button>
+              <Button
+                v-if="backupRemaining > 0"
+                type="button"
+                variant="ghost"
+                block
+                :disabled="backupBusy !== null"
+                :aria-busy="backupBusy === 'disable'"
+                @click="removeBackup"
+              >
+                <Loader2 v-if="backupBusy === 'disable'" class="animate-spin" />
+                <ShieldOff v-else />
+                {{ backupBusy === "disable" ? t("account.backupDisabling") : t("account.backupDisable") }}
+              </Button>
+            </div>
+          </div>
 
           <!-- Sessions: every browser that can currently act as this account. -->
           <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">

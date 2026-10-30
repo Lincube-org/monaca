@@ -114,6 +114,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "refused and the new one signs in; GET /account/sessions marks the caller current; DELETE one and " +
       "DELETE all others revoke them",
   },
+  {
+    step: "11",
+    title: "MFA backup codes",
+    assertion:
+      "POST /t/demo/account/mfa/backup-codes (session cookie, authenticator enrolled) → ten grouped codes; " +
+      "a sign-in challenge lists totp and backup_code; a wrong code is 401; a typed (uppercase, hyphenated) " +
+      "code completes the flow and issues a token; the same code is refused on replay; GET reports the " +
+      "remaining count; DELETE removes them and the next challenge offers totp only",
+  },
 ];
 
 interface StepResult {
@@ -1507,9 +1516,217 @@ async function accountFlow(base: string, adminToken: string): Promise<StepResult
 }
 
 /**
- * The UUID inside a `<prefix>_<suffix>` typed id, so a `ses_…` returned by the API can be compared
- * with the raw UUID the cookie carries. The suffix is 130 bits of Crockford base32 (§5.2).
+ * Step 11 — MFA backup codes.
+ *
+ * A dedicated account enrolls an authenticator, generates a sheet of ten codes, then signs in with
+ * one of them instead of the app. The same code is replayed on a fresh interaction to prove it is
+ * single-use, and the remaining count is checked before and after removal. The typed code is sent in
+ * uppercase with its display hyphen to exercise the server-side normalisation.
  */
+async function backupCodeFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const email = `backup-${runId}@demo.localhost`;
+  const password = `pw-${runId}-backup-account`;
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "11",
+    title: "MFA backup codes",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction, with the PKCE verifier the exchange needs. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `b-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  const factorsOf = (body: unknown): string[] => {
+    const factors = (body as { factors?: unknown })?.factors;
+    return Array.isArray(factors) ? factors.filter((value): value is string => typeof value === "string") : [];
+  };
+
+  try {
+    // --- a dedicated account, already a member of acme ------------------------------------------
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Backup codes", password }),
+    });
+    const accountId = (account.body as { id?: string })?.id;
+    if (account.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    // --- one-factor sign-in, then enroll the authenticator the codes stand behind ----------------
+    const first = await signIn("first");
+    if (first?.cookie === undefined) return fail("the first sign-in set no session cookie");
+    const cookie = { cookie: `monaca_session=${first.cookie}` };
+
+    const enrollment = await call(`${base}/t/${TENANT}/account/mfa/totp`, { method: "POST", headers: cookie });
+    const secret = (enrollment.body as { secret?: unknown })?.secret;
+    if (typeof secret !== "string") return fail(`POST /account/mfa/totp → ${enrollment.status} ${text(enrollment.body)}`);
+    const confirmed = await call(`${base}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push(["the authenticator is enrolled", confirmed.status === 200]);
+
+    // --- generate the sheet: ten grouped codes, shown once --------------------------------------
+    const sheet = await call(`${base}/t/${TENANT}/account/mfa/backup-codes`, { method: "POST", headers: cookie });
+    const codes = (sheet.body as { codes?: unknown })?.codes;
+    const codeList = Array.isArray(codes) ? codes.filter((code): code is string => typeof code === "string") : [];
+    checks.push([
+      "POST /account/mfa/backup-codes returns ten grouped codes",
+      sheet.status === 200 &&
+        codeList.length === 10 &&
+        codeList.every((code) => /^[0-9a-z]{5}-[0-9a-z]{5}$/.test(code)),
+    ]);
+    if (codeList.length === 0) return fail(`POST /account/mfa/backup-codes → ${sheet.status} ${text(sheet.body)}`);
+
+    const remaining = async (): Promise<number | undefined> => {
+      const response = await call(`${base}/t/${TENANT}/account/mfa/backup-codes`, { headers: cookie });
+      const value = (response.body as { remaining?: unknown })?.remaining;
+      return typeof value === "number" ? value : undefined;
+    };
+    checks.push(["GET /account/mfa/backup-codes reports ten unused", (await remaining()) === 10]);
+
+    // --- a sign-in challenge offers both factors ------------------------------------------------
+    const challenged = await signIn("challenged");
+    if (challenged === undefined) return fail("");
+    const factors = factorsOf(challenged.body);
+    checks.push([
+      "a sign-in challenge lists totp and backup_code",
+      challenged.status === 200 && factors.includes("totp") && factors.includes("backup_code"),
+    ]);
+
+    // --- a wrong code is refused; the typed form is normalised (uppercase + hyphen) -------------
+    const canonical = codeList[0]!.replace("-", "");
+    const wrong = `${canonical[0] === "0" ? "1" : "0"}${canonical.slice(1)}`;
+    const refused = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: wrong, factor: "backup_code" }),
+    });
+    checks.push(["a wrong backup code is refused", refused.status === 401]);
+
+    const verified = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: codeList[0]!.toUpperCase(), factor: "backup_code" }),
+    });
+    const token = await exchange((verified.body as { redirect_to?: unknown })?.redirect_to, challenged.verifier);
+    checks.push([
+      "a backup code completes the flow and issues a token",
+      verified.status === 200 && token.status === 200,
+    ]);
+
+    // --- the code is single-use ------------------------------------------------------------------
+    const replay = await signIn("replay");
+    if (replay === undefined) return fail("");
+    const reused = await call(`${base}/t/${TENANT}/interaction/${replay.interaction}/mfa/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: codeList[0]!, factor: "backup_code" }),
+    });
+    checks.push(["the same backup code cannot be reused", reused.status === 401]);
+    checks.push(["the sheet now reports nine unused", (await remaining()) === 9]);
+
+    // --- removal leaves only the authenticator --------------------------------------------------
+    const removed = await call(`${base}/t/${TENANT}/account/mfa/backup-codes`, { method: "DELETE", headers: cookie });
+    checks.push(["DELETE /account/mfa/backup-codes is 204", removed.status === 204]);
+    checks.push(["no backup codes remain", (await remaining()) === 0]);
+
+    const plain = await signIn("plain");
+    checks.push([
+      "the next challenge offers totp only",
+      plain !== undefined && factorsOf(plain.body).join(",") === "totp",
+    ]);
+    checks.push([
+      "the profile reports zero backup codes",
+      ((await call(`${base}/t/${TENANT}/account`, { headers: cookie }).then((response) => response.body)) as {
+        mfa?: { backup_codes?: unknown };
+      })?.mfa?.backup_codes === 0,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "11",
+    title: "MFA backup codes",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: generate ten → challenge offers both → wrong refused → code signs in → replay refused → remove`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 function typeIdUuid(id: string): string {
   const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
   const suffix = id.slice(id.indexOf("_") + 1);
@@ -1688,6 +1905,7 @@ async function main(): Promise<number> {
   push(await emailFlow(base, parsed.consoleSecret, parsed.internalSecret));
   push(await mfaFlow(base, adminToken, parsed.consoleSecret));
   push(await accountFlow(base, adminToken));
+  push(await backupCodeFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

@@ -12,7 +12,14 @@ export interface AccountProfile {
   display_name: string;
   /** False for a passwordless account; the page hides the change-password form then. */
   has_password: boolean;
-  mfa: { totp: boolean };
+  /** `backup_codes` is how many unused recovery codes remain. */
+  mfa: { totp: boolean; backup_codes: number };
+}
+
+/** A freshly generated sheet of recovery codes; the plaintext is shown only in this response. */
+export interface BackupCodeSheet {
+  codes: string[];
+  remaining: number;
 }
 
 /** A pending authenticator secret, shown once to the setup page. */
@@ -93,6 +100,19 @@ export function verifyTotp(tenant: string, code: string): Promise<{ enabled: tru
 
 export function disableTotp(tenant: string): Promise<void> {
   return call<void>(`${base(tenant)}/mfa/totp`, { method: "DELETE" });
+}
+
+export function listBackupCodes(tenant: string): Promise<{ remaining: number }> {
+  return call<{ remaining: number }>(`${base(tenant)}/mfa/backup-codes`);
+}
+
+/** Mint ten new single-use codes; this response is the only place the plaintext exists. */
+export function generateBackupCodes(tenant: string): Promise<BackupCodeSheet> {
+  return call<BackupCodeSheet>(`${base(tenant)}/mfa/backup-codes`, { method: "POST" });
+}
+
+export function disableBackupCodes(tenant: string): Promise<void> {
+  return call<void>(`${base(tenant)}/mfa/backup-codes`, { method: "DELETE" });
 }
 
 /** Change the display name applications show; the server trims and bounds it. */
