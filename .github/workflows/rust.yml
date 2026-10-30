@@ -356,7 +356,10 @@ jobs:
       MONACA_ENV: ci
       MONACA_SERVER_ADDR: 127.0.0.1:8081
       MONACA_SERVER_URL: http://127.0.0.1:8081
-      MONACA_PUBLIC_BASE_URL: http://localhost:8080
+      # There is no gateway in this job, so the server IS the public origin: the issuer it
+      # derives from this base is the one the acceptance script addresses (`--base-url`), which
+      # is what makes a `private_key_jwt` assertion's `aud` land on the token endpoint (§7.4).
+      MONACA_PUBLIC_BASE_URL: http://127.0.0.1:8081
       MONACA_AUTH_UI_URL: http://localhost:5174
       MONACA_CONTROL_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/monaca_control
       MONACA_ADMIN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
@@ -365,12 +368,14 @@ jobs:
       MONACA_DEV_KEK: "00000000000000000000000000000000000000000000000000000000000000ff"
       MONACA_INTERNAL_SECRET: ci-internal-secret
       MONACA_BOOTSTRAP_ADMIN_EMAIL: admin@demo.localhost
-      MONACA_BOOTSTRAP_ADMIN_PASSWORD: monaca-ci-password
+      # The acceptance script (§12) signs in with the seeded admin, and its password is the
+      # contract's dev default (§2.2), not a CI-only value: it has no flag of its own.
+      MONACA_BOOTSTRAP_ADMIN_PASSWORD: monaca-dev-password
       MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET: ci-admin-client-secret
       MONACA_CONSOLE_CLIENT_SECRET: ci-console-client-secret
       MONACA_MCP_DEMO_RESOURCE: http://localhost:8080/mcp/demo
       MONACA_LOG_LEVEL: info
-      MONACA_E2E_BASE_URL: http://localhost:8080
+      MONACA_E2E_BASE_URL: http://127.0.0.1:8081
     steps:
       - uses: actions/checkout@v4
 
@@ -444,7 +449,9 @@ jobs:
             } > .monaca/reports/skeleton.json
             exit 0
           fi
-          bun run e2e:skeleton --base-url http://127.0.0.1:8081
+          bun run e2e:skeleton --base-url http://127.0.0.1:8081 \
+            --admin-secret "$MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET" \
+            --console-secret "$MONACA_CONSOLE_CLIENT_SECRET"
 
       - name: Stop the server
         if: always()
