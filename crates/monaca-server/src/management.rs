@@ -255,6 +255,7 @@ pub async fn create_account(
             body.display_name.trim(),
             Some(&phc),
             false,
+            None,
         )
         .await?;
 

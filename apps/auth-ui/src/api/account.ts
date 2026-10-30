@@ -11,6 +11,8 @@ import type { CeremonyJSON, CreationOptionsJSON } from "./webauthn";
 export interface AccountProfile {
   id: string;
   email: string;
+  /** The second sign-in identifier, when the account set one. */
+  username: string | null;
   display_name: string;
   /** False for a passwordless account; the page hides the change-password form then. */
   has_password: boolean;
@@ -166,11 +168,20 @@ export function deletePasskey(tenant: string, passkeyId: string): Promise<void> 
   });
 }
 
-/** Change the display name applications show; the server trims and bounds it. */
-export function updateProfile(tenant: string, displayName: string): Promise<AccountProfile> {
+/**
+ * Change the display name and/or the username; an omitted field is left untouched. A username
+ * another account holds is a `409`.
+ */
+export function updateProfile(
+  tenant: string,
+  changes: { displayName?: string; username?: string },
+): Promise<AccountProfile> {
   return call<AccountProfile>(base(tenant), {
     method: "PATCH",
-    body: JSON.stringify({ display_name: displayName }),
+    body: JSON.stringify({
+      ...(changes.displayName === undefined ? {} : { display_name: changes.displayName }),
+      ...(changes.username === undefined ? {} : { username: changes.username }),
+    }),
   });
 }
 

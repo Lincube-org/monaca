@@ -365,10 +365,26 @@ fn subject_uuid(id: Option<&str>) -> Option<Uuid> {
     monaca_types::decode_suffix(suffix).ok()
 }
 
+/// Map PostgreSQL `unique_violation` (23505) to the "already taken" answer (§6.1 usernames).
+///
+/// The unique indexes are the authority on uniqueness, so the constraint — not a prior SELECT — is
+/// what decides; this keeps two concurrent claims from both succeeding.
+fn unique_conflict(err: sqlx::Error) -> StoreError {
+    if let sqlx::Error::Database(ref db) = err
+        && db.code().as_deref() == Some("23505")
+    {
+        return StoreError::AlreadyExists { entity: "username" };
+    }
+    StoreError::Database(err.to_string())
+}
+
 impl Store {
     // ---------------------------------------------------------------- accounts
 
-    /// Create an account with its email identifier and an optional password, atomically.
+    /// Create an account with its identifiers and an optional password, atomically.
+    ///
+    /// The email row is always written; `username` is a second sign-in identifier and is stored
+    /// lowercased, matching the case-insensitive unique index from schema version 7.
     pub async fn create_account(
         &self,
         tenant: &TenantRow,
@@ -377,6 +393,7 @@ impl Store {
         display_name: &str,
         password_phc: Option<&str>,
         is_tenant_admin: bool,
+        username: Option<&str>,
     ) -> Result<AccountRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
@@ -402,6 +419,19 @@ impl Store {
         .bind(email)
         .execute(&mut *tx)
         .await?;
+
+        if let Some(username) = username {
+            sqlx::query(
+                "INSERT INTO tenant.account_identifiers (id, account_id, kind, value)
+                 VALUES ($1,$2,'username',$3)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(account_id.uuid())
+            .bind(username)
+            .execute(&mut *tx)
+            .await
+            .map_err(unique_conflict)?;
+        }
 
         if let Some(phc) = password_phc {
             sqlx::query(
@@ -464,6 +494,113 @@ impl Store {
 
         let phc = secret.and_then(|(bytes,)| String::from_utf8(bytes).ok());
         Ok(Some((account, phc)))
+    }
+
+    /// An account and its password PHC string, by sign-in identifier (§6.1).
+    ///
+    /// The identifier is either an email address or a username, both matched case-insensitively.
+    /// An email always wins: a username may not contain `@` (§6.1), so the two namespaces can only
+    /// overlap through data written outside this API, and the email is the safer interpretation.
+    pub async fn account_by_identifier(
+        &self,
+        tenant: &TenantRow,
+        identifier: &str,
+    ) -> Result<Option<(AccountRow, Option<String>)>, StoreError> {
+        if let Some(account) = self.account_by_email(tenant, identifier).await? {
+            return Ok(Some(account));
+        }
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let account = sqlx::query_as::<_, AccountRow>(
+            "SELECT a.id, a.primary_email, a.display_name, a.state, a.is_tenant_admin, a.created_at
+             FROM tenant.accounts a
+             JOIN tenant.account_identifiers i ON i.account_id = a.id
+             WHERE i.kind = 'username' AND lower(i.value) = lower($1)
+             LIMIT 1",
+        )
+        .bind(identifier)
+        .fetch_optional(&pool)
+        .await?;
+
+        let Some(account) = account else {
+            return Ok(None);
+        };
+
+        let secret: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT secret_enc FROM tenant.credentials
+             WHERE account_id = $1 AND kind = 'password' LIMIT 1",
+        )
+        .bind(account.id)
+        .fetch_optional(&pool)
+        .await?;
+
+        let phc = secret.and_then(|(bytes,)| String::from_utf8(bytes).ok());
+        Ok(Some((account, phc)))
+    }
+
+    /// The account's username, if one was set.
+    pub async fn account_username(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Option<String>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, (String,)>(
+            "SELECT value FROM tenant.account_identifiers
+             WHERE account_id = $1 AND kind = 'username' LIMIT 1",
+        )
+        .bind(account_id.uuid())
+        .fetch_optional(&pool)
+        .await?
+        .map(|(value,)| value))
+    }
+
+    /// Set or replace the account's username, rejecting one another account already holds.
+    ///
+    /// Callers pass an already-normalised (lowercased, syntactically valid) username; the unique
+    /// index is the authority, so a race between two accounts yields `AlreadyExists` rather than a
+    /// duplicate row.
+    pub async fn set_username(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        username: &str,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+
+        let existing: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM tenant.account_identifiers
+             WHERE account_id = $1 AND kind = 'username' LIMIT 1",
+        )
+        .bind(account_id.uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        match existing {
+            Some((id,)) => {
+                sqlx::query("UPDATE tenant.account_identifiers SET value = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(username)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(unique_conflict)?;
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO tenant.account_identifiers (id, account_id, kind, value)
+                     VALUES ($1,$2,'username',$3)",
+                )
+                .bind(Uuid::now_v7())
+                .bind(account_id.uuid())
+                .bind(username)
+                .execute(&mut *tx)
+                .await
+                .map_err(unique_conflict)?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Replace the account's password with a new argon2id PHC string.

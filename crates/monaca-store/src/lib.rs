@@ -67,6 +67,12 @@ pub enum StoreError {
     /// Provisioning stopped part-way; the saga row still says `provisioning`.
     #[error("tenant provisioning is incomplete at step {0}")]
     ProvisioningIncomplete(u8),
+    /// A unique value is already in use (e.g. a username taken by another account).
+    #[error("{entity} is already taken")]
+    AlreadyExists {
+        /// The entity kind, e.g. `username`.
+        entity: &'static str,
+    },
     /// A value that must be a SQL identifier is not one.
     #[error("refusing to use `{0}` as a SQL identifier")]
     BadIdentifier(String),

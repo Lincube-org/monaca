@@ -339,10 +339,15 @@ async fn mfa_factors(
 }
 
 /// The sign-in body.
+///
+/// `identifier` is the account's email address or its username (§6.1); `email` is the older field
+/// name and is still accepted so a client that predates usernames keeps working.
 #[derive(Debug, Deserialize)]
 pub struct SignInBody {
-    /// The account's primary email.
-    pub email: String,
+    /// Email address or username.
+    pub identifier: Option<String>,
+    /// The legacy email-only field, honoured when `identifier` is absent.
+    pub email: Option<String>,
     /// The password.
     pub password: String,
 }
@@ -363,7 +368,19 @@ pub async fn sign_in(
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
     let org_ctx = org.ctx(&tenant);
 
-    let account = state.store.account_by_email(&tenant, &body.email).await?;
+    // An email address or a username; both are matched case-insensitively (§6.1).
+    let identifier = body
+        .identifier
+        .as_deref()
+        .or(body.email.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::problem(kinds::INVALID_REQUEST, "`identifier` is required"))?;
+
+    let account = state
+        .store
+        .account_by_identifier(&tenant, identifier)
+        .await?;
 
     let authenticated = match account {
         Some((account, Some(phc))) if account.state == "active" => {
@@ -372,9 +389,9 @@ pub async fn sign_in(
                 Err(_) => None,
             }
         }
-        // An unknown email and a wrong password must be indistinguishable (§6.1). The verifier
-        // path above and this branch both end in the same response; the audit event is what
-        // records which one happened, and it is only visible to the tenant's own admins.
+        // An unknown identifier and a wrong password must be indistinguishable (§6.1). The
+        // verifier path above and this branch both end in the same response; the audit event is
+        // what records which one happened, and it is only visible to the tenant's own admins.
         _ => None,
     };
 
@@ -383,7 +400,7 @@ pub async fn sign_in(
             state.now(),
             &org_ctx.org_id,
             AuditDecision::Deny,
-            &body.email,
+            identifier,
             "invalid_credentials",
         );
         if let Err(err) = state.audit_org(&org_ctx, &event).await {
@@ -391,7 +408,7 @@ pub async fn sign_in(
         }
         return Err(ApiError::problem(
             kinds::INVALID_CREDENTIALS,
-            "email or password is incorrect",
+            "identifier or password is incorrect",
         ));
     };
 
@@ -542,6 +559,8 @@ pub struct SignUpVerifyBody {
     pub password: String,
     /// Optional display name; the address's local part is used when absent.
     pub display_name: Option<String>,
+    /// Optional username, a second sign-in identifier (§6.1).
+    pub username: Option<String>,
 }
 
 /// The body of the email-code sign-in verification.
@@ -585,6 +604,32 @@ pub(crate) fn check_password(password: &str) -> Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+/// The shortest and longest accepted username, in characters.
+const MIN_USERNAME_LEN: usize = 3;
+const MAX_USERNAME_LEN: usize = 32;
+
+/// Validate and normalise a username (§6.1).
+///
+/// It is a sign-in identifier, so it may not contain `@` (that is how the sign-in endpoint tells the
+/// two namespaces apart) and it is stored lowercased, matching the case-insensitive unique index.
+pub(crate) fn check_username(raw: &str) -> Result<String, ApiError> {
+    let username = raw.trim().to_lowercase();
+    let length = username.chars().count();
+    if !(MIN_USERNAME_LEN..=MAX_USERNAME_LEN).contains(&length)
+        || !username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!(
+                "username must be {MIN_USERNAME_LEN}-{MAX_USERNAME_LEN} letters, digits, `_` or `-`"
+            ),
+        ));
+    }
+    Ok(username)
 }
 
 /// The interaction and its tenant, or the interaction error the page should render.
@@ -759,6 +804,7 @@ pub async fn sign_up_verify(
         ));
     }
     take_verification_code(&state, &tenant, PURPOSE_SIGN_UP, &email, &body.code).await?;
+    let username = body.username.as_deref().map(check_username).transpose()?;
 
     let phc = hash_password(body.password.clone(), state.argon)
         .await
@@ -779,6 +825,7 @@ pub async fn sign_up_verify(
             &display_name,
             Some(&phc),
             false,
+            username.as_deref(),
         )
         .await?;
 
@@ -826,7 +873,11 @@ pub async fn sign_up_verify(
         decision: AuditDecision::Allow,
         grant_id: None,
         jti: None,
-        payload: json!({ "email": account.primary_email, "self_service": true }),
+        payload: json!({
+            "email": account.primary_email,
+            "username": username,
+            "self_service": true,
+        }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
         tracing::warn!(%err, "could not append account.created audit event");

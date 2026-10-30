@@ -17,6 +17,7 @@ import type { CeremonyJSON, RequestOptionsJSON } from "./webauthn";
 export type InteractionErrorCode =
   | "MONACA_INVALID_CREDENTIALS"
   | "MONACA_ACCOUNT_EXISTS"
+  | "MONACA_USERNAME_TAKEN"
   | "MONACA_WEAK_PASSWORD"
   | "MONACA_INVALID_VERIFICATION_CODE"
   | "MONACA_TOO_MANY_ATTEMPTS"
@@ -97,6 +98,7 @@ function codeFor(status: number, monacaCode: string | undefined): InteractionErr
   switch (monacaCode) {
     case "MONACA_INVALID_CREDENTIALS":
     case "MONACA_ACCOUNT_EXISTS":
+    case "MONACA_USERNAME_TAKEN":
     case "MONACA_WEAK_PASSWORD":
     case "MONACA_INVALID_VERIFICATION_CODE":
     case "MONACA_TOO_MANY_ATTEMPTS":
@@ -169,10 +171,14 @@ export function getInteraction(tenant: string, iid: string): Promise<Interaction
   return call<InteractionDetails>(base(tenant, iid));
 }
 
+/**
+ * Submit the primary factor. `identifier` is the email address or the username; the server treats
+ * both case-insensitively (§6.1).
+ */
 export function submitSignIn(
   tenant: string,
   iid: string,
-  credentials: { email: string; password: string },
+  credentials: { identifier: string; password: string },
 ): Promise<SignInResult> {
   return call<SignInResult>(`${base(tenant, iid)}/sign-in`, {
     method: "POST",
@@ -192,7 +198,7 @@ export function startSignUp(tenant: string, iid: string, email: string): Promise
 export function verifySignUp(
   tenant: string,
   iid: string,
-  body: { email: string; code: string; password: string; display_name?: string },
+  body: { email: string; code: string; password: string; display_name?: string; username?: string },
 ): Promise<SignInResult> {
   return call<SignInResult>(`${base(tenant, iid)}/sign-up/verify`, {
     method: "POST",

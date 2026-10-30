@@ -23,7 +23,7 @@ use time::Duration;
 use uuid::Uuid;
 
 use crate::error::{ApiError, kinds};
-use crate::protocol::check_password;
+use crate::protocol::{check_password, check_username};
 use crate::session;
 use crate::state::AppState;
 
@@ -104,9 +104,14 @@ async fn profile_json(
         .await?
         .and_then(|(_, phc)| phc)
         .is_some();
+    let username = state
+        .store
+        .account_username(tenant, account.account_id())
+        .await?;
     Ok(json!({
         "id": account.account_id().to_typed_string(),
         "email": account.primary_email,
+        "username": username,
         "display_name": account.display_name,
         "has_password": has_password,
         "mfa": { "totp": totp, "backup_codes": backup_codes, "passkeys": passkeys },
@@ -124,10 +129,15 @@ pub async fn get_account(
 }
 
 /// The body of `PATCH /t/{tenant}/account`.
+///
+/// Every field is optional so one call can change either the display name, the username, or both;
+/// an absent field leaves its value untouched.
 #[derive(Debug, Deserialize)]
 pub struct UpdateProfileBody {
     /// The new display name.
-    pub display_name: String,
+    pub display_name: Option<String>,
+    /// The new username, a second sign-in identifier (§6.1).
+    pub username: Option<String>,
 }
 
 /// Reject a display name that is blank or too long, trimming the accepted one.
@@ -148,19 +158,40 @@ fn check_display_name(raw: &str) -> Result<String, ApiError> {
     Ok(name.to_owned())
 }
 
-/// `PATCH /t/{tenant}/account` — change the display name shown to applications.
+/// `PATCH /t/{tenant}/account` — change the display name and/or the username.
 pub async fn update_account(
     State(state): State<Arc<AppState>>,
     Path(tenant): Path<String>,
     headers: HeaderMap,
     Json(body): Json<UpdateProfileBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
-    let display_name = check_display_name(&body.display_name)?;
-    let account = state
-        .store
-        .update_display_name(&tenant, account.account_id(), &display_name)
-        .await?;
+    let (tenant, mut account) = signed_in_account(&state, &tenant, &headers).await?;
+    let display_name = body
+        .display_name
+        .as_deref()
+        .map(check_display_name)
+        .transpose()?;
+    let username = body.username.as_deref().map(check_username).transpose()?;
+    if display_name.is_none() && username.is_none() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "nothing to update; send `display_name` and/or `username`",
+        ));
+    }
+
+    if let Some(display_name) = display_name {
+        account = state
+            .store
+            .update_display_name(&tenant, account.account_id(), &display_name)
+            .await?;
+    }
+    if let Some(username) = username {
+        // A username another account holds is a `409 MONACA_USERNAME_TAKEN` (§6.1).
+        state
+            .store
+            .set_username(&tenant, account.account_id(), &username)
+            .await?;
+    }
     Ok(Json(profile_json(&state, &tenant, &account).await?))
 }
 

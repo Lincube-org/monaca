@@ -132,6 +132,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "and a stale assertion is 401; PATCH renames it; with TOTP enrolled the challenge lists totp and passkey " +
       "and POST /mfa/passkey completes it; DELETE removes the key and the next challenge offers totp only",
   },
+  {
+    step: "13",
+    title: "username identifiers",
+    assertion:
+      "PATCH /t/demo/account {username} (session cookie) stores it lowercased and GET echoes it; a new sign-in " +
+      "accepts the username case-insensitively and mints a token; an unknown identifier is 401; another account " +
+      "claiming the same username (any case) is 409 MONACA_USERNAME_TAKEN; an invalid username is 400",
+  },
 ];
 
 interface StepResult {
@@ -2186,6 +2194,198 @@ async function passkeyFlow(base: string, adminToken: string, consoleSecret: stri
   };
 }
 
+/**
+ * Step 13 — usernames as a second sign-in identifier (§6.1).
+ *
+ * The account centre claims a username, the sign-in endpoint accepts it (case-insensitively) in
+ * place of the email, and a second account trying to claim the same name gets a 409.
+ */
+async function usernameFlow(base: string, adminToken: string, consoleSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const username = `uname-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "13",
+    title: "username identifiers",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `u-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+    identifier: string,
+    password: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  try {
+    // --- account A claims a username -------------------------------------------------------------
+    const emailA = `username-${runId}@demo.localhost`;
+    const passwordA = `pw-${runId}-username-a`;
+    const accountA = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: emailA, display_name: "Username A", password: passwordA }),
+    });
+    const accountAId = (accountA.body as { id?: string })?.id;
+    if (accountA.status !== 201 || accountAId === undefined) {
+      return fail(`POST /v1/accounts A → ${accountA.status} ${text(accountA.body)}`);
+    }
+    const memberA = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountAId, role: "member" }),
+    });
+    checks.push(["the first account joined acme", memberA.status === 201]);
+
+    const first = await signIn("first", emailA, passwordA);
+    if (first?.cookie === undefined) return fail("the first sign-in set no session cookie");
+    const cookieA = { cookie: `monaca_session=${first.cookie}` };
+
+    // A mixed-case claim is stored lowercased, matching the case-insensitive unique index.
+    const claimed = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ username: `Uname-${runId}` }),
+    });
+    checks.push([
+      "PATCH /account stores the username lowercased",
+      claimed.status === 200 && (claimed.body as { username?: unknown })?.username === username,
+    ]);
+    const profile = await call(`${base}/t/${TENANT}/account`, { headers: cookieA });
+    checks.push([
+      "GET /account echoes the username",
+      profile.status === 200 && (profile.body as { username?: unknown })?.username === username,
+    ]);
+
+    // --- the username signs in, case-insensitively ---------------------------------------------
+    const byUsername = await signIn("username", username.toUpperCase(), passwordA);
+    if (byUsername === undefined) return fail("");
+    const usernameToken = await exchange(
+      (byUsername.body as { redirect_to?: unknown })?.redirect_to,
+      byUsername.verifier,
+    );
+    checks.push([
+      "the username signs in case-insensitively and mints a token",
+      byUsername.status === 200 && usernameToken.status === 200,
+    ]);
+
+    // The email remains a working identifier for the same account.
+    const byEmail = await signIn("email", emailA, passwordA);
+    checks.push(["the email still signs in", byEmail?.status === 200]);
+
+    const unknown = await signIn("unknown", `nobody-${runId}`, passwordA);
+    checks.push(["an unknown identifier is 401", unknown?.status === 401]);
+
+    // --- account B cannot claim the same username -----------------------------------------------
+    const emailB = `username-b-${runId}@demo.localhost`;
+    const passwordB = `pw-${runId}-username-b`;
+    const accountB = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: emailB, display_name: "Username B", password: passwordB }),
+    });
+    const accountBId = (accountB.body as { id?: string })?.id;
+    if (accountB.status !== 201 || accountBId === undefined) {
+      return fail(`POST /v1/accounts B → ${accountB.status} ${text(accountB.body)}`);
+    }
+    const memberB = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountBId, role: "member" }),
+    });
+    checks.push(["the second account joined acme", memberB.status === 201]);
+
+    const second = await signIn("second", emailB, passwordB);
+    if (second?.cookie === undefined) return fail("the second sign-in set no session cookie");
+    const cookieB = { cookie: `monaca_session=${second.cookie}` };
+
+    const taken = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...cookieB, "content-type": "application/json" },
+      body: JSON.stringify({ username: `UNAME-${runId}` }),
+    });
+    checks.push([
+      "a username another account holds is 409 MONACA_USERNAME_TAKEN",
+      taken.status === 409 &&
+        (taken.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_USERNAME_TAKEN",
+    ]);
+
+    const invalid = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...cookieB, "content-type": "application/json" },
+      body: JSON.stringify({ username: "a!" }),
+    });
+    checks.push(["an invalid username is 400", invalid.status === 400]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "13",
+    title: "username identifiers",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: claim → username sign-in → email still works → unknown 401 → conflict 409 → invalid 400`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 function typeIdUuid(id: string): string {
   const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
   const suffix = id.slice(id.indexOf("_") + 1);
@@ -2366,6 +2566,7 @@ async function main(): Promise<number> {
   push(await accountFlow(base, adminToken));
   push(await backupCodeFlow(base, adminToken, parsed.consoleSecret));
   push(await passkeyFlow(base, adminToken, parsed.consoleSecret));
+  push(await usernameFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

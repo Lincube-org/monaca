@@ -69,6 +69,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "WebAuthn passkeys (M1)",
         include_str!("../migrations/tenant_6.sql"),
     ),
+    (
+        7,
+        "case-insensitive usernames as a sign-in identifier (M1)",
+        include_str!("../migrations/tenant_7.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

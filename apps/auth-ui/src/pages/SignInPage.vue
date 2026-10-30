@@ -143,6 +143,8 @@ const code = ref("");
 const codeRequested = ref(false);
 const newPassword = ref("");
 const displayName = ref("");
+/** Optional username chosen at sign-up; the account can also set it later in the account centre. */
+const username = ref("");
 
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
@@ -283,6 +285,8 @@ const submitErrorMessage = computed<MessageKey>(() => {
       return "errors.invalidCredentials";
     case "MONACA_ACCOUNT_EXISTS":
       return "errors.accountExists";
+    case "MONACA_USERNAME_TAKEN":
+      return "errors.usernameTaken";
     case "MONACA_WEAK_PASSWORD":
       return "errors.weakPassword";
     case "MONACA_INVALID_VERIFICATION_CODE":
@@ -352,6 +356,7 @@ function switchMode(next: Mode): void {
   password.value = "";
   newPassword.value = "";
   displayName.value = "";
+  username.value = "";
   fieldError.value = null;
   submitError.value = null;
   passkeyError.value = null;
@@ -503,7 +508,7 @@ async function signIn(): Promise<void> {
   submitError.value = null;
 
   if (email.value.trim().length === 0) {
-    fieldError.value = "errors.emailRequired";
+    fieldError.value = "errors.identifierRequired";
     return;
   }
   if (password.value.length === 0) {
@@ -515,7 +520,7 @@ async function signIn(): Promise<void> {
   submitting.value = true;
   try {
     const result = await submitSignIn(tenantFromUrl.value, interactionId.value, {
-      email: email.value.trim(),
+      identifier: email.value.trim(),
       password: password.value,
     });
     handleResult(result);
@@ -581,6 +586,10 @@ async function verifyCode(): Promise<void> {
     fieldError.value = "errors.weakPassword";
     return;
   }
+  if (mode.value === "signup" && username.value.trim() !== "" && !/^[A-Za-z0-9_-]{3,32}$/.test(username.value.trim())) {
+    fieldError.value = "errors.usernameInvalid";
+    return;
+  }
   if (!tenantFromUrl.value || !interactionId.value) return;
 
   submitting.value = true;
@@ -594,6 +603,7 @@ async function verifyCode(): Promise<void> {
         code: submitted,
         password: newPassword.value,
         display_name: displayName.value.trim() || undefined,
+        username: username.value.trim() || undefined,
       });
     } else if (mode.value === "code") {
       result = await verifySignInCode(tenantFromUrl.value, interactionId.value, {
@@ -848,20 +858,20 @@ async function cancel(): Promise<void> {
 
           <form v-else class="flex flex-col gap-4" @submit.prevent="submit">
             <div class="flex flex-col gap-1.5">
-              <Label for="signin-email">{{ t("signIn.email") }}</Label>
+              <Label for="signin-email">{{ t(mode === "password" ? "signIn.identifier" : "signIn.email") }}</Label>
               <Input
                 id="signin-email"
                 ref="emailInput"
                 v-model="email"
-                type="email"
+                :type="mode === 'password' ? 'text' : 'email'"
                 name="email"
                 autocomplete="username"
-                inputmode="email"
+                :inputmode="mode === 'password' ? 'text' : 'email'"
                 spellcheck="false"
                 autocapitalize="none"
                 :disabled="awaitingCode"
-                :placeholder="t('signIn.emailPlaceholder')"
-                :invalid="fieldError === 'errors.emailRequired'"
+                :placeholder="t(mode === 'password' ? 'signIn.identifierPlaceholder' : 'signIn.emailPlaceholder')"
+                :invalid="fieldError === 'errors.emailRequired' || fieldError === 'errors.identifierRequired'"
                 :aria-describedby="fieldError ? 'signin-error' : undefined"
               />
               <!-- The address is locked once a code was mailed, so the code always matches it. -->
@@ -961,6 +971,23 @@ async function cancel(): Promise<void> {
                 autocomplete="name"
                 :placeholder="t('signUp.displayNamePlaceholder')"
               />
+            </div>
+
+            <!-- A username is a second sign-in identifier; optional at sign-up, changeable later. -->
+            <div v-if="awaitingCode && mode === 'signup'" class="flex flex-col gap-1.5">
+              <Label for="signin-username">{{ t("signUp.username") }}</Label>
+              <Input
+                id="signin-username"
+                v-model="username"
+                type="text"
+                name="username"
+                autocomplete="username"
+                spellcheck="false"
+                autocapitalize="none"
+                :placeholder="t('signUp.usernamePlaceholder')"
+                :invalid="fieldError === 'errors.usernameInvalid'"
+              />
+              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t("signUp.usernameHint") }}</p>
             </div>
 
             <!-- Field-level or submission error, in one place, wired through aria-describedby. -->

@@ -47,6 +47,7 @@ const loadError = ref<AccountError | null>(null);
 const account = ref<AccountProfile | null>(null);
 
 const displayName = ref("");
+const username = ref("");
 const profileBusy = ref(false);
 const profileError = ref<MessageKey | null>(null);
 const profileSubmitError = ref<string | null>(null);
@@ -142,6 +143,7 @@ async function load(): Promise<void> {
     const profile = await getAccount(tenant.value);
     account.value = profile;
     displayName.value = profile.display_name;
+    username.value = profile.username ?? "";
     loadError.value = null;
     await loadSessions();
     await loadPasskeys();
@@ -169,15 +171,29 @@ async function saveProfile(): Promise<void> {
     profileError.value = "errors.displayNameTooLong";
     return;
   }
+  // An empty field means "leave the username unchanged"; a non-empty one must be a valid claim.
+  const chosen = username.value.trim();
+  if (chosen !== "" && !/^[A-Za-z0-9_-]{3,32}$/.test(chosen)) {
+    profileError.value = "errors.usernameInvalid";
+    return;
+  }
 
   profileBusy.value = true;
   try {
-    const profile = await updateProfile(tenant.value, name);
+    const profile = await updateProfile(tenant.value, {
+      displayName: name,
+      ...(chosen === "" ? {} : { username: chosen }),
+    });
     account.value = profile;
     displayName.value = profile.display_name;
+    username.value = profile.username ?? "";
     profileNotice.value = "account.profileSaved";
   } catch (error) {
-    profileSubmitError.value = messageOf(error);
+    // 409 is the taken username; every other failure is shown as the server described it.
+    profileSubmitError.value =
+      error instanceof AccountError && error.status === 409
+        ? t("account.usernameTaken")
+        : messageOf(error);
   } finally {
     profileBusy.value = false;
   }
@@ -504,6 +520,22 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
                 :placeholder="t('account.displayNamePlaceholder')"
                 :invalid="profileError === 'errors.displayNameRequired' || profileError === 'errors.displayNameTooLong'"
               />
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="account-username">{{ t("account.usernameLabel") }}</Label>
+              <Input
+                id="account-username"
+                v-model="username"
+                type="text"
+                name="username"
+                autocomplete="username"
+                maxlength="32"
+                spellcheck="false"
+                autocapitalize="none"
+                :placeholder="t('account.usernamePlaceholder')"
+                :invalid="profileError === 'errors.usernameInvalid'"
+              />
+              <span class="text-[11.5px] text-ink-faint">{{ t("account.usernameHint") }}</span>
             </div>
             <p
               v-if="profileError || profileSubmitError"

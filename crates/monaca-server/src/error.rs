@@ -87,6 +87,13 @@ pub mod kinds {
         "MFA already enabled",
         409,
     );
+    /// A username is already claimed by another account.
+    pub const USERNAME_TAKEN: ProblemKind = ProblemKind::new(
+        "username_taken",
+        "MONACA_USERNAME_TAKEN",
+        "Username taken",
+        409,
+    );
     /// The server could not complete a valid request.
     pub const INTERNAL: ProblemKind =
         ProblemKind::new("internal", "MONACA_INTERNAL", "Internal error", 500);
@@ -185,6 +192,9 @@ impl From<monaca_store::StoreError> for ApiError {
             }
             monaca_store::StoreError::NotFound { entity, id } => {
                 ApiError::problem(kinds::NOT_FOUND, format!("{entity} `{id}` not found"))
+            }
+            monaca_store::StoreError::AlreadyExists { entity } => {
+                ApiError::problem(kinds::USERNAME_TAKEN, format!("{entity} is already taken"))
             }
             _ => ApiError::internal(err),
         }
