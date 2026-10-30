@@ -474,7 +474,10 @@ mod tests {
 
     #[test]
     fn a_display_name_is_trimmed_and_bounded() {
-        assert_eq!(check_display_name("  Ada Lovelace  ").unwrap(), "Ada Lovelace");
+        assert_eq!(
+            check_display_name("  Ada Lovelace  ").unwrap(),
+            "Ada Lovelace"
+        );
         assert!(check_display_name("   ").is_err());
         assert!(check_display_name(&"a".repeat(MAX_DISPLAY_NAME_LEN)).is_ok());
         assert!(check_display_name(&"a".repeat(MAX_DISPLAY_NAME_LEN + 1)).is_err());
