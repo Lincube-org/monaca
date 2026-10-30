@@ -10,14 +10,19 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use monaca_crypto::{generate_totp_secret, seal, totp_base32, totp_otpauth_url, verify_totp};
-use monaca_store::{AccountRow, TenantRow};
-use monaca_types::{AccountId, TypedId};
+use monaca_crypto::{
+    generate_totp_secret, hash_password, seal, totp_base32, totp_otpauth_url, verify_password,
+    verify_totp,
+};
+use monaca_store::{AccountRow, SessionRow, TenantRow};
+use monaca_types::{AccountId, SessionId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::Duration;
+use uuid::Uuid;
 
 use crate::error::{ApiError, kinds};
+use crate::protocol::check_password;
 use crate::session;
 use crate::state::AppState;
 
@@ -26,6 +31,9 @@ const ENROLLMENT_TTL_SECS: i64 = 600;
 
 /// The issuer an authenticator app displays; the contract fixes it (§6.1 `mfa`).
 const ISSUER: &str = "Monaca";
+
+/// The longest display name an account may set, in characters.
+const MAX_DISPLAY_NAME_LEN: usize = 80;
 
 /// The account behind the request's SSO cookie.
 async fn signed_in_account(
@@ -62,6 +70,32 @@ fn no_session() -> ApiError {
     ApiError::problem(kinds::UNAUTHORIZED, "a signed-in session is required")
 }
 
+/// The profile shape `GET` and `PATCH` return: identity, whether a password exists, and factors.
+async fn profile_json(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    account: &AccountRow,
+) -> Result<Value, ApiError> {
+    let totp = state
+        .store
+        .totp_secret(tenant, account.account_id())
+        .await?
+        .is_some();
+    let has_password = state
+        .store
+        .account_by_email(tenant, &account.primary_email)
+        .await?
+        .and_then(|(_, phc)| phc)
+        .is_some();
+    Ok(json!({
+        "id": account.account_id().to_typed_string(),
+        "email": account.primary_email,
+        "display_name": account.display_name,
+        "has_password": has_password,
+        "mfa": { "totp": totp },
+    }))
+}
+
 /// `GET /t/{tenant}/account` — the account's profile and which factors are enrolled.
 pub async fn get_account(
     State(state): State<Arc<AppState>>,
@@ -69,17 +103,186 @@ pub async fn get_account(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
-    let totp = state
+    Ok(Json(profile_json(&state, &tenant, &account).await?))
+}
+
+/// The body of `PATCH /t/{tenant}/account`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateProfileBody {
+    /// The new display name.
+    pub display_name: String,
+}
+
+/// Reject a display name that is blank or too long, trimming the accepted one.
+fn check_display_name(raw: &str) -> Result<String, ApiError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "display_name must not be empty",
+        ));
+    }
+    if name.chars().count() > MAX_DISPLAY_NAME_LEN {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("display_name must be at most {MAX_DISPLAY_NAME_LEN} characters"),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+/// `PATCH /t/{tenant}/account` — change the display name shown to applications.
+pub async fn update_account(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateProfileBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let display_name = check_display_name(&body.display_name)?;
+    let account = state
         .store
-        .totp_secret(&tenant, account.account_id())
+        .update_display_name(&tenant, account.account_id(), &display_name)
+        .await?;
+    Ok(Json(profile_json(&state, &tenant, &account).await?))
+}
+
+/// The body of `POST /t/{tenant}/account/password`.
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordBody {
+    /// The password in use now; a wrong value is `401`.
+    pub current_password: String,
+    /// The replacement, at least [`crate::protocol::MIN_PASSWORD_LEN`] characters.
+    pub new_password: String,
+}
+
+/// `POST /t/{tenant}/account/password` — change the password from the account centre.
+///
+/// The current password is required: a stolen cookie must not be enough to lock the owner out.
+/// Every other live session is revoked, because those browsers proved the old password.
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let Some(current_session) = session::session_id(&headers) else {
+        return Err(no_session());
+    };
+
+    let Some((_, phc)) = state
+        .store
+        .account_by_email(&tenant, &account.primary_email)
         .await?
-        .is_some();
-    Ok(Json(json!({
-        "id": account.account_id().to_typed_string(),
-        "email": account.primary_email,
-        "display_name": account.display_name,
-        "mfa": { "totp": totp },
-    })))
+    else {
+        return Err(no_session());
+    };
+    let Some(phc) = phc else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this account has no password credential to change",
+        ));
+    };
+    if verify_password(body.current_password.clone(), phc, state.argon)
+        .await
+        .is_err()
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the current password is incorrect",
+        ));
+    }
+    check_password(&body.new_password)?;
+
+    let phc = hash_password(body.new_password.clone(), state.argon)
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .store
+        .set_password(&tenant, account.account_id(), &phc)
+        .await?;
+    state
+        .store
+        .revoke_other_sessions(&tenant, account.account_id(), current_session)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One session as the account centre sees it, with `current` marking the requesting browser.
+fn account_session_json(session: &SessionRow, current: Uuid) -> Value {
+    json!({
+        "id": session.session_id().to_typed_string(),
+        "current": session.id == current,
+        "client_id": session
+            .client_id
+            .map(|id| monaca_types::ClientId::from_uuid(id).to_typed_string()),
+        "issued_at": crate::management::ts(session.issued_at),
+        "expires_at": crate::management::ts(session.expires_at),
+        "last_seen_at": crate::management::ts(session.last_seen_at),
+        "user_agent": session.user_agent,
+    })
+}
+
+/// `GET /t/{tenant}/account/sessions` — every live session of the signed-in account.
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let Some(current) = session::session_id(&headers) else {
+        return Err(no_session());
+    };
+    let sessions = state
+        .store
+        .list_sessions(&tenant, account.account_id())
+        .await?;
+    let items: Vec<Value> = sessions
+        .iter()
+        .map(|session| account_session_json(session, current))
+        .collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `DELETE /t/{tenant}/account/sessions/{session}` — sign out one of the account's sessions.
+pub async fn revoke_session(
+    State(state): State<Arc<AppState>>,
+    Path((tenant, session)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let session_id = SessionId::parse(&session)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a session id"))?;
+
+    // Only the owner's own sessions are visible here; anything else is a 404, not a 403.
+    let owned = state
+        .store
+        .session_by_id(&tenant, session_id.uuid())
+        .await?
+        .filter(|row| row.account_id == account.id)
+        .ok_or_else(|| ApiError::not_found("session"))?;
+    if !state.store.revoke_session(&tenant, owned.id).await? {
+        return Err(ApiError::not_found("session"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /t/{tenant}/account/sessions` — sign out every other browser.
+pub async fn revoke_other_sessions(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let Some(current) = session::session_id(&headers) else {
+        return Err(no_session());
+    };
+    state
+        .store
+        .revoke_other_sessions(&tenant, account.account_id(), current)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /t/{tenant}/account/mfa/totp` — start an enrollment.
@@ -193,5 +396,13 @@ mod tests {
     #[test]
     fn the_issuer_is_the_product_name() {
         assert_eq!(ISSUER, "Monaca");
+    }
+
+    #[test]
+    fn a_display_name_is_trimmed_and_bounded() {
+        assert_eq!(check_display_name("  Ada Lovelace  ").unwrap(), "Ada Lovelace");
+        assert!(check_display_name("   ").is_err());
+        assert!(check_display_name(&"a".repeat(MAX_DISPLAY_NAME_LEN)).is_ok());
+        assert!(check_display_name(&"a".repeat(MAX_DISPLAY_NAME_LEN + 1)).is_err());
     }
 }

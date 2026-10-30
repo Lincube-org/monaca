@@ -478,8 +478,9 @@ const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 /// Wrong TOTP codes an interaction survives before the challenge is refused (§6.1 `mfa`).
 const MAX_MFA_ATTEMPTS: u32 = 5;
 
-/// The shortest accepted password, in characters.
-const MIN_PASSWORD_LEN: usize = 8;
+/// The shortest accepted password, in characters. Shared with the account centre's change-password
+/// endpoint so both entrances enforce the same rule.
+pub(crate) const MIN_PASSWORD_LEN: usize = 8;
 
 /// The `verification_codes.purpose` values the email flows write.
 const PURPOSE_SIGN_UP: &str = "sign_up";
@@ -539,7 +540,7 @@ fn normalise_email(email: &str) -> Result<String, ApiError> {
 }
 
 /// Reject a password shorter than the contract's minimum.
-fn check_password(password: &str) -> Result<(), ApiError> {
+pub(crate) fn check_password(password: &str) -> Result<(), ApiError> {
     if password.chars().count() < MIN_PASSWORD_LEN {
         return Err(ApiError::problem(
             kinds::WEAK_PASSWORD,

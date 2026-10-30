@@ -1,28 +1,34 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, Skeleton } from "@monaca/ui";
-import { AlertCircle, Loader2, ShieldCheck, ShieldOff } from "lucide-vue-next";
+import { AlertCircle, KeyRound, Loader2, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
 import {
   AccountError,
   beginTotp,
+  changePassword,
   disableTotp,
   getAccount,
+  listSessions,
+  revokeOtherSessions,
+  revokeSession,
+  updateProfile,
   verifyTotp,
   type AccountProfile,
+  type AccountSession,
   type TotpEnrollment,
 } from "@/api/account";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
 /**
- * Account security, reached at `/account/{tenant}`.
+ * Account centre, reached at `/account/{tenant}`.
  *
- * This page is where an account enrolls the second factor. It is deliberately a separate route
- * from the sign-in page: enrolling happens while already signed in, and the SSO cookie is the only
- * credential it needs. The secret is shown once, in base32, so it can be typed into an
- * authenticator app; nothing is persisted until the app proves it works.
+ * This page is where a signed-in account manages itself: its display name, its password, the
+ * browsers that are signed in, and the authenticator app. It is deliberately a separate route from
+ * the sign-in page: everything here happens while already signed in, and the SSO cookie is the
+ * only credential it needs.
  */
 const route = useRoute();
 const tenant = computed(() => String(route.params.tenant ?? ""));
@@ -31,28 +37,73 @@ const loading = ref(true);
 const loadError = ref<AccountError | null>(null);
 const account = ref<AccountProfile | null>(null);
 
+const displayName = ref("");
+const profileBusy = ref(false);
+const profileError = ref<MessageKey | null>(null);
+const profileSubmitError = ref<string | null>(null);
+const profileNotice = ref<MessageKey | null>(null);
+
+const currentPassword = ref("");
+const newPassword = ref("");
+const passwordBusy = ref(false);
+const passwordFieldError = ref<MessageKey | null>(null);
+const passwordSubmitError = ref<string | null>(null);
+const passwordNotice = ref<MessageKey | null>(null);
+
+const sessions = ref<AccountSession[] | null>(null);
+const sessionsBusy = ref(false);
+const sessionsError = ref<string | null>(null);
+const sessionBusyId = ref<string | null>(null);
+const revokingOthers = ref(false);
+const sessionsNotice = ref<MessageKey | null>(null);
+
 const enrollment = ref<TotpEnrollment | null>(null);
 const code = ref("");
 const fieldError = ref<MessageKey | null>(null);
 const submitError = ref<string | null>(null);
 const busy = ref<"begin" | "verify" | "disable" | null>(null);
-const notice = ref<MessageKey | null>(null);
+const mfaNotice = ref<MessageKey | null>(null);
 
 const codeInput = ref<InstanceType<typeof Input> | null>(null);
 
 const totpEnabled = computed(() => account.value?.mfa.totp === true);
+const hasPassword = computed(() => account.value?.has_password === true);
+const otherSessions = computed(() => sessions.value?.filter((row) => !row.current) ?? []);
 
 const loadErrorMessage = computed<MessageKey>(() =>
   loadError.value?.status === 401 ? "account.sessionRequired" : "account.loadFailed",
 );
 
-const noticeText = computed(() => (notice.value ? t(notice.value) : ""));
+function messageOf(error: unknown): string {
+  return error instanceof AccountError ? error.message : String(error);
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+async function loadSessions(): Promise<void> {
+  sessionsBusy.value = true;
+  try {
+    sessions.value = (await listSessions(tenant.value)).items;
+    sessionsError.value = null;
+  } catch (error) {
+    sessions.value = null;
+    sessionsError.value = messageOf(error);
+  } finally {
+    sessionsBusy.value = false;
+  }
+}
 
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    account.value = await getAccount(tenant.value);
+    const profile = await getAccount(tenant.value);
+    account.value = profile;
+    displayName.value = profile.display_name;
     loadError.value = null;
+    await loadSessions();
   } catch (error) {
     account.value = null;
     loadError.value = error instanceof AccountError ? error : new AccountError(0, String(error));
@@ -63,10 +114,103 @@ async function load(): Promise<void> {
 
 onMounted(load);
 
+async function saveProfile(): Promise<void> {
+  profileError.value = null;
+  profileSubmitError.value = null;
+  profileNotice.value = null;
+
+  const name = displayName.value.trim();
+  if (name === "") {
+    profileError.value = "errors.displayNameRequired";
+    return;
+  }
+  if ([...name].length > 80) {
+    profileError.value = "errors.displayNameTooLong";
+    return;
+  }
+
+  profileBusy.value = true;
+  try {
+    const profile = await updateProfile(tenant.value, name);
+    account.value = profile;
+    displayName.value = profile.display_name;
+    profileNotice.value = "account.profileSaved";
+  } catch (error) {
+    profileSubmitError.value = messageOf(error);
+  } finally {
+    profileBusy.value = false;
+  }
+}
+
+async function submitPassword(): Promise<void> {
+  passwordFieldError.value = null;
+  passwordSubmitError.value = null;
+  passwordNotice.value = null;
+
+  if (currentPassword.value === "") {
+    passwordFieldError.value = "errors.currentPasswordRequired";
+    return;
+  }
+  if (newPassword.value === "") {
+    passwordFieldError.value = "errors.newPasswordRequired";
+    return;
+  }
+  if ([...newPassword.value].length < 8) {
+    passwordFieldError.value = "errors.weakPassword";
+    return;
+  }
+
+  passwordBusy.value = true;
+  try {
+    await changePassword(tenant.value, currentPassword.value, newPassword.value);
+    currentPassword.value = "";
+    newPassword.value = "";
+    passwordNotice.value = "account.passwordChanged";
+    // Every other browser was signed out by the change; the list must show that.
+    await loadSessions();
+  } catch (error) {
+    if (error instanceof AccountError && error.status === 401) {
+      passwordSubmitError.value = t("errors.currentPasswordInvalid");
+    } else {
+      passwordSubmitError.value = messageOf(error);
+    }
+  } finally {
+    passwordBusy.value = false;
+  }
+}
+
+async function revokeOne(sessionId: string): Promise<void> {
+  sessionsNotice.value = null;
+  sessionBusyId.value = sessionId;
+  try {
+    await revokeSession(tenant.value, sessionId);
+    await loadSessions();
+    sessionsNotice.value = "account.sessionRevoked";
+  } catch (error) {
+    sessionsError.value = messageOf(error);
+  } finally {
+    sessionBusyId.value = null;
+  }
+}
+
+async function revokeOthers(): Promise<void> {
+  sessionsNotice.value = null;
+  revokingOthers.value = true;
+  try {
+    await revokeOtherSessions(tenant.value);
+    await loadSessions();
+    sessionsNotice.value = "account.otherSessionsRevoked";
+  } catch (error) {
+    sessionsError.value = messageOf(error);
+  } finally {
+    revokingOthers.value = false;
+  }
+}
+
 async function enable(): Promise<void> {
   fieldError.value = null;
   submitError.value = null;
-  notice.value = null;
+  mfaNotice.value = null;
   busy.value = "begin";
   try {
     enrollment.value = await beginTotp(tenant.value);
@@ -74,7 +218,7 @@ async function enable(): Promise<void> {
     await nextTick();
     codeInput.value?.$el?.focus?.();
   } catch (error) {
-    submitError.value = error instanceof AccountError ? error.message : String(error);
+    submitError.value = messageOf(error);
   } finally {
     busy.value = null;
   }
@@ -93,9 +237,9 @@ async function verify(): Promise<void> {
     enrollment.value = null;
     code.value = "";
     await load();
-    notice.value = "account.enabled";
+    mfaNotice.value = "account.enabled";
   } catch (error) {
-    submitError.value = error instanceof AccountError ? error.message : String(error);
+    submitError.value = messageOf(error);
     code.value = "";
     await nextTick();
     codeInput.value?.$el?.focus?.();
@@ -106,14 +250,14 @@ async function verify(): Promise<void> {
 
 async function disable(): Promise<void> {
   submitError.value = null;
-  notice.value = null;
+  mfaNotice.value = null;
   busy.value = "disable";
   try {
     await disableTotp(tenant.value);
     await load();
-    notice.value = "account.disabled";
+    mfaNotice.value = "account.disabled";
   } catch (error) {
-    submitError.value = error instanceof AccountError ? error.message : String(error);
+    submitError.value = messageOf(error);
   } finally {
     busy.value = null;
   }
@@ -170,6 +314,93 @@ function cancelEnrollment(): void {
             </p>
           </div>
 
+          <!-- Profile: the name applications display. -->
+          <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <div class="flex items-center gap-1.5">
+              <User class="size-3.5 text-ink-faint" aria-hidden="true" />
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.profileTitle") }}</h2>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="account-display-name">{{ t("account.displayNameLabel") }}</Label>
+              <Input
+                id="account-display-name"
+                v-model="displayName"
+                type="text"
+                name="display_name"
+                autocomplete="name"
+                maxlength="80"
+                :placeholder="t('account.displayNamePlaceholder')"
+                :invalid="profileError === 'errors.displayNameRequired' || profileError === 'errors.displayNameTooLong'"
+              />
+            </div>
+            <p
+              v-if="profileError || profileSubmitError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ profileError ? t(profileError) : profileSubmitError }}
+            </p>
+            <p v-else-if="profileNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(profileNotice) }}
+            </p>
+            <Button type="button" variant="secondary" block :disabled="profileBusy" :aria-busy="profileBusy" @click="saveProfile">
+              <Loader2 v-if="profileBusy" class="animate-spin" />
+              <User v-else />
+              {{ profileBusy ? t("account.savingProfile") : t("account.saveProfile") }}
+            </Button>
+          </div>
+
+          <!-- Password: proving the current one means a stolen cookie cannot lock the owner out. -->
+          <div v-if="hasPassword" class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <div class="flex items-center gap-1.5">
+              <KeyRound class="size-3.5 text-ink-faint" aria-hidden="true" />
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.passwordTitle") }}</h2>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="account-current-password">{{ t("account.currentPassword") }}</Label>
+              <Input
+                id="account-current-password"
+                v-model="currentPassword"
+                type="password"
+                name="current_password"
+                autocomplete="current-password"
+              />
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="account-new-password">{{ t("account.newPassword") }}</Label>
+              <Input
+                id="account-new-password"
+                v-model="newPassword"
+                type="password"
+                name="new_password"
+                autocomplete="new-password"
+                :invalid="passwordFieldError === 'errors.newPasswordRequired' || passwordFieldError === 'errors.weakPassword'"
+              />
+              <span class="text-[11.5px] text-ink-faint">{{ t("account.passwordHint") }}</span>
+            </div>
+            <p
+              v-if="passwordFieldError || passwordSubmitError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ passwordFieldError ? t(passwordFieldError) : passwordSubmitError }}
+            </p>
+            <p v-else-if="passwordNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(passwordNotice) }}
+            </p>
+            <Button type="button" variant="secondary" block :disabled="passwordBusy" :aria-busy="passwordBusy" @click="submitPassword">
+              <Loader2 v-if="passwordBusy" class="animate-spin" />
+              <KeyRound v-else />
+              {{ passwordBusy ? t("account.changingPassword") : t("account.changePassword") }}
+            </Button>
+          </div>
+          <p v-else class="rounded-lg border border-rule bg-surface-muted px-3 py-3 text-[12.5px] leading-snug text-ink-muted">
+            {{ t("account.noPassword") }}
+          </p>
+
+          <!-- Two-step verification. -->
           <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
             <div class="flex items-center justify-between gap-3">
               <h2 class="text-[13px] font-semibold text-ink">{{ t("account.mfaTitle") }}</h2>
@@ -277,9 +508,74 @@ function cancelEnrollment(): void {
             </Button>
           </div>
 
-          <p v-if="notice" class="text-[12.5px] leading-snug text-ink-muted" role="status">
-            {{ noticeText }}
+          <p v-if="mfaNotice" class="text-[12.5px] leading-snug text-ink-muted" role="status">
+            {{ t(mfaNotice) }}
           </p>
+
+          <!-- Sessions: every browser that can currently act as this account. -->
+          <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <h2 class="text-[13px] font-semibold text-ink">{{ t("account.sessionsTitle") }}</h2>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.sessionsNote") }}</p>
+
+            <div v-if="sessionsBusy" class="flex flex-col gap-2" aria-busy="true">
+              <Skeleton class="h-8 w-full" />
+              <Skeleton class="h-8 w-full" />
+            </div>
+            <p v-else-if="sessionsError" role="alert" class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny">
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ sessionsError }}
+            </p>
+            <p v-else-if="sessions && sessions.length === 0" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t("account.sessionsEmpty") }}
+            </p>
+            <div v-else-if="sessions" class="flex flex-col divide-y divide-rule">
+              <div
+                v-for="session in sessions"
+                :key="session.id"
+                class="flex items-center justify-between gap-3 py-2"
+              >
+                <div class="min-w-0">
+                  <div class="flex items-center gap-1.5">
+                    <span class="truncate text-[12.5px] text-ink">
+                      {{ session.user_agent ?? session.client_id ?? session.id }}
+                    </span>
+                    <Badge v-if="session.current" variant="brand">{{ t("account.currentSession") }}</Badge>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t("account.lastSeen") }} {{ formatDate(session.last_seen_at) }} ·
+                    {{ t("account.sessionStarted") }} {{ formatDate(session.issued_at) }}
+                  </p>
+                </div>
+                <Button
+                  v-if="!session.current"
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  :disabled="sessionBusyId !== null || revokingOthers"
+                  :aria-busy="sessionBusyId === session.id"
+                  @click="revokeOne(session.id)"
+                >
+                  <Loader2 v-if="sessionBusyId === session.id" class="animate-spin" />
+                  {{ sessionBusyId === session.id ? t("account.revoking") : t("account.revoke") }}
+                </Button>
+              </div>
+            </div>
+
+            <Button
+              type="button"
+              variant="ghost"
+              block
+              :disabled="sessionsBusy || revokingOthers || otherSessions.length === 0"
+              :aria-busy="revokingOthers"
+              @click="revokeOthers"
+            >
+              <Loader2 v-if="revokingOthers" class="animate-spin" />
+              {{ revokingOthers ? t("account.revokingOthers") : t("account.revokeOthers") }}
+            </Button>
+            <p v-if="sessionsNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(sessionsNotice) }}
+            </p>
+          </div>
         </div>
       </div>
     </div>

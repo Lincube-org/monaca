@@ -105,6 +105,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "a new sign-in answers {\"mfa_required\":true}; a wrong code is 401 and the right one mints a token; " +
       "DELETE the credential → the next sign-in needs one factor again",
   },
+  {
+    step: "10",
+    title: "account centre",
+    assertion:
+      "PATCH /t/demo/account changes the display name and GET echoes it; POST /account/password with a wrong " +
+      "current password is 401, the right one is 204 and signs out the other sessions; the old password is " +
+      "refused and the new one signs in; GET /account/sessions marks the caller current; DELETE one and " +
+      "DELETE all others revoke them",
+  },
 ];
 
 interface StepResult {
@@ -1292,6 +1301,212 @@ async function mfaFlow(base: string, adminToken: string, consoleSecret: string):
 }
 
 /**
+ * Step 10 — the account centre: profile, password and sessions.
+ *
+ * A dedicated account is created for the run, like step 9. Two browsers sign in (two cookies), so
+ * the password change has another session to revoke and the sessions list has a `current` row to
+ * mark. Revoking a session is checked by calling `GET /account` with that cookie afterwards.
+ */
+async function accountFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const email = `account-${runId}@demo.localhost`;
+  const firstPassword = `pw-${runId}-account-original`;
+  const secondPassword = `pw-${runId}-account-renamed`;
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "10",
+    title: "account centre",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<string | undefined> => {
+    const verifier = `a-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return encodeURIComponent(interaction);
+  };
+
+  /** Password sign-in on a fresh interaction; the response carries the SSO cookie. */
+  const signIn = async (
+    tag: string,
+    password: string,
+  ): Promise<{ status: number; body: unknown; cookie?: string } | undefined> => {
+    const interaction = await begin(tag);
+    if (interaction === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { status: response.status, body: response.body, cookie };
+  };
+
+  const auth = (cookie: string): Record<string, string> => ({ cookie: `monaca_session=${cookie}` });
+  const profile = (cookie: string): Promise<HttpResult> => call(`${base}/t/${TENANT}/account`, { headers: auth(cookie) });
+  const sessionsOf = async (cookie: string): Promise<{ id: string; current: boolean }[]> => {
+    const response = await call(`${base}/t/${TENANT}/account/sessions`, { headers: auth(cookie) });
+    const items = (response.body as { items?: { id?: unknown; current?: unknown }[] })?.items ?? [];
+    return items
+      .filter((item): item is { id: string; current: boolean } => typeof item.id === "string")
+      .map((item) => ({ id: item.id, current: item.current === true }));
+  };
+
+  try {
+    // --- a dedicated account, already a member of acme ------------------------------------------
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Account centre", password: firstPassword }),
+    });
+    const accountId = (account.body as { id?: string })?.id;
+    if (account.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    // --- two browsers, so a password change has something to revoke ------------------------------
+    const first = await signIn("first", firstPassword);
+    const second = await signIn("second", firstPassword);
+    if (first?.cookie === undefined || second?.cookie === undefined) {
+      return fail("the two sign-ins did not both set a session cookie");
+    }
+    const firstCookie = first.cookie;
+    const secondCookie = second.cookie;
+
+    // --- profile: PATCH changes the name, GET echoes it ------------------------------------------
+    const renamed = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...auth(firstCookie), "content-type": "application/json" },
+      body: JSON.stringify({ display_name: "  Account centre renamed  " }),
+    });
+    checks.push([
+      "PATCH /account stores the trimmed display name",
+      renamed.status === 200 &&
+        (renamed.body as { display_name?: unknown })?.display_name === "Account centre renamed",
+    ]);
+    const echoed = await profile(firstCookie);
+    checks.push([
+      "GET /account echoes the new name",
+      echoed.status === 200 &&
+        (echoed.body as { display_name?: unknown })?.display_name === "Account centre renamed",
+    ]);
+
+    // --- password: the current one is required, and the change ends the other sessions -----------
+    const wrongCurrent = await call(`${base}/t/${TENANT}/account/password`, {
+      method: "POST",
+      headers: { ...auth(firstCookie), "content-type": "application/json" },
+      body: JSON.stringify({ current_password: "not-the-password", new_password: secondPassword }),
+    });
+    checks.push(["a wrong current password is refused", wrongCurrent.status === 401]);
+
+    const changed = await call(`${base}/t/${TENANT}/account/password`, {
+      method: "POST",
+      headers: { ...auth(firstCookie), "content-type": "application/json" },
+      body: JSON.stringify({ current_password: firstPassword, new_password: secondPassword }),
+    });
+    checks.push(["the right current password changes it", changed.status === 204]);
+
+    const stale = await signIn("stale", firstPassword);
+    checks.push(["the old password no longer signs in", stale !== undefined && stale.status === 401]);
+
+    const fresh = await signIn("fresh", secondPassword);
+    const freshRedirect = (fresh?.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "the new password signs in",
+      fresh !== undefined && fresh.status === 200 && freshRedirect !== undefined && fresh.cookie !== undefined,
+    ]);
+    if (fresh?.cookie === undefined) return fail("the new-password sign-in set no cookie");
+    const freshCookie = fresh.cookie;
+
+    checks.push(["the password change ended the other browser's session", (await profile(secondCookie)).status === 401]);
+
+    // --- sessions: the caller is marked current, single and bulk revocation work -----------------
+    const afterChange = await sessionsOf(firstCookie);
+    checks.push([
+      "GET /account/sessions lists the caller and marks exactly one current",
+      afterChange.length === 2 && afterChange.filter((row) => row.current).length === 1,
+    ]);
+    const other = afterChange.find((row) => !row.current);
+    if (other === undefined) return fail("no other session to revoke");
+    const revokedOther = await call(`${base}/t/${TENANT}/account/sessions/${encodeURIComponent(other.id)}`, {
+      method: "DELETE",
+      headers: auth(firstCookie),
+    });
+    checks.push(["DELETE one session is 204", revokedOther.status === 204]);
+    checks.push(["that browser is signed out", (await profile(freshCookie)).status === 401]);
+    checks.push([
+      "the list shrinks to the caller",
+      (await sessionsOf(firstCookie)).filter((row) => !row.current).length === 0,
+    ]);
+
+    const third = await signIn("third", secondPassword);
+    if (third?.cookie === undefined) return fail("the third sign-in set no cookie");
+    checks.push([
+      "DELETE all other sessions is 204",
+      (
+        await call(`${base}/t/${TENANT}/account/sessions`, { method: "DELETE", headers: auth(firstCookie) })
+      ).status === 204,
+    ]);
+    checks.push(["the third browser is signed out", (await profile(third.cookie)).status === 401]);
+
+    const remaining = await sessionsOf(firstCookie);
+    const current = remaining.find((row) => row.current);
+    if (current === undefined) return fail("the caller's session is missing from the list");
+    const revokedSelf = await call(`${base}/t/${TENANT}/account/sessions/${encodeURIComponent(current.id)}`, {
+      method: "DELETE",
+      headers: auth(firstCookie),
+    });
+    checks.push(["a session may revoke itself", revokedSelf.status === 204]);
+    checks.push(["the revoked cookie no longer authenticates", (await profile(firstCookie)).status === 401]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "10",
+    title: "account centre",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: name → wrong current refused → password changed → old refused, new signs in → sessions listed and revoked`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
  * The UUID inside a `<prefix>_<suffix>` typed id, so a `ses_…` returned by the API can be compared
  * with the raw UUID the cookie carries. The suffix is 130 bits of Crockford base32 (§5.2).
  */
@@ -1472,6 +1687,7 @@ async function main(): Promise<number> {
   push(await sessionFlow(base, parsed.consoleSecret, adminToken));
   push(await emailFlow(base, parsed.consoleSecret, parsed.internalSecret));
   push(await mfaFlow(base, adminToken, parsed.consoleSecret));
+  push(await accountFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

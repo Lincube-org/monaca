@@ -464,6 +464,25 @@ impl Store {
         Ok(())
     }
 
+    /// Replace an account's display name, returning the row as it now stands.
+    pub async fn update_display_name(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        display_name: &str,
+    ) -> Result<AccountRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, AccountRow>(
+            "UPDATE tenant.accounts SET display_name = $2, updated_at = now()
+             WHERE id = $1
+             RETURNING id, primary_email, display_name, state, is_tenant_admin, created_at",
+        )
+        .bind(account_id.uuid())
+        .bind(display_name)
+        .fetch_one(&pool)
+        .await?)
+    }
+
     /// The account's envelope-encrypted TOTP secret, or `None` when MFA is not enrolled.
     ///
     /// The blob is sealed by the caller: the store has no key provider and must never see plaintext
@@ -902,6 +921,25 @@ impl Store {
              WHERE account_id = $1 AND revoked_at IS NULL",
         )
         .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Revoke every live session of an account except `keep` — the browser making the change.
+    pub async fn revoke_other_sessions(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        keep: Uuid,
+    ) -> Result<u64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.sessions SET revoked_at = now()
+             WHERE account_id = $1 AND id <> $2 AND revoked_at IS NULL",
+        )
+        .bind(account_id.uuid())
+        .bind(keep)
         .execute(&pool)
         .await?;
         Ok(result.rows_affected())

@@ -138,7 +138,22 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
 /// management calls: only the account itself may enroll or remove its second factor.
 pub fn account_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/t/{tenant}/account", get(crate::account::get_account))
+        .route(
+            "/t/{tenant}/account",
+            get(crate::account::get_account).patch(crate::account::update_account),
+        )
+        .route(
+            "/t/{tenant}/account/password",
+            post(crate::account::change_password),
+        )
+        .route(
+            "/t/{tenant}/account/sessions",
+            get(crate::account::list_sessions).delete(crate::account::revoke_other_sessions),
+        )
+        .route(
+            "/t/{tenant}/account/sessions/{session}",
+            delete(crate::account::revoke_session),
+        )
         .route(
             "/t/{tenant}/account/mfa/totp",
             post(crate::account::begin_totp).delete(crate::account::disable_totp),
