@@ -674,16 +674,20 @@ mod tests {
 
     #[test]
     fn der_signatures_normalise_to_raw() {
-        // SEQUENCE(30 2c) INTEGER(02 01 01) INTEGER(02 27 00 <39 bytes of 0x02>)
-        let mut der = vec![0x30, 0x2c, 0x02, 0x01, 0x01, 0x02, 0x27, 0x00];
-        der.extend(std::iter::repeat_n(0x02u8, 39));
+        // SEQUENCE(30 26) INTEGER(02 01 01) INTEGER(02 21 00 <32 bytes starting 0x80>)
+        // The second integer carries a leading zero because its top bit is set; dropping it must
+        // leave exactly 32 bytes instead of overflowing the slot.
+        let mut s = vec![0x80u8];
+        s.extend(std::iter::repeat_n(0x02u8, 31));
+        let mut der = vec![0x30, 0x26, 0x02, 0x01, 0x01, 0x02, 0x21, 0x00];
+        der.extend_from_slice(&s);
         let raw = normalize_signature(&der).expect("normalises");
         assert_eq!(&raw[..32], &{
             let mut r = [0u8; 32];
             r[31] = 1;
             r
         });
-        assert_eq!(&raw[32..], &[0x02u8; 32]);
+        assert_eq!(&raw[32..], &s[..]);
 
         let mut short = [0x11u8; 64];
         short[0] = 0xaa;
