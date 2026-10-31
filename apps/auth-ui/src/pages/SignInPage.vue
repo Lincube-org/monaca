@@ -29,6 +29,7 @@ import {
   startSignUp,
   verifySignUp,
   requestSignInCode,
+  requestSignInLink,
   verifySignInCode,
   requestPasswordReset,
   resetPassword,
@@ -148,6 +149,9 @@ const mode = ref<Mode>("password");
 const stage = ref<"request" | "verify">("request");
 const code = ref("");
 const codeRequested = ref(false);
+/** The link alternative: one request per visit, with the notice shown until the mode changes. */
+const linkSubmitting = ref(false);
+const linkSent = ref(false);
 const newPassword = ref("");
 const displayName = ref("");
 /** Optional username chosen at sign-up; the account can also set it later in the account centre. */
@@ -373,6 +377,7 @@ function switchMode(next: Mode): void {
   stage.value = "request";
   code.value = "";
   codeRequested.value = false;
+  linkSent.value = false;
   password.value = "";
   newPassword.value = "";
   displayName.value = "";
@@ -391,6 +396,7 @@ function changeEmail(): void {
   stage.value = "request";
   code.value = "";
   codeRequested.value = false;
+  linkSent.value = false;
   fieldError.value = null;
   submitError.value = null;
   void nextTick(() => emailInput.value?.$el?.focus?.());
@@ -593,6 +599,31 @@ async function requestCode(): Promise<void> {
     }
   } finally {
     submitting.value = false;
+  }
+}
+
+/** Mail a one-time link instead of a code; the visitor finishes in the mail client. */
+async function sendSignInLink(): Promise<void> {
+  fieldError.value = null;
+  submitError.value = null;
+  linkSent.value = false;
+  if (email.value.trim().length === 0) {
+    fieldError.value = "errors.emailRequired";
+    return;
+  }
+  if (!tenantFromUrl.value || !interactionId.value) return;
+
+  linkSubmitting.value = true;
+  try {
+    await requestSignInLink(tenantFromUrl.value, interactionId.value, email.value.trim());
+    linkSent.value = true;
+  } catch (error) {
+    submitError.value = error instanceof InteractionError ? error : null;
+    if (!(error instanceof InteractionError)) {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+  } finally {
+    linkSubmitting.value = false;
   }
 }
 
@@ -1041,6 +1072,27 @@ async function cancel(): Promise<void> {
                 <LockKeyhole v-else />
                 {{ t(primaryLabel) }}
               </Button>
+              <!-- The same address, but the sign-in happens from the inbox instead of this form. -->
+              <Button
+                v-if="mode === 'code' && !awaitingCode"
+                type="button"
+                variant="ghost"
+                block
+                :disabled="linkSubmitting || submitting"
+                :aria-busy="linkSubmitting"
+                @click="sendSignInLink"
+              >
+                <Loader2 v-if="linkSubmitting" class="animate-spin" />
+                <Mail v-else />
+                {{ linkSubmitting ? t("emailCode.linking") : t("emailCode.link") }}
+              </Button>
+              <p
+                v-if="mode === 'code' && linkSent"
+                role="status"
+                class="text-center text-[11.5px] leading-snug text-ink-muted"
+              >
+                {{ t("emailCode.linkSent") }}
+              </p>
               <Button
                 type="button"
                 variant="ghost"

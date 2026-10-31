@@ -598,6 +598,8 @@ const PURPOSE_PASSWORD_RESET: &str = "password_reset";
 pub(crate) const PURPOSE_EMAIL_CHANGE: &str = "email_change";
 /// A code mailed before the account centre deletes the account (§6.1).
 pub(crate) const PURPOSE_DELETE_ACCOUNT: &str = "delete_account";
+/// A one-time sign-in link mailed by the code mode's alternative (§6.1).
+pub(crate) const PURPOSE_SIGN_IN_LINK: &str = "sign_in_link";
 
 /// The body of every code-request endpoint.
 #[derive(Debug, Deserialize)]
@@ -979,6 +981,141 @@ pub async fn sign_in_code_verify(
         ));
     }
     finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-in/link` — mail a one-time sign-in URL.
+///
+/// The link carries a 256-bit token and no address: the token row supplies the identifier, so the
+/// URL itself does not disclose who it belongs to. A request is answered the same way whatever the
+/// address is, and the throttle matches the six-digit code path.
+pub async fn sign_in_link(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    Json(body): Json<EmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let email = normalise_email(&body.email)?;
+    let now = state.now();
+    if let Some(row) = state
+        .store
+        .verification_code_latest(&tenant, PURPOSE_SIGN_IN_LINK, &email)
+        .await?
+        && now - row.created_at < Duration::seconds(VERIFICATION_RESEND_SECS)
+    {
+        return Err(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "a link was requested moments ago; try again shortly",
+        ));
+    }
+
+    let token = hex::encode(generate_challenge());
+    let expires_at = now + Duration::seconds(VERIFICATION_CODE_TTL_SECS);
+    state
+        .store
+        .insert_verification_code(
+            &tenant,
+            PURPOSE_SIGN_IN_LINK,
+            &email,
+            &hash_secret(&token),
+            expires_at,
+        )
+        .await?;
+
+    let url = append_query(
+        &format!(
+            "{}/t/{}/interaction/{}/sign-in/link/verify",
+            state.config.public_base_url.trim_end_matches('/'),
+            tenant.slug,
+            iid
+        ),
+        &[("token", token.as_str())],
+    );
+    let mut tx = state.store.begin_tenant(&tenant).await?;
+    state
+        .store
+        .outbox_append(
+            &mut *tx,
+            topics::MAIL,
+            &json!({
+                "to": email,
+                "purpose": PURPOSE_SIGN_IN_LINK,
+                "token": token,
+                "url": url,
+                "expires_at": expires_at.unix_timestamp(),
+            }),
+        )
+        .await?;
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "verification_required": true,
+        "expires_in": VERIFICATION_CODE_TTL_SECS,
+    })))
+}
+
+/// The query of the sign-in link callback.
+#[derive(Debug, Deserialize)]
+pub struct LinkTokenQuery {
+    /// The 256-bit token the mailed URL carries.
+    pub token: String,
+}
+
+/// `GET /t/{tenant}/interaction/{iid}/sign-in/link/verify?token=…` — redeem a sign-in link.
+///
+/// This is a browser navigation: success redirects to the client, and a paused flow (MFA or
+/// consent) redirects back to the sign-in page, exactly like any other primary proof.
+pub async fn sign_in_link_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(query): Query<LinkTokenQuery>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let invalid = || {
+        ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the link is incorrect or expired",
+        )
+    };
+    let token = query.token.trim();
+    if token.is_empty() {
+        return Err(invalid());
+    }
+    let Some(row) = state
+        .store
+        .verification_code_by_hash(&tenant, PURPOSE_SIGN_IN_LINK, &hash_secret(token))
+        .await?
+    else {
+        return Err(invalid());
+    };
+    if row.expires_at <= state.now() {
+        return Err(invalid());
+    }
+    if !state
+        .store
+        .consume_verification_code(&tenant, row.id)
+        .await?
+    {
+        return Err(invalid());
+    }
+
+    let Some((account, _)) = state
+        .store
+        .account_by_email(&tenant, &row.identifier)
+        .await?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the link does not sign in this account",
+        ));
+    };
+    if account.state != "active" {
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "the link does not sign in this account",
+        ));
+    }
+    finish_sign_in_browser(state, tenant, interaction, &iid, &headers, account).await
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/password/forgot` — request a reset code.

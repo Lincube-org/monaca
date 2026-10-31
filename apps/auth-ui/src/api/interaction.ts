@@ -250,6 +250,18 @@ export function resetPassword(
   });
 }
 
+/** Mail a one-time sign-in link instead of a six-digit code (§6.1 `sign-in/link`). */
+export function requestSignInLink(
+  tenant: string,
+  iid: string,
+  email: string,
+): Promise<{ verification_required: true; expires_in: number }> {
+  return call<{ verification_required: true; expires_in: number }>(
+    `${base(tenant, iid)}/sign-in/link`,
+    { method: "POST", body: JSON.stringify({ email }) },
+  );
+}
+
 /** Prove the second factor with a six-digit authenticator code or a saved backup code. */
 export function verifyMfa(
   tenant: string,

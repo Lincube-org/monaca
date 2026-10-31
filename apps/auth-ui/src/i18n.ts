@@ -214,6 +214,9 @@ export const messages = {
     verify: "Sign in",
     verifying: "Checking the code",
     changeEmail: "Use a different email",
+    link: "Email me a sign-in link instead",
+    linking: "Sending the link",
+    linkSent: "A sign-in link is on its way. Open it from your inbox to continue.",
   },
   signUp: {
     title: "Create an account",

@@ -1898,6 +1898,30 @@ impl Store {
         .await?)
     }
 
+    /// A live code or link token looked up by its hash alone (§6.1 sign-in links).
+    ///
+    /// A link carries only the token, not the address, so the row found here supplies the
+    /// identifier the link signs in. `code_hash` is a 256-bit secret for a link, which is why no
+    /// attempt counter is consulted on this path.
+    pub async fn verification_code_by_hash(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        code_hash: &str,
+    ) -> Result<Option<VerificationRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, VerificationRow>(
+            "SELECT id, purpose, identifier, code_hash, attempts, expires_at, consumed_at, created_at
+             FROM tenant.verification_codes
+             WHERE purpose = $1 AND code_hash = $2 AND consumed_at IS NULL
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(purpose)
+        .bind(code_hash)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
     /// Count one failed attempt against a live code and return the new total.
     ///
     /// Returns `None` when the code was already consumed, which makes the caller's answer the

@@ -94,6 +94,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "self-service account deletion codes (M1)",
         include_str!("../migrations/tenant_11.sql"),
     ),
+    (
+        12,
+        "one-time sign-in links (M1)",
+        include_str!("../migrations/tenant_12.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

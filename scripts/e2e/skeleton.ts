@@ -181,6 +181,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "monaca_session; the old session is 401, the old email no longer signs in, GET /v1/accounts/{id} " +
       "is 404, and the membership and the agent the account owned are gone",
   },
+  {
+    step: "18",
+    title: "sign-in links",
+    assertion:
+      "POST /t/demo/interaction/{iid}/sign-in/link {email} answers verification_required regardless of " +
+      "the address; dev mail carries a /sign-in/link/verify?token= URL; opening it is 302 to the client " +
+      "with a code and the token exchange mints an id_token for the account; the same URL is 401 on " +
+      "replay and a made-up token is 401",
+  },
 ];
 
 interface StepResult {
@@ -3414,6 +3423,157 @@ async function accountDeletionFlow(
   };
 }
 
+/**
+ * Step 18 — one-time sign-in links (§6.1).
+ *
+ * The code mode also mails a link: the response never says whether an account exists, the dev
+ * outbox carries the URL, opening it signs the account in and mints a token, the same link is
+ * refused on replay, and a made-up token is refused.
+ */
+async function signInLinkFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const email = `link-${runId}@demo.localhost`;
+  const password = `pw-${runId}-link`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "18",
+    title: "sign-in links",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `l-${tag}-${runId}-${"u".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Link sign-in", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the account joined acme", member.status === 201]);
+
+    const started = await begin("first");
+    if (started === undefined) return fail("");
+    const requested = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in/link`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    checks.push([
+      "POST …/sign-in/link answers verification_required",
+      requested.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    const mail = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "sign_in_link" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const url = (mail.body as { payload?: { url?: unknown } })?.payload?.url;
+    checks.push([
+      "dev mail carries the sign-in URL",
+      typeof url === "string" && url.includes("/sign-in/link/verify?token="),
+    ]);
+    if (typeof url !== "string") return fail("the mail carried no URL");
+
+    const clicked = await call(url, { redirect: "manual" });
+    const redirectTo = clicked.headers.get("location") ?? "";
+    checks.push([
+      "opening the link redirects to the client with a code",
+      clicked.status === 302 && redirectTo.includes("code="),
+    ]);
+
+    const token = await exchange(redirectTo, started.verifier);
+    const claims = jwtClaims((token.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "the link mints a token for the account",
+      token.status === 200 && claims?.email === email,
+    ]);
+
+    const replay = await call(url, { redirect: "manual" });
+    checks.push(["a replayed link is 401", replay.status === 401]);
+
+    const second = await begin("bad");
+    if (second === undefined) return fail("");
+    const bogus = await call(
+      `${base}/t/${TENANT}/interaction/${second.interaction}/sign-in/link/verify?token=${"0".repeat(64)}`,
+      { redirect: "manual" },
+    );
+    checks.push(["an unknown token is 401", bogus.status === 401]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "18",
+    title: "sign-in links",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: request → mail URL → open → token → replay 401 → unknown token 401`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -3660,6 +3820,7 @@ async function main(): Promise<number> {
   push(await socialFlow(base, adminToken, parsed.consoleSecret));
   push(await trustedDeviceFlow(base, adminToken, parsed.consoleSecret));
   push(await accountDeletionFlow(base, adminToken, parsed.internalSecret));
+  push(await signInLinkFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

@@ -111,6 +111,14 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             post(crate::protocol::sign_in_code_verify),
         )
         .route(
+            "/t/{tenant}/interaction/{iid}/sign-in/link",
+            post(crate::protocol::sign_in_link),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/sign-in/link/verify",
+            get(crate::protocol::sign_in_link_verify),
+        )
+        .route(
             "/t/{tenant}/interaction/{iid}/sign-in/passkey/options",
             post(crate::protocol::passkey_sign_in_options),
         )
