@@ -2421,6 +2421,20 @@ async fn refresh_grant(
         ));
     }
 
+    // Suspension revokes the live refresh tokens, but a rotation that raced with the suspension
+    // must not mint either: the account state is the authority.
+    let account = state
+        .store
+        .account_by_id(&tenant, AccountId::from_uuid(row.account_id))
+        .await?
+        .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidGrant, "account is gone"))?;
+    if account.state != "active" {
+        return Err(ApiError::token(
+            TokenErrorCode::InvalidGrant,
+            "account is disabled",
+        ));
+    }
+
     let scope = match request.scope {
         Some(requested) => {
             if !scope_subset(&requested, &row.scope) {
@@ -2490,11 +2504,6 @@ async fn refresh_grant(
         .map_err(ApiError::internal)?;
 
     let id_token = if scope.iter().any(|scope| scope == "openid") {
-        let account = state
-            .store
-            .account_by_id(&tenant, AccountId::from_uuid(row.account_id))
-            .await?
-            .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidGrant, "account is gone"))?;
         let id_claims = IdTokenClaims {
             iss: tenant.issuer.clone(),
             sub: account.account_id().to_typed_string(),

@@ -225,6 +225,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "old one and accepts the new one; PATCH renames it; GET /v1/clients lists both without secrets; " +
       "DELETE removes one and authorize refuses its client_id",
   },
+  {
+    step: "23",
+    title: "user management",
+    assertion:
+      "GET /v1/accounts?query=… finds an account by a substring of its email; " +
+      "PATCH /v1/accounts/{id} {state:disabled} suspends it — the password is 401, the previously " +
+      "issued session cookie is 401 and the refresh token is 400 invalid_grant — and {state:active} " +
+      "restores sign-in; an invalid state is 400 and an unknown account is 404",
+  },
 ];
 
 interface StepResult {
@@ -4425,6 +4434,215 @@ async function clientFlow(base: string, adminToken: string): Promise<StepResult>
   };
 }
 
+/**
+ * Step 23 — user management (§6.2).
+ *
+ * An administrator can search the tenant's accounts and suspend one. Suspension is immediate:
+ * the password stops working, the session cookie and refresh token already issued are revoked,
+ * and reactivation restores sign-in.
+ */
+async function userManagementFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const email = `managed-${runId}@demo.localhost`;
+  const password = `pw-${runId}-managed`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "23",
+    title: "user management",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction for the managed account's sign-in. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `m-${tag}-${runId}-${"w".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Sign in and exchange the code, returning the cookie and refresh token it issued. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ cookie?: string; refreshToken?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const redirectTo = (response.body as { redirect_to?: unknown })?.redirect_to;
+    if (response.status !== 200 || typeof redirectTo !== "string") {
+      detail = `sign-in(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: started.verifier },
+      basic,
+    );
+    const refreshToken = (token.body as { refresh_token?: unknown })?.refresh_token;
+    if (token.status !== 200 || typeof refreshToken !== "string") {
+      detail = `token(${tag}) → ${token.status} ${text(token.body)}`;
+      return undefined;
+    }
+    return { cookie, refreshToken };
+  };
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Managed User", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    // --- the search filter finds the account and nothing outside the needle ---------------------
+    const searched = await call(`${base}/v1/accounts?query=${encodeURIComponent(`managed-${runId}`)}`, {
+      headers,
+    });
+    const items = (searched.body as { items?: { email?: unknown }[] })?.items ?? [];
+    checks.push([
+      "GET /v1/accounts?query=… finds the account",
+      searched.status === 200 &&
+        items.length >= 1 &&
+        items.every((item) => String(item.email).includes(`managed-${runId}`)),
+    ]);
+
+    const live = await signIn("live");
+    if (live === undefined || live.cookie === undefined) {
+      return fail("the pre-suspension sign-in issued no session cookie");
+    }
+
+    // --- suspension stops the password, the live session and the refresh flow --------------------
+    const suspended = await call(`${base}/v1/accounts/${accountId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    checks.push([
+      "PATCH {state:disabled} suspends the account",
+      suspended.status === 200 && (suspended.body as { state?: unknown })?.state === "disabled",
+    ]);
+
+    const denied = await begin("denied");
+    if (denied === undefined) return fail("");
+    const passwordAttempt = await call(`${base}/t/${TENANT}/interaction/${denied.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    checks.push([
+      "the suspended account's password is refused",
+      passwordAttempt.status === 401 &&
+        (passwordAttempt.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_INVALID_CREDENTIALS",
+    ]);
+
+    const sessionProbe = await call(`${base}/t/${TENANT}/account`, {
+      headers: { cookie: `monaca_session=${live.cookie}` },
+    });
+    checks.push([
+      "the previous session cookie no longer works",
+      sessionProbe.status === 401 &&
+        (sessionProbe.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_UNAUTHORIZED",
+    ]);
+
+    const renewed = await tokenCall(
+      base,
+      { grant_type: "refresh_token", refresh_token: live.refreshToken ?? "" },
+      basic,
+    );
+    checks.push([
+      "the previous refresh token is refused",
+      renewed.status === 400 && (renewed.body as { error?: unknown })?.error === "invalid_grant",
+    ]);
+
+    // --- reactivation restores sign-in ---------------------------------------------------------
+    const restored = await call(`${base}/v1/accounts/${accountId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "active" }),
+    });
+    checks.push([
+      "PATCH {state:active} reactivates the account",
+      restored.status === 200 && (restored.body as { state?: unknown })?.state === "active",
+    ]);
+
+    const after = await signIn("after");
+    checks.push(["the reactivated account signs in again", after !== undefined]);
+
+    // --- bad input -----------------------------------------------------------------------------
+    const invalid = await call(`${base}/v1/accounts/${accountId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "suspended" }),
+    });
+    checks.push(["an unknown state is 400", invalid.status === 400]);
+
+    const unknown = await call(`${base}/v1/accounts/acc_01h455vb4pex5vsknk084sn02q`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    checks.push(["suspending an unknown account is 404", unknown.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "23",
+    title: "user management",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: search → suspend → password 401 → session 401 → refresh invalid → reactivate → sign-in → 400 → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -4676,6 +4894,7 @@ async function main(): Promise<number> {
   push(await scopeGrantFlow(base, adminToken, parsed.consoleSecret));
   push(await loginHintFlow(base, adminToken, parsed.consoleSecret));
   push(await clientFlow(base, adminToken));
+  push(await userManagementFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

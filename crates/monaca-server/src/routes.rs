@@ -253,8 +253,14 @@ pub fn account_routes() -> Router<Arc<AppState>> {
 /// The `/v1` management API — §6.2.
 pub fn management_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/accounts", post(crate::management::create_account))
-        .route("/v1/accounts/{id}", get(crate::management::get_account))
+        .route(
+            "/v1/accounts",
+            get(crate::management::list_accounts).post(crate::management::create_account),
+        )
+        .route(
+            "/v1/accounts/{id}",
+            get(crate::management::get_account).patch(crate::management::update_account),
+        )
         .route(
             "/v1/accounts/{id}/sessions",
             get(crate::management::list_account_sessions)

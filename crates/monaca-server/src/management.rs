@@ -230,6 +230,37 @@ pub async fn authorize_admin(
     ))
 }
 
+/// The query string of `GET /v1/accounts`.
+#[derive(Debug, Deserialize)]
+pub struct AccountsQuery {
+    /// Case-insensitive substring of the email or display name.
+    pub query: Option<String>,
+    /// Page size, default 50, max 200.
+    pub limit: Option<i64>,
+}
+
+/// `GET /v1/accounts` — search the tenant's accounts (§6.2).
+pub async fn list_accounts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<AccountsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let needle = query
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let rows = state.store.accounts(&tenant, needle, limit).await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let roles = state.store.account_roles(&tenant, row.account_id()).await?;
+        items.push(account_json(row, &roles));
+    }
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
 /// `POST /v1/accounts`.
 pub async fn create_account(
     State(state): State<Arc<AppState>>,
@@ -299,6 +330,89 @@ pub async fn get_account(
         .account_roles(&tenant, account.account_id())
         .await?;
     Ok(Json(account_json(&account, &roles)))
+}
+
+/// The body of `PATCH /v1/accounts/{id}`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateAccountBody {
+    /// `active` | `disabled`.
+    pub state: String,
+}
+
+/// `PATCH /v1/accounts/{id}` — suspend or reactivate an account (§6.2).
+///
+/// Suspension is immediate: every live session and refresh token is revoked with the state
+/// change, so the browser is signed out and no new access token can be minted. Repeating the
+/// current state is a no-op that answers with the unchanged account.
+pub async fn update_account(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateAccountBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    if !matches!(body.state.as_str(), "active" | "disabled") {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "state must be `active` or `disabled`",
+        ));
+    }
+    let account = state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
+
+    if account.state != body.state {
+        if !state
+            .store
+            .set_account_state(&tenant, account_id, &body.state)
+            .await?
+        {
+            return Err(ApiError::not_found("account"));
+        }
+        if body.state == "disabled" {
+            state
+                .store
+                .revoke_account_sessions(&tenant, account_id)
+                .await?;
+            state
+                .store
+                .revoke_account_refresh_tokens(&tenant, account_id)
+                .await?;
+        }
+
+        let event = AuditEvent {
+            id: EventId::new(),
+            at: state.now(),
+            action: if body.state == "disabled" {
+                "account.suspended".into()
+            } else {
+                "account.reactivated".into()
+            },
+            actor_chain: vec![admin.actor()],
+            subject: AuditSubject {
+                subject_type: AuditActorType::Account,
+                id: Some(account.account_id().to_typed_string()),
+            },
+            decision: AuditDecision::Allow,
+            grant_id: None,
+            jti: None,
+            payload: json!({ "email": account.primary_email }),
+        };
+        if let Err(err) = state.audit_tenant(&tenant, &event).await {
+            tracing::warn!(%err, "could not append the account state audit event");
+        }
+    }
+
+    let updated = state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
+    let roles = state.store.account_roles(&tenant, account_id).await?;
+    Ok(Json(account_json(&updated, &roles)))
 }
 
 /// The body of `POST /v1/roles`.

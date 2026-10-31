@@ -1,0 +1,117 @@
+{
+  "$id": "https://monaca.dev/events/account.suspended.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "const": "account.suspended"
+    },
+    "actor_chain": {
+      "description": "Ordered outermost-first; never empty.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "account",
+              "org",
+              "agent",
+              "agent_key",
+              "grant",
+              "client",
+              "tool",
+              "session",
+              "tenant"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "id"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "at": {
+      "description": "When the event happened, UTC.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "deny",
+        "info"
+      ]
+    },
+    "grant_id": {
+      "description": "`grt_` typed id.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "Audit event id, `evt_` followed by 26 Crockford base32 symbols.",
+      "pattern": "^evt_[0-7][0-9abcdefghjkmnpqrstvwxyz]{25}$",
+      "type": "string"
+    },
+    "jti": {
+      "description": "A raw hyphenated UUIDv7; no prefix (§5.2's exception).",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "payload": {
+      "description": "Event-specific detail; an object, never an array, never null.",
+      "type": "object"
+    },
+    "subject": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "enum": [
+            "account",
+            "org",
+            "agent",
+            "agent_key",
+            "grant",
+            "client",
+            "tool",
+            "session",
+            "tenant"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "id",
+    "at",
+    "action",
+    "actor_chain",
+    "subject",
+    "decision",
+    "payload"
+  ],
+  "title": "audit event: account.suspended",
+  "type": "object"
+}

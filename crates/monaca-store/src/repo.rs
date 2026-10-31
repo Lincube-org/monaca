@@ -558,6 +558,55 @@ impl Store {
         .await?)
     }
 
+    /// Accounts newest first, optionally filtered by a case-insensitive substring of the email or
+    /// display name. `limit` is bounded by the caller.
+    pub async fn accounts(
+        &self,
+        tenant: &TenantRow,
+        query: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AccountRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        // A literal `%` or `_` in the search box must not turn into a wildcard.
+        let pattern = query.map(|value| {
+            format!(
+                "%{}%",
+                value
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
+        Ok(sqlx::query_as::<_, AccountRow>(
+            "SELECT id, primary_email, display_name, state, is_tenant_admin, created_at
+             FROM tenant.accounts
+             WHERE $1::text IS NULL OR primary_email ILIKE $1 OR display_name ILIKE $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT $2",
+        )
+        .bind(pattern.as_deref())
+        .bind(limit)
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Change an account's state; false when the row does not exist.
+    pub async fn set_account_state(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        state: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result =
+            sqlx::query("UPDATE tenant.accounts SET state = $2, updated_at = now() WHERE id = $1")
+                .bind(account_id.uuid())
+                .bind(state)
+                .execute(&pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// An account and its password PHC string, by email (case-insensitive).
     pub async fn account_by_email(
         &self,
@@ -2422,6 +2471,24 @@ impl Store {
             .execute(&pool)
             .await?;
         Ok(())
+    }
+
+    /// Revoke every live refresh token of an account — suspension must end renewal, not just
+    /// the next sign-in.
+    pub async fn revoke_account_refresh_tokens(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<u64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.refresh_tokens SET revoked_at = now()
+             WHERE account_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Revoke every live refresh token in a rotation family (reuse detection, RFC 6749 §10.4).
