@@ -18,6 +18,8 @@ export interface AccountProfile {
   has_password: boolean;
   /** `backup_codes` is how many unused recovery codes remain; `passkeys` how many are registered. */
   mfa: { totp: boolean; backup_codes: number; passkeys: number };
+  /** Provider accounts connected to this account, as the account centre lists them. */
+  social: { connector: string; display_name: string }[];
 }
 
 /**
@@ -236,4 +238,11 @@ export function revokeSession(tenant: string, sessionId: string): Promise<void> 
 /** Sign out every browser except this one. */
 export function revokeOtherSessions(tenant: string): Promise<void> {
   return call<void>(`${base(tenant)}/sessions`, { method: "DELETE" });
+}
+
+/** Disconnect a provider account; a missing link is a `404`. */
+export function unlinkSocial(tenant: string, connector: string): Promise<void> {
+  return call<void>(`${base(tenant)}/social/${encodeURIComponent(connector)}`, {
+    method: "DELETE",
+  });
 }

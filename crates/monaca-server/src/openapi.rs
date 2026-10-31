@@ -43,6 +43,8 @@ pub const M0_ACTIONS: &[&str] = &[
     "tool.denied",
     "interaction.sign_in.succeeded",
     "interaction.sign_in.failed",
+    "connector.created",
+    "connector.deleted",
 ];
 
 /// The `subject.type` values §8.1 allows.

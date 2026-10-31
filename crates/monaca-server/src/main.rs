@@ -20,6 +20,7 @@ mod passkey;
 mod protocol;
 mod routes;
 mod session;
+mod social;
 mod state;
 
 #[cfg(test)]

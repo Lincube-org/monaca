@@ -79,6 +79,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "email change codes from the account centre (M1)",
         include_str!("../migrations/tenant_8.sql"),
     ),
+    (
+        9,
+        "social (OAuth2) connectors and linked identities (M1)",
+        include_str!("../migrations/tenant_9.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

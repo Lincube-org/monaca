@@ -97,6 +97,34 @@ pub mod kinds {
     /// An email address is already claimed by another account.
     pub const EMAIL_TAKEN: ProblemKind =
         ProblemKind::new("email_taken", "MONACA_EMAIL_TAKEN", "Email taken", 409);
+    /// A connector slug is already registered in this tenant.
+    pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
+        "connector_exists",
+        "MONACA_CONNECTOR_EXISTS",
+        "Connector exists",
+        409,
+    );
+    /// The provider account is already linked to another account.
+    pub const SOCIAL_IDENTITY_TAKEN: ProblemKind = ProblemKind::new(
+        "social_identity_taken",
+        "MONACA_SOCIAL_IDENTITY_TAKEN",
+        "Social identity taken",
+        409,
+    );
+    /// The provider account is not linked, and it asserted no verified email to match on.
+    pub const SOCIAL_UNLINKED: ProblemKind = ProblemKind::new(
+        "social_unlinked",
+        "MONACA_SOCIAL_UNLINKED",
+        "Social account not linked",
+        403,
+    );
+    /// The provider refused the code exchange or returned an unusable document.
+    pub const SOCIAL_PROVIDER_ERROR: ProblemKind = ProblemKind::new(
+        "social_provider_error",
+        "MONACA_SOCIAL_PROVIDER_ERROR",
+        "Social provider error",
+        502,
+    );
     /// The server could not complete a valid request.
     pub const INTERNAL: ProblemKind =
         ProblemKind::new("internal", "MONACA_INTERNAL", "Internal error", 500);
@@ -199,6 +227,8 @@ impl From<monaca_store::StoreError> for ApiError {
             monaca_store::StoreError::AlreadyExists { entity } => {
                 let kind = match *entity {
                     "email" => kinds::EMAIL_TAKEN,
+                    "connector" => kinds::CONNECTOR_EXISTS,
+                    "social identity" => kinds::SOCIAL_IDENTITY_TAKEN,
                     _ => kinds::USERNAME_TAKEN,
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))

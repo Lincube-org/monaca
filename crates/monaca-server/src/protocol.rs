@@ -422,7 +422,7 @@ pub async fn sign_in(
 /// all four agree on cookies, consent and MFA. An account with an authenticator app is stopped
 /// before anything is consumed: the interaction stays redeemable and the caller answers with the
 /// challenge shape instead of a redirect (§6.1 `mfa`).
-async fn finish_sign_in(
+pub(crate) async fn finish_sign_in(
     state: Arc<AppState>,
     tenant: TenantRow,
     interaction: Interaction,
@@ -518,6 +518,43 @@ async fn complete_sign_in(
     )
     .await?;
     Ok(with_session_cookie(response, session_id, &state))
+}
+
+/// The browser-facing variant of [`finish_sign_in`].
+///
+/// A social callback is a browser navigation, so it cannot answer the JSON shape the page expects.
+/// A completed flow becomes a `302` to the client's `redirect_to`; a paused flow (second factor or
+/// consent) becomes a `302` back to the sign-in page, where the page renders the remaining step.
+/// The session cookie `finish_sign_in` set is carried over to whichever redirect is returned.
+pub(crate) async fn finish_sign_in_browser(
+    state: Arc<AppState>,
+    tenant: TenantRow,
+    interaction: Interaction,
+    iid: &str,
+    headers: &HeaderMap,
+    account: AccountRow,
+) -> Result<Response, ApiError> {
+    let paused_at = sign_in_location(&state, &tenant, &interaction);
+    let response = finish_sign_in(state, tenant, interaction, iid, headers, account).await?;
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .map_err(ApiError::internal)?;
+    let redirect_to = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("redirect_to")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let mut response = found(redirect_to.as_deref().unwrap_or(&paused_at));
+    if let Some(cookie) = parts.headers.get(header::SET_COOKIE) {
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, cookie.clone());
+    }
+    Ok(response)
 }
 
 /// How long an emailed code stays usable.
@@ -2659,7 +2696,7 @@ pub(crate) fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     Some((id.to_owned(), secret.to_owned()))
 }
 
-fn append_query(base: &str, params: &[(&str, &str)]) -> String {
+pub(crate) fn append_query(base: &str, params: &[(&str, &str)]) -> String {
     let mut out = String::from(base);
     let mut first = !base.contains('?');
     for (name, value) in params {

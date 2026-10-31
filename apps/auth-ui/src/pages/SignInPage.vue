@@ -36,6 +36,11 @@ import {
   type SignInResult,
 } from "@/api/interaction";
 import { PasskeyError, getPasskeyAssertion, passkeysSupported } from "@/api/webauthn";
+import {
+  listSocialConnectors,
+  socialSignInUrl,
+  type SocialConnector,
+} from "@/api/social";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -145,6 +150,9 @@ const newPassword = ref("");
 const displayName = ref("");
 /** Optional username chosen at sign-up; the account can also set it later in the account centre. */
 const username = ref("");
+
+/** Provider buttons; the tenant's public list is fetched once and never blocks the page. */
+const socialConnectors = ref<SocialConnector[]>([]);
 
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
@@ -335,6 +343,7 @@ onMounted(async () => {
       mfaRequired.value = true;
       mfaFactors.value = details.value.mfa_factors;
     }
+    socialConnectors.value = await listSocialConnectors(tenantFromUrl.value);
   } catch (error) {
     loadError.value = error instanceof Error ? error : new Error(String(error));
   } finally {
@@ -346,6 +355,14 @@ onMounted(async () => {
     }
   }
 });
+
+/** Hand the browser to the provider; the callback returns to this interaction. */
+function signInWithProvider(connector: string): void {
+  if (!tenantFromUrl.value || !interactionId.value) return;
+  window.location.assign(
+    socialSignInUrl(tenantFromUrl.value, connector, interactionId.value),
+  );
+}
 
 /** Leave the form for whichever flow the visitor picked, keeping only what it can reuse. */
 function switchMode(next: Mode): void {
@@ -1047,6 +1064,26 @@ async function cancel(): Promise<void> {
                 <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
                 {{ t(passkeyErrorMessage) }}
               </p>
+            </div>
+
+            <!-- Provider accounts: a full-page navigation to the provider and back to this interaction. -->
+            <div v-if="mode === 'password' && socialConnectors.length > 0" class="flex flex-col gap-2">
+              <div class="flex items-center gap-2 text-[11px] text-ink-faint">
+                <span class="h-px flex-1 bg-rule" aria-hidden="true" />
+                {{ t("signIn.or") }}
+                <span class="h-px flex-1 bg-rule" aria-hidden="true" />
+              </div>
+              <Button
+                v-for="connector in socialConnectors"
+                :key="connector.connector_id"
+                type="button"
+                variant="secondary"
+                block
+                :disabled="submitting || passkeyBusy"
+                @click="signInWithProvider(connector.connector_id)"
+              >
+                {{ t("signIn.continueWith", { name: connector.display_name }) }}
+              </Button>
             </div>
 
             <!-- Four ways in, one interaction; the links only appear once no code is in flight. -->

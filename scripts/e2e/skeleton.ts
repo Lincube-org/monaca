@@ -149,6 +149,18 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "GET /account echoes the new address; the old address no longer signs in while the new one mints a " +
       "token; another account's address is 409 MONACA_EMAIL_TAKEN and the current one is 400",
   },
+  {
+    step: "15",
+    title: "social connectors",
+    assertion:
+      "POST /v1/connectors registers an OAuth2 provider (a duplicate slug is 409 MONACA_CONNECTOR_EXISTS) " +
+      "and GET /v1/connectors lists it without the secret; the public list shows only the display name; the " +
+      "account centre connects it (?linked=), GET /account lists it; the provider signs in without a password " +
+      "and mints a token; a replayed callback is 400; another account connecting the same provider account is " +
+      "refused (social_error=taken); a first social sign-in creates the account and issues a token; " +
+      "DELETE /account/social/{connector} is 204 and the profile no longer lists it; DELETE /v1/connectors " +
+      "is 204 and a missing one is 404",
+  },
 ];
 
 interface StepResult {
@@ -2626,6 +2638,406 @@ async function emailChangeFlow(
   };
 }
 
+/**
+ * Step 15 — social (OAuth2) connectors (§6.1).
+ *
+ * A registered connector points at the in-process mock provider; the account centre connects it,
+ * the provider signs the account in without a password, a first social sign-in creates an account,
+ * a second account cannot claim the same provider account, a replayed callback is refused, and
+ * disconnecting and deleting the connector take effect.
+ */
+async function socialFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const provider = startMockProvider();
+
+  const fail = (why: string): StepResult => ({
+    step: "15",
+    title: "social connectors",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `s-${tag}-${runId}-${"x".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+    identifier: string,
+    password: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: string, verifier: string): Promise<HttpResult> => {
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  /** The connector body; the identity the mock asserts is fixed in its authorize URL. */
+  const connectorBody = (
+    connectorId: string,
+    displayName: string,
+    identity: Record<string, string>,
+  ): Record<string, unknown> => ({
+    connector_id: connectorId,
+    display_name: displayName,
+    authorize_url: `${provider.url}/authorize?${new URLSearchParams(identity).toString()}`,
+    token_url: `${provider.url}/token`,
+    userinfo_url: `${provider.url}/userinfo`,
+    client_id: `${connectorId}-client`,
+    client_secret: `${connectorId}-secret`,
+    scopes: ["profile", "email"],
+  });
+
+  /** Follow a provider round-trip that starts signed in (the link flow). */
+  const linkProvider = async (
+    cookie: { cookie?: string },
+    connector: string,
+  ): Promise<{ callbackUrl: string; callback: HttpResult; finalLocation: string } | undefined> => {
+    const start = await call(`${base}/t/${TENANT}/account/social/${connector}/authorize`, {
+      headers: cookie,
+      redirect: "manual",
+    });
+    const startLocation = start.headers.get("location") ?? "";
+    if (start.status !== 302 || startLocation === "") {
+      detail = `account link start → ${start.status} ${text(start.body)}`;
+      return undefined;
+    }
+    const atProvider = await call(startLocation, { redirect: "manual" });
+    const callbackUrl = atProvider.headers.get("location") ?? "";
+    if (atProvider.status !== 302 || callbackUrl === "") {
+      detail = `provider authorize → ${atProvider.status}`;
+      return undefined;
+    }
+    const callback = await call(callbackUrl, { headers: cookie, redirect: "manual" });
+    return { callbackUrl, callback, finalLocation: callback.headers.get("location") ?? "" };
+  };
+
+  /** Follow a provider round-trip that starts from the sign-in page. */
+  const socialSignIn = async (
+    connector: string,
+  ): Promise<{ verifier: string; callback: HttpResult; callbackUrl: string; redirectTo: string } | undefined> => {
+    const started = await begin(`social-${connector}`);
+    if (started === undefined) return undefined;
+    const authorize = await call(
+      `${base}/t/${TENANT}/connectors/${connector}/authorize?interaction=${started.interaction}`,
+      { redirect: "manual" },
+    );
+    const startLocation = authorize.headers.get("location") ?? "";
+    if (authorize.status !== 302 || startLocation === "") {
+      detail = `connector authorize → ${authorize.status} ${text(authorize.body)}`;
+      return undefined;
+    }
+    const atProvider = await call(startLocation, { redirect: "manual" });
+    const callbackUrl = atProvider.headers.get("location") ?? "";
+    if (atProvider.status !== 302 || callbackUrl === "") {
+      detail = `provider authorize → ${atProvider.status}`;
+      return undefined;
+    }
+    const callback = await call(callbackUrl, { redirect: "manual" });
+    return { verifier: started.verifier, callback, callbackUrl, redirectTo: callback.headers.get("location") ?? "" };
+  };
+
+  try {
+    // --- register the connector and check the admin surface ------------------------------------
+    const identityA = {
+      sub: `social-${runId}`,
+      email: `social-${runId}@demo.localhost`,
+      verified: "1",
+      name: "Social A",
+    };
+    const created = await call(`${base}/v1/connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(connectorBody("mock", "Mock Provider", identityA)),
+    });
+    checks.push(["POST /v1/connectors is 201", created.status === 201]);
+
+    const duplicate = await call(`${base}/v1/connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(connectorBody("mock", "Mock Provider", identityA)),
+    });
+    checks.push([
+      "a duplicate connector is 409 MONACA_CONNECTOR_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_CONNECTOR_EXISTS",
+    ]);
+
+    const listed = await call(`${base}/v1/connectors`, { headers });
+    const listedItems = (listed.body as { items?: { connector_id?: unknown }[] })?.items ?? [];
+    checks.push([
+      "GET /v1/connectors lists the connector without its secret",
+      listed.status === 200 &&
+        listedItems.some((item) => item.connector_id === "mock") &&
+        !JSON.stringify(listed.body).includes("mock-secret"),
+    ]);
+
+    const publicList = await call(`${base}/t/${TENANT}/connectors`);
+    checks.push([
+      "the public list exposes the display name only",
+      publicList.status === 200 &&
+        JSON.stringify(publicList.body).includes("Mock Provider") &&
+        !JSON.stringify(publicList.body).includes("mock-secret"),
+    ]);
+
+    // --- account A connects the provider --------------------------------------------------------
+    const passwordA = `pw-${runId}-social-a`;
+    const createdA = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: identityA.email, display_name: "Social A", password: passwordA }),
+    });
+    const accountAId = (createdA.body as { id?: string })?.id;
+    if (createdA.status !== 201 || accountAId === undefined) {
+      return fail(`POST /v1/accounts A → ${createdA.status} ${text(createdA.body)}`);
+    }
+    const memberA = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountAId, role: "member" }),
+    });
+    const first = await signIn("first", identityA.email, passwordA);
+    if (first?.cookie === undefined) return fail("the password sign-in set no session cookie");
+    const cookieA = { cookie: `monaca_session=${first.cookie}` };
+    checks.push(["the account joined acme and signed in", memberA.status === 201]);
+
+    const linkA = await linkProvider(cookieA, "mock");
+    if (linkA === undefined) return fail("");
+    checks.push([
+      "the account centre connects the provider and returns to the page",
+      linkA.callback.status === 302 && linkA.finalLocation.includes("linked=mock"),
+    ]);
+
+    const profileA = await call(`${base}/t/${TENANT}/account`, { headers: cookieA });
+    const socialA = (profileA.body as { social?: { connector?: unknown }[] })?.social ?? [];
+    checks.push([
+      "GET /account lists the connected provider",
+      profileA.status === 200 && socialA.some((row) => row.connector === "mock"),
+    ]);
+
+    // --- the provider signs the account in, and a replay is refused -----------------------------
+    const social = await socialSignIn("mock");
+    if (social === undefined) return fail("");
+    const token = await exchange(social.redirectTo, social.verifier);
+    const claims = jwtClaims((token.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "the connected provider signs in without a password and mints a token",
+      social.callback.status === 302 && token.status === 200 && claims?.email === identityA.email,
+    ]);
+
+    const replay = await call(social.callbackUrl, { redirect: "manual" });
+    checks.push(["a replayed callback is 400", replay.status === 400]);
+
+    // --- account B cannot claim the same provider account ----------------------------------------
+    const emailB = `social-b-${runId}@demo.localhost`;
+    const passwordB = `pw-${runId}-social-b`;
+    const createdB = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: emailB, display_name: "Social B", password: passwordB }),
+    });
+    const accountBId = (createdB.body as { id?: string })?.id;
+    if (createdB.status !== 201 || accountBId === undefined) {
+      return fail(`POST /v1/accounts B → ${createdB.status} ${text(createdB.body)}`);
+    }
+    const memberB = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountBId, role: "member" }),
+    });
+    const second = await signIn("second", emailB, passwordB);
+    if (second?.cookie === undefined) return fail("the second sign-in set no session cookie");
+    const cookieB = { cookie: `monaca_session=${second.cookie}` };
+
+    const linkB = await linkProvider(cookieB, "mock");
+    if (linkB === undefined) return fail("");
+    checks.push([
+      "a provider account already connected to another user is refused",
+      memberB.status === 201 &&
+        linkB.callback.status === 302 &&
+        linkB.finalLocation.includes("social_error=taken"),
+    ]);
+
+    // --- a first social sign-in creates the account and signs it in -----------------------------
+    const identityNew = {
+      sub: `social-new-${runId}`,
+      email: `social-new-${runId}@example.test`,
+      verified: "1",
+      name: "Social New",
+    };
+    const createdNew = await call(`${base}/v1/connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(connectorBody("mock-new", "Mock Provider New", identityNew)),
+    });
+    checks.push(["a second connector is 201", createdNew.status === 201]);
+
+    const firstSocial = await socialSignIn("mock-new");
+    if (firstSocial === undefined) return fail("");
+    const newToken = await exchange(firstSocial.redirectTo, firstSocial.verifier);
+    const newClaims = jwtClaims((newToken.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "a first social sign-in creates an account and issues a token",
+      firstSocial.callback.status === 302 &&
+        newToken.status === 200 &&
+        newClaims?.email === identityNew.email,
+    ]);
+
+    // --- disconnecting, and deleting the connector ----------------------------------------------
+    const unlink = await call(`${base}/t/${TENANT}/account/social/mock`, {
+      method: "DELETE",
+      headers: cookieA,
+    });
+    checks.push(["DELETE /account/social/{connector} is 204", unlink.status === 204]);
+
+    const afterUnlink = await call(`${base}/t/${TENANT}/account`, { headers: cookieA });
+    checks.push([
+      "the profile no longer lists the provider",
+      afterUnlink.status === 200 && (afterUnlink.body as { social?: unknown[] })?.social?.length === 0,
+    ]);
+
+    const removed = await call(`${base}/v1/connectors/mock-new`, { method: "DELETE", headers });
+    checks.push(["DELETE /v1/connectors/{connector} is 204", removed.status === 204]);
+
+    const missing = await call(`${base}/v1/connectors/mock-new`, { method: "DELETE", headers });
+    checks.push(["deleting a missing connector is 404", missing.status === 404]);
+
+    const publicAfter = await call(`${base}/t/${TENANT}/connectors`);
+    checks.push([
+      "the deleted connector disappears from the public list",
+      !JSON.stringify(publicAfter.body).includes("mock-new"),
+    ]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    provider.stop();
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "15",
+    title: "social connectors",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: configure → connect → social sign-in → replay 400 → conflict → first sign-in creates → disconnect → delete`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/** Decodes the base64url payloads this walk-through mints or reads back. */
+function base64UrlDecode(value: string): Uint8Array {
+  const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = normalised + "=".repeat((4 - (normalised.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+/**
+ * A minimal OAuth2 provider for step 15.
+ *
+ * The identity it asserts is fixed in the authorize URL the connector was configured with, so each
+ * connector stands for one provider account. `/token` hands the code back as the access token and
+ * `/userinfo` decodes it: no state lives in the mock, which is what lets the walk-through run
+ * without a provider service.
+ */
+function startMockProvider(): { url: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/authorize") {
+        const target = new URL(url.searchParams.get("redirect_uri") ?? "");
+        target.searchParams.set(
+          "code",
+          base64UrlJson({
+            sub: url.searchParams.get("sub") ?? "",
+            email: url.searchParams.get("email") ?? "",
+            email_verified: url.searchParams.get("verified") === "1",
+            name: url.searchParams.get("name") ?? "",
+          }),
+        );
+        target.searchParams.set("state", url.searchParams.get("state") ?? "");
+        return Response.redirect(target.toString(), 302);
+      }
+      if (url.pathname === "/token") {
+        const form = await request.formData();
+        const code = String(form.get("code") ?? "");
+        if (code === "") return Response.json({ error: "invalid_grant" }, { status: 400 });
+        return Response.json({ access_token: code, token_type: "Bearer", expires_in: 600 });
+      }
+      if (url.pathname === "/userinfo") {
+        const token = (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
+        return new Response(new TextDecoder().decode(base64UrlDecode(token)), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    stop: () => {
+      void server.stop(true);
+    },
+  };
+}
+
 function typeIdUuid(id: string): string {
   const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
   const suffix = id.slice(id.indexOf("_") + 1);
@@ -2808,6 +3220,7 @@ async function main(): Promise<number> {
   push(await passkeyFlow(base, adminToken, parsed.consoleSecret));
   push(await usernameFlow(base, adminToken, parsed.consoleSecret));
   push(await emailChangeFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
+  push(await socialFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

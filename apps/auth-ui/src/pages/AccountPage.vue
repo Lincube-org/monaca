@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, Skeleton } from "@monaca/ui";
-import { AlertCircle, KeyRound, Loader2, Mail, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
+import { AlertCircle, KeyRound, Link2, Loader2, Mail, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
@@ -22,6 +22,7 @@ import {
   revokeOtherSessions,
   revokeSession,
   updateProfile,
+  unlinkSocial,
   verifyEmailChange,
   verifyTotp,
   type AccountPasskey,
@@ -30,6 +31,11 @@ import {
   type TotpEnrollment,
 } from "@/api/account";
 import { PasskeyError, createPasskey, passkeysSupported } from "@/api/webauthn";
+import {
+  listSocialConnectors,
+  socialLinkUrl,
+  type SocialConnector,
+} from "@/api/social";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -66,6 +72,12 @@ const emailBusy = ref<"send" | "verify" | null>(null);
 const emailFieldError = ref<MessageKey | null>(null);
 const emailSubmitError = ref<string | null>(null);
 const emailNotice = ref<MessageKey | null>(null);
+
+/** Provider connections: the tenant's public connectors and the ones this account linked. */
+const socialConnectors = ref<SocialConnector[]>([]);
+const socialBusy = ref<string | null>(null);
+const socialError = ref<string | null>(null);
+const socialNotice = ref<MessageKey | null>(null);
 
 const currentPassword = ref("");
 const newPassword = ref("");
@@ -111,6 +123,9 @@ const codeInput = ref<InstanceType<typeof Input> | null>(null);
 const totpEnabled = computed(() => account.value?.mfa.totp === true);
 const hasPassword = computed(() => account.value?.has_password === true);
 const otherSessions = computed(() => sessions.value?.filter((row) => !row.current) ?? []);
+const linkedSocial = computed(
+  () => new Set((account.value?.social ?? []).map((row) => row.connector)),
+);
 const backupRemaining = computed(() => account.value?.mfa.backup_codes ?? 0);
 const passkeyCount = computed(() => passkeys.value?.length ?? 0);
 const passkeyLimitReached = computed(() => passkeyCount.value >= 10);
@@ -159,6 +174,21 @@ async function load(): Promise<void> {
     displayName.value = profile.display_name;
     username.value = profile.username ?? "";
     loadError.value = null;
+    // The provider callback returns here with `?linked=` or `?social_error=`; read it once and
+    // strip it so a reload does not repeat the notice.
+    const params = new URLSearchParams(window.location.search);
+    const linked = params.get("linked");
+    const socialFailure = params.get("social_error");
+    if (linked !== null) {
+      socialNotice.value = "account.socialLinked";
+    } else if (socialFailure !== null) {
+      socialError.value =
+        socialFailure === "taken" ? t("account.socialTaken") : t("account.socialFailed");
+    }
+    if (linked !== null || socialFailure !== null) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    socialConnectors.value = await listSocialConnectors(tenant.value);
     await loadSessions();
     await loadPasskeys();
   } catch (error) {
@@ -170,6 +200,33 @@ async function load(): Promise<void> {
 }
 
 onMounted(load);
+
+/** Send the browser to the provider; the callback attaches the account and returns here. */
+function connectSocial(connector: string): void {
+  socialError.value = null;
+  socialNotice.value = null;
+  window.location.assign(socialLinkUrl(tenant.value, connector));
+}
+
+async function disconnectSocial(connector: string): Promise<void> {
+  socialBusy.value = connector;
+  socialError.value = null;
+  socialNotice.value = null;
+  try {
+    await unlinkSocial(tenant.value, connector);
+    if (account.value) {
+      account.value = {
+        ...account.value,
+        social: account.value.social.filter((row) => row.connector !== connector),
+      };
+    }
+    socialNotice.value = "account.socialUnlinked";
+  } catch (error) {
+    socialError.value = messageOf(error);
+  } finally {
+    socialBusy.value = null;
+  }
+}
 
 async function saveProfile(): Promise<void> {
   profileError.value = null;
@@ -728,6 +785,59 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
             >
               {{ t("account.emailDifferent") }}
             </Button>
+          </div>
+
+          <!-- Provider connections: signing in with a provider needs the link recorded here. -->
+          <div
+            v-if="socialConnectors.length > 0"
+            class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3"
+          >
+            <div class="flex items-center gap-1.5">
+              <Link2 class="size-3.5 text-ink-faint" aria-hidden="true" />
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.socialTitle") }}</h2>
+            </div>
+            <p class="text-[11.5px] leading-snug text-ink-faint">{{ t("account.socialNote") }}</p>
+            <div
+              v-for="connector in socialConnectors"
+              :key="connector.connector_id"
+              class="flex items-center justify-between gap-2"
+            >
+              <span class="text-[12.5px] text-ink">{{ connector.display_name }}</span>
+              <Button
+                v-if="linkedSocial.has(connector.connector_id)"
+                type="button"
+                variant="ghost"
+                :disabled="socialBusy !== null"
+                :aria-busy="socialBusy === connector.connector_id"
+                @click="disconnectSocial(connector.connector_id)"
+              >
+                {{
+                  socialBusy === connector.connector_id
+                    ? t("account.socialDisconnecting")
+                    : t("account.socialDisconnect")
+                }}
+              </Button>
+              <Button
+                v-else
+                type="button"
+                variant="secondary"
+                :disabled="socialBusy !== null"
+                @click="connectSocial(connector.connector_id)"
+              >
+                {{ t("account.socialConnect") }}
+              </Button>
+            </div>
+            <p
+              v-if="socialError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ socialError }}
+            </p>
+            <p v-else-if="socialNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(socialNotice) }}
+            </p>
           </div>
 
           <!-- Password: proving the current one means a stolen cookie cannot lock the owner out. -->

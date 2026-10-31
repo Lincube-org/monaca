@@ -146,6 +146,18 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             "/t/{tenant}/interaction/{iid}/abort",
             post(crate::protocol::abort),
         )
+        .route(
+            "/t/{tenant}/connectors",
+            get(crate::social::list_public_connectors),
+        )
+        .route(
+            "/t/{tenant}/connectors/{connector}/authorize",
+            get(crate::social::connector_authorize),
+        )
+        .route(
+            "/t/{tenant}/connectors/{connector}/callback",
+            get(crate::social::connector_callback),
+        )
 }
 
 /// The signed-in account's own security settings — §6.1 `mfa`.
@@ -204,6 +216,14 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             "/t/{tenant}/account/passkeys/{passkey}",
             patch(crate::account::rename_passkey).delete(crate::account::delete_passkey),
         )
+        .route(
+            "/t/{tenant}/account/social/{connector}/authorize",
+            get(crate::social::account_link_start),
+        )
+        .route(
+            "/t/{tenant}/account/social/{connector}",
+            delete(crate::social::unlink_account),
+        )
 }
 
 /// The `/v1` management API — §6.2.
@@ -248,6 +268,14 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/orgs/{org}/audit/verify",
             get(crate::management::verify_audit),
+        )
+        .route(
+            "/v1/connectors",
+            get(crate::social::list_connectors).post(crate::social::create_connector),
+        )
+        .route(
+            "/v1/connectors/{connector}",
+            delete(crate::social::delete_connector),
         )
 }
 

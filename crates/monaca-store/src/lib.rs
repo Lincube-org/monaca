@@ -34,7 +34,8 @@ pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, AuditRow, AuthCodeRow, ClientRow, GrantRow, ParRow,
-    PasskeyRow, RefreshRow, SessionRow, SigningKeyRow, VerificationRow,
+    PasskeyRow, RefreshRow, SessionRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow,
+    SocialStateRow, VerificationRow,
 };
 
 /// A storage failure.

@@ -40,6 +40,10 @@ tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "s
 tower = { version = "0.5.3", features = ["util", "limit", "timeout"] }
 tower-http = { version = "0.7.1", features = ["trace", "cors", "limit", "timeout", "request-id", "sensitive-headers", "util"] }
 hyper = { version = "1.12.0", features = ["server", "http1", "http2"] }
+# The social connector flow is the one place the server calls out: an OAuth2 token exchange and a
+# userinfo read. `rustls-tls` keeps the TLS stack sqlx already uses (rustls + ring) instead of
+# adding a second native-TLS provider.
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 
 # --- storage ----------------------------------------------------------------
 # Runtime queries only (query_as + FromRow); the `macros` feature is deliberately

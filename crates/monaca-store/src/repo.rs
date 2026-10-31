@@ -42,6 +42,55 @@ impl AccountRow {
     }
 }
 
+/// A social (OAuth2) connector in `tenant.social_connectors` (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct SocialConnectorRow {
+    /// Row id.
+    pub id: Uuid,
+    /// The slug the protocol and the page use, unique within the tenant.
+    pub connector_id: String,
+    /// Human-readable name shown on the sign-in page.
+    pub display_name: String,
+    /// The provider's authorization endpoint.
+    pub authorize_url: String,
+    /// The provider's token endpoint.
+    pub token_url: String,
+    /// The provider's userinfo endpoint.
+    pub userinfo_url: String,
+    /// The client id the tenant registered at the provider.
+    pub client_id: String,
+    /// The client secret, sealed by the caller (§5.6) — the store never sees plaintext.
+    pub client_secret_enc: Vec<u8>,
+    /// Scopes requested at the provider.
+    pub scopes: Vec<String>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+/// One provider account linked to a Monaca account, joined with its connector's display name.
+#[derive(Debug, Clone, FromRow)]
+pub struct SocialIdentityRow {
+    /// The connector slug.
+    pub connector: String,
+    /// The connector's display name.
+    pub display_name: String,
+    /// The provider's stable subject for this account.
+    pub subject: String,
+}
+
+/// A pending social `state`, as the callback reads it (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct SocialStateRow {
+    /// The connector the state was minted for.
+    pub connector: String,
+    /// `sign_in` | `link`.
+    pub purpose: String,
+    /// The interaction a sign-in state completes.
+    pub interaction_id: Option<String>,
+    /// The account a link state attaches to.
+    pub account_id: Option<Uuid>,
+}
+
 /// A client in `tenant.clients`.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClientRow {
@@ -641,6 +690,220 @@ impl Store {
 
         tx.commit().await?;
         Ok(account)
+    }
+
+    /// Every social connector the tenant configured.
+    pub async fn social_connectors(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<SocialConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialConnectorRow>(
+            "SELECT id, connector_id, display_name, authorize_url, token_url, userinfo_url,
+                    client_id, client_secret_enc, scopes, created_at
+             FROM tenant.social_connectors ORDER BY connector_id",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One connector by its slug.
+    pub async fn social_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+    ) -> Result<Option<SocialConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialConnectorRow>(
+            "SELECT id, connector_id, display_name, authorize_url, token_url, userinfo_url,
+                    client_id, client_secret_enc, scopes, created_at
+             FROM tenant.social_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Register a connector; a slug another row holds is `AlreadyExists { entity: "connector" }`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_social_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        display_name: &str,
+        authorize_url: &str,
+        token_url: &str,
+        userinfo_url: &str,
+        client_id: &str,
+        client_secret_enc: &[u8],
+        scopes: &[String],
+    ) -> Result<SocialConnectorRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query_as::<_, SocialConnectorRow>(
+            "INSERT INTO tenant.social_connectors
+                (id, connector_id, display_name, authorize_url, token_url, userinfo_url,
+                 client_id, client_secret_enc, scopes)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             RETURNING id, connector_id, display_name, authorize_url, token_url, userinfo_url,
+                       client_id, client_secret_enc, scopes, created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(connector_id)
+        .bind(display_name)
+        .bind(authorize_url)
+        .bind(token_url)
+        .bind(userinfo_url)
+        .bind(client_id)
+        .bind(client_secret_enc)
+        .bind(scopes)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| unique_conflict(err, "connector"))
+    }
+
+    /// Delete a connector, and with it every identity that used it; false when it did not exist.
+    pub async fn delete_social_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.social_connectors WHERE connector_id = $1")
+            .bind(connector_id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// The account a provider subject is linked to.
+    pub async fn social_identity_account(
+        &self,
+        tenant: &TenantRow,
+        connector: &str,
+        subject: &str,
+    ) -> Result<Option<AccountRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, AccountRow>(
+            "SELECT a.id, a.primary_email, a.display_name, a.state, a.is_tenant_admin, a.created_at
+             FROM tenant.accounts a
+             JOIN tenant.account_social_identities i ON i.account_id = a.id
+             WHERE i.connector = $1 AND i.subject = $2
+             LIMIT 1",
+        )
+        .bind(connector)
+        .bind(subject)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Link a provider subject to an account.
+    ///
+    /// The unique constraints are the authority: a subject another account already claimed, or a
+    /// second provider for the same account, is `AlreadyExists { entity: "social identity" }`.
+    pub async fn link_social_identity(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        connector: &str,
+        subject: &str,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.account_social_identities (id, account_id, connector, subject)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(account_id.uuid())
+        .bind(connector)
+        .bind(subject)
+        .execute(&pool)
+        .await
+        .map_err(|err| unique_conflict(err, "social identity"))?;
+        Ok(())
+    }
+
+    /// Remove one link; false when the account was not connected to that connector.
+    pub async fn unlink_social_identity(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        connector: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "DELETE FROM tenant.account_social_identities
+             WHERE account_id = $1 AND connector = $2",
+        )
+        .bind(account_id.uuid())
+        .bind(connector)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// The account's linked providers, with the display names the account page shows.
+    pub async fn social_identities(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Vec<SocialIdentityRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialIdentityRow>(
+            "SELECT i.connector, c.display_name, i.subject
+             FROM tenant.account_social_identities i
+             JOIN tenant.social_connectors c ON c.connector_id = i.connector
+             WHERE i.account_id = $1
+             ORDER BY i.connector",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Mint a single-use `state` the provider will echo back; returns the uuid to send.
+    pub async fn insert_social_state(
+        &self,
+        tenant: &TenantRow,
+        connector: &str,
+        purpose: &str,
+        interaction_id: Option<&str>,
+        account_id: Option<Uuid>,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO tenant.social_states
+                (id, connector, purpose, interaction_id, account_id, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(id)
+        .bind(connector)
+        .bind(purpose)
+        .bind(interaction_id)
+        .bind(account_id)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Redeem a `state`: only an unconsumed, unexpired row is returned, and it is consumed in the
+    /// same statement so two callbacks cannot both proceed.
+    pub async fn take_social_state(
+        &self,
+        tenant: &TenantRow,
+        state_id: Uuid,
+    ) -> Result<Option<SocialStateRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialStateRow>(
+            "UPDATE tenant.social_states SET consumed_at = now()
+             WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
+             RETURNING connector, purpose, interaction_id, account_id",
+        )
+        .bind(state_id)
+        .fetch_optional(&pool)
+        .await?)
     }
 
     /// Replace the account's password with a new argon2id PHC string.

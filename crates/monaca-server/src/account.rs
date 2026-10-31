@@ -44,7 +44,7 @@ const MAX_PASSKEYS: usize = 10;
 const MAX_PASSKEY_NAME_LEN: usize = 80;
 
 /// The account behind the request's SSO cookie.
-async fn signed_in_account(
+pub(crate) async fn signed_in_account(
     state: &Arc<AppState>,
     slug: &str,
     headers: &HeaderMap,
@@ -108,6 +108,10 @@ async fn profile_json(
         .store
         .account_username(tenant, account.account_id())
         .await?;
+    let social = state
+        .store
+        .social_identities(tenant, account.account_id())
+        .await?;
     Ok(json!({
         "id": account.account_id().to_typed_string(),
         "email": account.primary_email,
@@ -115,6 +119,10 @@ async fn profile_json(
         "display_name": account.display_name,
         "has_password": has_password,
         "mfa": { "totp": totp, "backup_codes": backup_codes, "passkeys": passkeys },
+        "social": social
+            .iter()
+            .map(|row| json!({ "connector": row.connector, "display_name": row.display_name }))
+            .collect::<Vec<_>>(),
     }))
 }
 
