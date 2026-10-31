@@ -190,6 +190,18 @@ export const messages = {
     trustedRevoke: "Forget",
     trustedRevoking: "Forgetting",
     trustedRevoked: "That browser will be asked for the second factor next time.",
+    dangerTitle: "Delete this account",
+    dangerNote:
+      "This removes the account, its sessions, passkeys, connected providers and trusted browsers. It cannot be undone; we email a confirmation code first.",
+    dangerRequest: "Email me a confirmation code",
+    dangerRequesting: "Sending the code",
+    dangerCodeLabel: "Six-digit code",
+    dangerCodeSent: "A code is on its way. Enter it to finish deleting the account.",
+    dangerConfirm: "Permanently delete this account",
+    dangerConfirming: "Deleting the account",
+    dangerDeleted: "Your account was deleted.",
+    dangerDeletedNote: "The account and everything connected to it are gone. You can close this page.",
+    dangerBackHome: "Go to sign in",
   },
   emailCode: {
     title: "Sign in with an email code",

@@ -89,6 +89,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "trusted browsers that skip the second factor (M1)",
         include_str!("../migrations/tenant_10.sql"),
     ),
+    (
+        11,
+        "self-service account deletion codes (M1)",
+        include_str!("../migrations/tenant_11.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

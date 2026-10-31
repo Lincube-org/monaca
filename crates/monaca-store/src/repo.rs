@@ -1022,6 +1022,76 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Delete an account and everything that depends on it (§6.1).
+    ///
+    /// Order matters: the account is disabled and its tokens revoked first, so a failure partway
+    /// through leaves it unable to sign in rather than half-deleted but still usable. Each org then
+    /// drops the grants the account delegated, the agents it owned (their keys, grants and
+    /// delegations cascade) and its membership; the last step deletes the tenant row, which cascades
+    /// the identifiers, credentials, backup codes, social identities, trusted devices and tokens.
+    /// Audit rows are never removed: the chains are history, not account data.
+    pub async fn delete_account(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        {
+            let mut tx = pool.begin().await?;
+            let found = sqlx::query(
+                "UPDATE tenant.accounts SET state = 'disabled', updated_at = now()
+                 WHERE id = $1
+                 RETURNING id",
+            )
+            .bind(account_id.uuid())
+            .fetch_optional(&mut *tx)
+            .await?;
+            if found.is_none() {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            sqlx::query(
+                "UPDATE tenant.sessions SET revoked_at = now()
+                 WHERE account_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(account_id.uuid())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE tenant.refresh_tokens SET revoked_at = now()
+                 WHERE account_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(account_id.uuid())
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+
+        for org in self.orgs(tenant).await? {
+            let org_ctx = org.ctx(tenant);
+            let mut tx = self.begin_org(&org_ctx).await?;
+            sqlx::query("DELETE FROM grants WHERE account_id = $1")
+                .bind(account_id.uuid())
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM agents WHERE owner_account_id = $1")
+                .bind(account_id.uuid())
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM members WHERE account_id = $1")
+                .bind(account_id.uuid())
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
+        sqlx::query("DELETE FROM tenant.accounts WHERE id = $1")
+            .bind(account_id.uuid())
+            .execute(&pool)
+            .await?;
+        Ok(true)
+    }
+
     /// Replace the account's password with a new argon2id PHC string.
     ///
     /// One password row per account is the invariant the sign-in path relies on, so the old row is

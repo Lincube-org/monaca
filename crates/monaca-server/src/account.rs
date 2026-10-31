@@ -11,13 +11,14 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
     BACKUP_CODE_COUNT, format_backup_code, generate_backup_codes, generate_challenge,
     generate_totp_secret, hash_password, hash_secret, seal, totp_base32, totp_otpauth_url,
     verify_password, verify_registration, verify_totp,
 };
 use monaca_store::{AccountRow, PasskeyRow, SessionRow, TenantRow, TrustedDeviceRow};
-use monaca_types::{AccountId, PasskeyId, SessionId, TrustedDeviceId, TypedId};
+use monaca_types::{AccountId, EventId, PasskeyId, SessionId, TrustedDeviceId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::Duration;
@@ -288,6 +289,91 @@ pub async fn verify_email_change(
         .update_primary_email(&tenant, account.account_id(), &email)
         .await?;
     Ok(Json(profile_json(&state, &tenant, &account).await?))
+}
+
+/// The body of `POST /t/{tenant}/account/deletion/confirm`.
+#[derive(Debug, Deserialize)]
+pub struct ConfirmDeletionBody {
+    /// The six-digit code mailed by the request step.
+    pub code: String,
+}
+
+/// `POST /t/{tenant}/account/deletion` — mail a code before the account is deleted.
+///
+/// Deletion is irreversible, so the address on file must prove it can receive mail first; the code
+/// purpose is `delete_account`, which keeps it separate from sign-in and reset codes.
+pub async fn request_deletion(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    crate::protocol::request_verification(
+        &state,
+        &tenant,
+        crate::protocol::PURPOSE_DELETE_ACCOUNT,
+        &account.primary_email,
+    )
+    .await
+}
+
+/// `POST /t/{tenant}/account/deletion/confirm` — delete the account and clear its cookies.
+///
+/// The account row, its credentials, identifiers, tokens, social links and trusted devices all go;
+/// the audit chains keep the `account.deleted` event, because history is not account data.
+pub async fn confirm_deletion(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ConfirmDeletionBody>,
+) -> Result<Response, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    crate::protocol::take_verification_code(
+        &state,
+        &tenant,
+        crate::protocol::PURPOSE_DELETE_ACCOUNT,
+        &account.primary_email,
+        &body.code,
+    )
+    .await?;
+    if !state
+        .store
+        .delete_account(&tenant, account.account_id())
+        .await?
+    {
+        return Err(ApiError::not_found("account"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "account.deleted".into(),
+        actor_chain: vec![AuditActor::account(account.account_id())],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account.account_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "email": account.primary_email }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append account.deleted audit event");
+    }
+
+    let secure = session::secure_origin(&state.config);
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    for cookie in [
+        session::clear_cookie(secure),
+        session::clear_device_cookie(secure, &tenant.slug),
+    ] {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie).map_err(ApiError::internal)?,
+        );
+    }
+    Ok(response)
 }
 
 /// The body of `POST /t/{tenant}/account/password`.

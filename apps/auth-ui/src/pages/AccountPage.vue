@@ -9,6 +9,7 @@ import {
   beginPasskeyRegistration,
   beginTotp,
   changePassword,
+  confirmAccountDeletion,
   deletePasskey,
   disableBackupCodes,
   disableTotp,
@@ -19,6 +20,7 @@ import {
   listTrustedDevices,
   registerPasskey,
   renamePasskey,
+  requestAccountDeletion,
   requestEmailChange,
   revokeOtherSessions,
   revokeSession,
@@ -87,6 +89,14 @@ const trustedDevices = ref<TrustedDevice[] | null>(null);
 const devicesBusyId = ref<string | null>(null);
 const devicesError = ref<string | null>(null);
 const devicesNotice = ref<MessageKey | null>(null);
+
+/** Irreversible deletion: a mailed code proves the address, then the account is gone. */
+const deletionStep = ref<"idle" | "sent">("idle");
+const deletionCode = ref("");
+const deletionBusy = ref<"request" | "confirm" | null>(null);
+const deletionFieldError = ref<MessageKey | null>(null);
+const deletionSubmitError = ref<string | null>(null);
+const accountDeleted = ref(false);
 
 const currentPassword = ref("");
 const newPassword = ref("");
@@ -245,6 +255,47 @@ async function disconnectSocial(connector: string): Promise<void> {
     socialError.value = messageOf(error);
   } finally {
     socialBusy.value = null;
+  }
+}
+
+/** After deletion the page has no account to show; offer the way back to sign-in. */
+function goHome(): void {
+  window.location.assign("/");
+}
+
+/** Ask for the deletion code; the account stays intact until it is confirmed. */
+async function requestDeletion(): Promise<void> {
+  deletionFieldError.value = null;
+  deletionSubmitError.value = null;
+  deletionBusy.value = "request";
+  try {
+    await requestAccountDeletion(tenant.value);
+    deletionStep.value = "sent";
+    deletionCode.value = "";
+  } catch (error) {
+    deletionSubmitError.value = messageOf(error);
+  } finally {
+    deletionBusy.value = null;
+  }
+}
+
+async function confirmDeletion(): Promise<void> {
+  deletionFieldError.value = null;
+  deletionSubmitError.value = null;
+  if (!/^[0-9]{6}$/.test(deletionCode.value.trim())) {
+    deletionFieldError.value = "errors.codeRequired";
+    return;
+  }
+  deletionBusy.value = "confirm";
+  try {
+    await confirmAccountDeletion(tenant.value, deletionCode.value.trim());
+    accountDeleted.value = true;
+    account.value = null;
+  } catch (error) {
+    deletionSubmitError.value = messageOf(error);
+    deletionCode.value = "";
+  } finally {
+    deletionBusy.value = null;
   }
 }
 
@@ -661,6 +712,16 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
           <Skeleton class="h-4 w-56" />
           <Skeleton class="mt-2 h-8 w-full" />
           <p class="text-center text-[12px] text-ink-faint">{{ t("loading.hint") }}</p>
+        </div>
+
+        <div v-else-if="accountDeleted" class="flex flex-col gap-3">
+          <h1 class="text-[17px] font-semibold leading-snug tracking-[-0.01em] text-ink">
+            {{ t("account.dangerDeleted") }}
+          </h1>
+          <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.dangerDeletedNote") }}</p>
+          <Button type="button" variant="primary" block @click="goHome">
+            {{ t("account.dangerBackHome") }}
+          </Button>
         </div>
 
         <div v-else-if="loadError" class="flex flex-col gap-3">
@@ -1356,6 +1417,59 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
             <p v-if="sessionsNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
               {{ t(sessionsNotice) }}
             </p>
+          </div>
+
+          <!-- Danger zone: irreversible, so the address on file has to receive a code first. -->
+          <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <h2 class="text-[13px] font-semibold text-deny">{{ t("account.dangerTitle") }}</h2>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.dangerNote") }}</p>
+            <div v-if="deletionStep === 'sent'" class="flex flex-col gap-1.5">
+              <Label for="account-deletion-code">{{ t("account.dangerCodeLabel") }}</Label>
+              <Input
+                id="account-deletion-code"
+                v-model="deletionCode"
+                type="text"
+                name="code"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                :placeholder="t('account.emailCodePlaceholder')"
+                :invalid="deletionFieldError === 'errors.codeRequired'"
+              />
+              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t("account.dangerCodeSent") }}</p>
+            </div>
+            <p
+              v-if="deletionFieldError || deletionSubmitError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ deletionFieldError ? t(deletionFieldError) : deletionSubmitError }}
+            </p>
+            <Button
+              v-if="deletionStep === 'sent'"
+              type="button"
+              variant="secondary"
+              block
+              :disabled="deletionBusy !== null"
+              :aria-busy="deletionBusy === 'confirm'"
+              @click="confirmDeletion"
+            >
+              <Loader2 v-if="deletionBusy === 'confirm'" class="animate-spin" />
+              {{ deletionBusy === "confirm" ? t("account.dangerConfirming") : t("account.dangerConfirm") }}
+            </Button>
+            <Button
+              v-else
+              type="button"
+              variant="ghost"
+              block
+              :disabled="deletionBusy !== null"
+              :aria-busy="deletionBusy === 'request'"
+              @click="requestDeletion"
+            >
+              <Loader2 v-if="deletionBusy === 'request'" class="animate-spin" />
+              {{ deletionBusy === "request" ? t("account.dangerRequesting") : t("account.dangerRequest") }}
+            </Button>
           </div>
         </div>
       </div>

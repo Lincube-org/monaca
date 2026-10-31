@@ -179,6 +179,14 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             post(crate::account::verify_email_change),
         )
         .route(
+            "/t/{tenant}/account/deletion",
+            post(crate::account::request_deletion),
+        )
+        .route(
+            "/t/{tenant}/account/deletion/confirm",
+            post(crate::account::confirm_deletion),
+        )
+        .route(
             "/t/{tenant}/account/password",
             post(crate::account::change_password),
         )

@@ -270,3 +270,20 @@ export function unlinkSocial(tenant: string, connector: string): Promise<void> {
     method: "DELETE",
   });
 }
+
+/** Ask for a deletion code; nothing is removed until the code is confirmed. */
+export function requestAccountDeletion(
+  tenant: string,
+): Promise<{ verification_required: true; expires_in: number }> {
+  return call<{ verification_required: true; expires_in: number }>(`${base(tenant)}/deletion`, {
+    method: "POST",
+  });
+}
+
+/** Confirm the code and delete the account; the server also clears this browser's cookies. */
+export function confirmAccountDeletion(tenant: string, code: string): Promise<void> {
+  return call<void>(`${base(tenant)}/deletion/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}

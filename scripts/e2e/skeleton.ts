@@ -172,6 +172,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "DELETE /account/mfa/devices/{device} is 204 and clears the caller's cookie; a sign-in with the " +
       "revoked cookie asks again and the list and profile count zero",
   },
+  {
+    step: "17",
+    title: "account deletion",
+    assertion:
+      "An account owning an agent and a membership in acme requests deletion with its session cookie; " +
+      "dev mail carries a delete_account code; a wrong code is 401; the right code is 204 and clears " +
+      "monaca_session; the old session is 401, the old email no longer signs in, GET /v1/accounts/{id} " +
+      "is 404, and the membership and the agent the account owned are gone",
+  },
 ];
 
 interface StepResult {
@@ -3222,6 +3231,189 @@ async function trustedDeviceFlow(
   };
 }
 
+/**
+ * Step 17 — self-service account deletion (§6.1).
+ *
+ * Deletion is irreversible, so the account first proves its address with a `delete_account` code.
+ * The confirm step removes the tenant row, its tokens and its org resources (membership, grants,
+ * agents), clears both cookies, and leaves the audit chains intact.
+ */
+async function accountDeletionFlow(
+  base: string,
+  adminToken: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const email = `deletion-${runId}@demo.localhost`;
+  const password = `pw-${runId}-deletion`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "17",
+    title: "account deletion",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `d-${tag}-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Delete me", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    const agentName = `deletion-agent-${runId}`;
+    const agent = await call(`${base}/v1/orgs/${ORG}/agents`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: agentName, description: "", owner_account_id: accountId }),
+    });
+    checks.push([
+      "the account joined acme and owns an agent",
+      member.status === 201 && agent.status === 201,
+    ]);
+
+    const first = await signIn("first");
+    if (first?.cookie === undefined) return fail("the sign-in set no session cookie");
+    const cookie = { cookie: `monaca_session=${first.cookie}` };
+
+    // --- request a code; nothing is deleted yet -------------------------------------------------
+    const requested = await call(`${base}/t/${TENANT}/account/deletion`, {
+      method: "POST",
+      headers: cookie,
+    });
+    checks.push([
+      "POST /account/deletion requests a delete_account code",
+      requested.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    const mail = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "delete_account" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const code = (mail.body as { payload?: { code?: unknown } })?.payload?.code;
+    checks.push([
+      "dev mail delivered a delete_account code",
+      typeof code === "string" && /^\d{6}$/.test(code),
+    ]);
+
+    const wrong = await call(`${base}/t/${TENANT}/account/deletion/confirm`, {
+      method: "POST",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ code: code === "000000" ? "111111" : "000000" }),
+    });
+    checks.push(["a wrong code is 401", wrong.status === 401]);
+
+    // --- the code deletes the account and clears both cookies ------------------------------------
+    const confirmed = await call(`${base}/t/${TENANT}/account/deletion/confirm`, {
+      method: "POST",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ code: code ?? "" }),
+    });
+    checks.push([
+      "the right code deletes the account and clears the cookie",
+      confirmed.status === 204 &&
+        (confirmed.headers.get("set-cookie") ?? "").includes("monaca_session="),
+    ]);
+
+    const oldSession = await call(`${base}/t/${TENANT}/account`, { headers: cookie });
+    checks.push(["the old session is no longer accepted", oldSession.status === 401]);
+
+    const oldEmail = await signIn("old");
+    checks.push(["the old email no longer signs in", oldEmail?.status === 401]);
+
+    const fetched = await call(`${base}/v1/accounts/${accountId}`, { headers });
+    checks.push(["GET /v1/accounts/{id} is 404", fetched.status === 404]);
+
+    const members = (await call(`${base}/v1/orgs/${ORG}/members`, { headers })).body as {
+      items?: { account_id?: unknown }[];
+    };
+    checks.push([
+      "the org membership is gone",
+      (members.items ?? []).every((row) => row.account_id !== accountId),
+    ]);
+
+    const agents = (await call(`${base}/v1/orgs/${ORG}/agents`, { headers })).body as {
+      items?: { name?: unknown }[];
+    };
+    checks.push([
+      "the agent the account owned is gone",
+      (agents.items ?? []).every((row) => row.name !== agentName),
+    ]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "17",
+    title: "account deletion",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: request → code → wrong 401 → confirm → session gone → sign-in gone → account/gone → membership/agent gone`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -3467,6 +3659,7 @@ async function main(): Promise<number> {
   push(await emailChangeFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await socialFlow(base, adminToken, parsed.consoleSecret));
   push(await trustedDeviceFlow(base, adminToken, parsed.consoleSecret));
+  push(await accountDeletionFlow(base, adminToken, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

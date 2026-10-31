@@ -596,6 +596,8 @@ const PURPOSE_SIGN_IN: &str = "sign_in";
 const PURPOSE_PASSWORD_RESET: &str = "password_reset";
 /// A code mailed to a new address from the account centre (§6.1).
 pub(crate) const PURPOSE_EMAIL_CHANGE: &str = "email_change";
+/// A code mailed before the account centre deletes the account (§6.1).
+pub(crate) const PURPOSE_DELETE_ACCOUNT: &str = "delete_account";
 
 /// The body of every code-request endpoint.
 #[derive(Debug, Deserialize)]
