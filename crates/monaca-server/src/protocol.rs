@@ -415,8 +415,53 @@ pub async fn sign_in(
     finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
 
-/// The tail every sign-in path shares: second factor, membership check, SSO session, consent pause
-/// or code mint.
+/// Scopes every authenticated app may request without an RBAC role.
+///
+/// `monaca:admin` is governed by the account's tenant-admin flag rather than a role, so it is
+/// exempt here too; every other client-registered scope must be granted by a role (§6.2).
+const UNGOVERNED_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "monaca:admin",
+];
+
+/// Refuse a sign-in whose requested scopes exceed what the account's roles grant.
+async fn check_scope_grants(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    account: &AccountRow,
+    scopes: &[String],
+) -> Result<(), ApiError> {
+    if scopes
+        .iter()
+        .all(|scope| UNGOVERNED_SCOPES.iter().any(|allowed| *allowed == scope))
+    {
+        return Ok(());
+    }
+    let roles = state
+        .store
+        .account_roles(tenant, account.account_id())
+        .await?;
+    if let Some(scope) = scopes.iter().find(|scope| {
+        !UNGOVERNED_SCOPES.iter().any(|allowed| allowed == *scope)
+            && !roles.iter().any(|role| {
+                role.permissions
+                    .iter()
+                    .any(|permission| permission == *scope)
+            })
+    }) {
+        return Err(ApiError::problem(
+            kinds::INSUFFICIENT_SCOPE,
+            format!("the account's roles do not grant `{scope}`"),
+        ));
+    }
+    Ok(())
+}
+
+/// The tail every sign-in path shares: scope grants, second factor, membership check, SSO session,
+/// consent pause or code mint.
 ///
 /// Every primary proof — password, emailed code, a new account, a password reset — lands here, so
 /// all four agree on cookies, consent and MFA. An account with an authenticator app is stopped
@@ -430,6 +475,7 @@ pub(crate) async fn finish_sign_in(
     headers: &HeaderMap,
     account: AccountRow,
 ) -> Result<Response, ApiError> {
+    check_scope_grants(&state, &tenant, &account, &interaction.scopes).await?;
     if state
         .store
         .totp_secret(&tenant, account.account_id())

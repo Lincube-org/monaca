@@ -85,6 +85,9 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
                 "email".into(),
                 "offline_access".into(),
                 "monaca:admin".into(),
+                // An API scope the user's roles must grant; requesting it without one is refused
+                // (§6.1 scope grants).
+                "tools:read".into(),
             ],
             &[
                 "http://localhost:5173/bff/callback".into(),

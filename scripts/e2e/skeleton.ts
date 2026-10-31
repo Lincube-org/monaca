@@ -199,6 +199,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "assigning an unknown role is 404; unassigning is 204 and the next id_token has no roles claim; " +
       "DELETE /v1/roles is 204 and a missing one is 404",
   },
+  {
+    step: "20",
+    title: "scope grants",
+    assertion:
+      "an account without a role requesting `openid tools:read` is refused at sign-in with " +
+      "403 MONACA_INSUFFICIENT_SCOPE; after a role granting tools:read is assigned the same sign-in " +
+      "completes and the access token carries tools:read; deleting the role is 204",
+  },
 ];
 
 interface StepResult {
@@ -3780,6 +3788,156 @@ async function roleFlow(
   };
 }
 
+/**
+ * Step 20 — role permissions govern API scopes (§6.1 scope grants).
+ *
+ * `monaca-console` may request `tools:read`, but only an account whose roles grant it can sign in
+ * for that scope: without a role the sign-in is `403 MONACA_INSUFFICIENT_SCOPE`, and with the role
+ * the access token carries `tools:read`.
+ */
+async function scopeGrantFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const email = `scope-${runId}@demo.localhost`;
+  const password = `pw-${runId}-scope`;
+  const roleName = `scope-role-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "20",
+    title: "scope grants",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction asking for `tools:read` as well. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `g-${tag}-${runId}-${"s".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid tools:read",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Scope holder", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    // --- without a role the sign-in is refused before anything is minted -------------------------
+    const deniedFlow = await begin("denied");
+    if (deniedFlow === undefined) return fail("");
+    const denied = await call(`${base}/t/${TENANT}/interaction/${deniedFlow.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    checks.push([
+      "a scope no role grants is 403 MONACA_INSUFFICIENT_SCOPE",
+      denied.status === 403 &&
+        (denied.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_INSUFFICIENT_SCOPE",
+    ]);
+
+    // --- a role with the permission lets the same request through --------------------------------
+    const role = await call(`${base}/v1/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, permissions: ["tools:read"] }),
+    });
+    const roleId = (role.body as { id?: string })?.id;
+    const assigned = await call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "POST",
+      headers,
+    });
+    checks.push([
+      "a role granting tools:read is assignable",
+      role.status === 201 && assigned.status === 204,
+    ]);
+
+    const allowedFlow = await begin("allowed");
+    if (allowedFlow === undefined) return fail("");
+    const allowed = await call(`${base}/t/${TENANT}/interaction/${allowedFlow.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const redirectTo = (allowed.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "the same sign-in now completes",
+      allowed.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (typeof redirectTo !== "string") return fail("the granted sign-in returned no redirect_to");
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: allowedFlow.verifier },
+      basic,
+    );
+    const scope = jwtClaims((token.body as { access_token?: unknown })?.access_token)?.scope;
+    checks.push([
+      "the access token carries tools:read",
+      token.status === 200 && Array.isArray(scope) && (scope as string[]).includes("tools:read"),
+    ]);
+
+    const removed = await call(`${base}/v1/roles/${roleId}`, { method: "DELETE", headers });
+    checks.push(["the role is removable", removed.status === 204]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "20",
+    title: "scope grants",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: denied 403 → grant role → sign-in → token scope → delete role`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -4028,6 +4186,7 @@ async function main(): Promise<number> {
   push(await accountDeletionFlow(base, adminToken, parsed.internalSecret));
   push(await signInLinkFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await roleFlow(base, adminToken, parsed.consoleSecret));
+  push(await scopeGrantFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
