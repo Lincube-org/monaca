@@ -185,6 +185,32 @@ export function updateProfile(
   });
 }
 
+/**
+ * Ask the server to mail a code to the new address; the account stays on its old email until the
+ * code is confirmed. An address another account holds is a `409`.
+ */
+export function requestEmailChange(
+  tenant: string,
+  email: string,
+): Promise<{ verification_required: true; expires_in: number }> {
+  return call<{ verification_required: true; expires_in: number }>(`${base(tenant)}/email`, {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Confirm the code and move the account onto the new address. */
+export function verifyEmailChange(
+  tenant: string,
+  email: string,
+  code: string,
+): Promise<AccountProfile> {
+  return call<AccountProfile>(`${base(tenant)}/email/verify`, {
+    method: "POST",
+    body: JSON.stringify({ email, code }),
+  });
+}
+
 /** Replace the password; a wrong current password is a `401`. */
 export function changePassword(
   tenant: string,

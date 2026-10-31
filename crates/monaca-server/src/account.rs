@@ -195,6 +195,82 @@ pub async fn update_account(
     Ok(Json(profile_json(&state, &tenant, &account).await?))
 }
 
+/// The body of `POST /t/{tenant}/account/email`.
+#[derive(Debug, Deserialize)]
+pub struct ChangeEmailBody {
+    /// The address the account wants to move to.
+    pub email: String,
+}
+
+/// The body of `POST /t/{tenant}/account/email/verify`.
+#[derive(Debug, Deserialize)]
+pub struct VerifyEmailBody {
+    /// The address the code was mailed to.
+    pub email: String,
+    /// The six-digit code from the mail.
+    pub code: String,
+}
+
+/// `POST /t/{tenant}/account/email` — mail a code to the address the account wants to move to.
+///
+/// The code is keyed by the *new* address, not by the account, so two accounts racing for the same
+/// address cannot redeem each other's mail. An address another account already holds is refused
+/// before anything is sent, and the account's own address is a no-op the caller should not make.
+pub async fn request_email_change(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ChangeEmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let email = crate::protocol::normalise_email(&body.email)?;
+    if account.primary_email.eq_ignore_ascii_case(&email) {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "that is already the account's email",
+        ));
+    }
+    if let Some((other, _)) = state.store.account_by_email(&tenant, &email).await?
+        && other.account_id() != account.account_id()
+    {
+        return Err(ApiError::problem(
+            kinds::EMAIL_TAKEN,
+            "email is already taken",
+        ));
+    }
+    crate::protocol::request_verification(
+        &state,
+        &tenant,
+        crate::protocol::PURPOSE_EMAIL_CHANGE,
+        &email,
+    )
+    .await
+}
+
+/// `POST /t/{tenant}/account/email/verify` — redeem the code and move the account to the address.
+pub async fn verify_email_change(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<VerifyEmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let email = crate::protocol::normalise_email(&body.email)?;
+    crate::protocol::take_verification_code(
+        &state,
+        &tenant,
+        crate::protocol::PURPOSE_EMAIL_CHANGE,
+        &email,
+        &body.code,
+    )
+    .await?;
+    let account = state
+        .store
+        .update_primary_email(&tenant, account.account_id(), &email)
+        .await?;
+    Ok(Json(profile_json(&state, &tenant, &account).await?))
+}
+
 /// The body of `POST /t/{tenant}/account/password`.
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordBody {

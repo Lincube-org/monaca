@@ -159,6 +159,14 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             get(crate::account::get_account).patch(crate::account::update_account),
         )
         .route(
+            "/t/{tenant}/account/email",
+            post(crate::account::request_email_change),
+        )
+        .route(
+            "/t/{tenant}/account/email/verify",
+            post(crate::account::verify_email_change),
+        )
+        .route(
             "/t/{tenant}/account/password",
             post(crate::account::change_password),
         )

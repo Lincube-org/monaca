@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, Skeleton } from "@monaca/ui";
-import { AlertCircle, KeyRound, Loader2, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
+import { AlertCircle, KeyRound, Loader2, Mail, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
@@ -18,9 +18,11 @@ import {
   listSessions,
   registerPasskey,
   renamePasskey,
+  requestEmailChange,
   revokeOtherSessions,
   revokeSession,
   updateProfile,
+  verifyEmailChange,
   verifyTotp,
   type AccountPasskey,
   type AccountProfile,
@@ -52,6 +54,18 @@ const profileBusy = ref(false);
 const profileError = ref<MessageKey | null>(null);
 const profileSubmitError = ref<string | null>(null);
 const profileNotice = ref<MessageKey | null>(null);
+
+/**
+ * Email change: the pending address and the code mailed to it. The account keeps its old email
+ * until the code is confirmed, so `emailPending` is what switches the card to the confirm step.
+ */
+const newEmail = ref("");
+const emailCode = ref("");
+const emailPending = ref(false);
+const emailBusy = ref<"send" | "verify" | null>(null);
+const emailFieldError = ref<MessageKey | null>(null);
+const emailSubmitError = ref<string | null>(null);
+const emailNotice = ref<MessageKey | null>(null);
 
 const currentPassword = ref("");
 const newPassword = ref("");
@@ -197,6 +211,82 @@ async function saveProfile(): Promise<void> {
   } finally {
     profileBusy.value = false;
   }
+}
+
+async function sendEmailCode(): Promise<void> {
+  emailFieldError.value = null;
+  emailSubmitError.value = null;
+  emailNotice.value = null;
+
+  const address = newEmail.value.trim();
+  if (address === "") {
+    emailFieldError.value = "errors.emailRequired";
+    return;
+  }
+  // A plain shape check; the server validates the address again before mailing anything.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) {
+    emailFieldError.value = "errors.emailInvalid";
+    return;
+  }
+  if (address.toLowerCase() === (account.value?.email ?? "").toLowerCase()) {
+    emailSubmitError.value = t("account.emailSame");
+    return;
+  }
+
+  emailBusy.value = "send";
+  try {
+    await requestEmailChange(tenant.value, address);
+    emailPending.value = true;
+    emailCode.value = "";
+    emailNotice.value = "account.emailCodeSent";
+  } catch (error) {
+    // 409 is another account holding the address; everything else carries the server's detail.
+    emailSubmitError.value =
+      error instanceof AccountError && error.status === 409
+        ? t("account.emailTaken")
+        : messageOf(error);
+  } finally {
+    emailBusy.value = null;
+  }
+}
+
+async function confirmEmail(): Promise<void> {
+  emailFieldError.value = null;
+  emailSubmitError.value = null;
+  emailNotice.value = null;
+
+  const address = newEmail.value.trim();
+  if (!/^[0-9]{6}$/.test(emailCode.value.trim())) {
+    emailFieldError.value = "errors.codeRequired";
+    return;
+  }
+
+  emailBusy.value = "verify";
+  try {
+    const profile = await verifyEmailChange(tenant.value, address, emailCode.value.trim());
+    account.value = profile;
+    displayName.value = profile.display_name;
+    username.value = profile.username ?? "";
+    emailPending.value = false;
+    newEmail.value = "";
+    emailCode.value = "";
+    emailNotice.value = "account.emailChanged";
+  } catch (error) {
+    emailSubmitError.value = messageOf(error);
+    emailCode.value = "";
+  } finally {
+    emailBusy.value = null;
+  }
+}
+
+/** Abandon the pending change and let the visitor type another address. */
+function resetEmail(): void {
+  emailPending.value = false;
+  emailCode.value = "";
+  emailFieldError.value = null;
+  emailSubmitError.value = null;
+  emailNotice.value = null;
+  newEmail.value = "";
 }
 
 async function submitPassword(): Promise<void> {
@@ -552,6 +642,91 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
               <Loader2 v-if="profileBusy" class="animate-spin" />
               <User v-else />
               {{ profileBusy ? t("account.savingProfile") : t("account.saveProfile") }}
+            </Button>
+          </div>
+
+          <!-- Email: the address that signs in and receives codes, confirmed before it takes effect. -->
+          <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <div class="flex items-center gap-1.5">
+              <Mail class="size-3.5 text-ink-faint" aria-hidden="true" />
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.emailTitle") }}</h2>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="account-new-email">{{ t("account.emailLabel") }}</Label>
+              <Input
+                id="account-new-email"
+                v-model="newEmail"
+                type="email"
+                name="email"
+                autocomplete="email"
+                autocapitalize="none"
+                spellcheck="false"
+                :placeholder="t('account.emailPlaceholder')"
+                :disabled="emailBusy !== null || emailPending"
+                :invalid="emailFieldError === 'errors.emailRequired' || emailFieldError === 'errors.emailInvalid'"
+              />
+              <span class="text-[11.5px] text-ink-faint">{{ t("account.emailNote") }}</span>
+            </div>
+            <div v-if="emailPending" class="flex flex-col gap-1.5">
+              <Label for="account-email-code">{{ t("account.emailCodeLabel") }}</Label>
+              <Input
+                id="account-email-code"
+                v-model="emailCode"
+                type="text"
+                name="email_code"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                :placeholder="t('account.emailCodePlaceholder')"
+                :invalid="emailFieldError === 'errors.codeRequired'"
+              />
+            </div>
+            <p
+              v-if="emailFieldError || emailSubmitError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ emailFieldError ? t(emailFieldError) : emailSubmitError }}
+            </p>
+            <p v-else-if="emailNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(emailNotice) }}
+            </p>
+            <Button
+              v-if="emailPending"
+              type="button"
+              variant="secondary"
+              block
+              :disabled="emailBusy !== null"
+              :aria-busy="emailBusy === 'verify'"
+              @click="confirmEmail"
+            >
+              <Loader2 v-if="emailBusy === 'verify'" class="animate-spin" />
+              <Mail v-else />
+              {{ emailBusy === "verify" ? t("account.emailVerifying") : t("account.emailVerify") }}
+            </Button>
+            <Button
+              v-else
+              type="button"
+              variant="secondary"
+              block
+              :disabled="emailBusy !== null"
+              :aria-busy="emailBusy === 'send'"
+              @click="sendEmailCode"
+            >
+              <Loader2 v-if="emailBusy === 'send'" class="animate-spin" />
+              <Mail v-else />
+              {{ emailBusy === "send" ? t("account.emailSending") : t("account.emailSend") }}
+            </Button>
+            <Button
+              v-if="emailPending"
+              type="button"
+              variant="ghost"
+              block
+              :disabled="emailBusy !== null"
+              @click="resetEmail"
+            >
+              {{ t("account.emailDifferent") }}
             </Button>
           </div>
 

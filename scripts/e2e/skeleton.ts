@@ -140,6 +140,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "accepts the username case-insensitively and mints a token; an unknown identifier is 401; another account " +
       "claiming the same username (any case) is 409 MONACA_USERNAME_TAKEN; an invalid username is 400",
   },
+  {
+    step: "14",
+    title: "email change",
+    assertion:
+      "POST /t/demo/account/email (session cookie) answers verification_required and dev mail carries an " +
+      "email_change code to the new address; a wrong code is 401; the right code moves the account and " +
+      "GET /account echoes the new address; the old address no longer signs in while the new one mints a " +
+      "token; another account's address is 409 MONACA_EMAIL_TAKEN and the current one is 400",
+  },
 ];
 
 interface StepResult {
@@ -2390,6 +2399,233 @@ async function usernameFlow(base: string, adminToken: string, consoleSecret: str
   };
 }
 
+/**
+ * Step 14 — changing the sign-in email from the account centre (§6.1).
+ *
+ * The signed-in account asks to move to a new address, the code is read back from the dev outbox,
+ * and only a confirmed code moves the account: the old address stops signing in, the new one
+ * starts, a second account holding the address is a 409, and asking for the current one is a 400.
+ */
+async function emailChangeFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const emailOld = `email-change-${runId}@demo.localhost`;
+  const emailNew = `email-changed-${runId}@example.test`;
+  const emailB = `email-change-b-${runId}@demo.localhost`;
+  const password = `pw-${runId}-email-change`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "14",
+    title: "email change",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `m-${tag}-${runId}-${"k".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, together with any session cookie it set. */
+  const signIn = async (
+    tag: string,
+    identifier: string,
+    value: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier, password: value }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  /** The newest dev mail for an address and purpose, or undefined when none arrived. */
+  const mailCode = async (to: string, purpose: string): Promise<string | undefined> => {
+    const query = new URLSearchParams({ tenant: TENANT, to, purpose });
+    const response = await call(`${base}/internal/mail?${query}`, {
+      headers: { "x-monaca-internal-secret": internalSecret },
+    });
+    const code = (response.body as { payload?: { code?: unknown } } | undefined)?.payload?.code;
+    return response.status === 200 && typeof code === "string" ? code : undefined;
+  };
+
+  try {
+    // --- two accounts with passwords, both in acme ----------------------------------------------
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: emailOld, display_name: "Email change A", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts A → ${created.status} ${text(created.body)}`);
+    }
+    const createdB = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: emailB, display_name: "Email change B", password }),
+    });
+    const accountBId = (createdB.body as { id?: string })?.id;
+    if (createdB.status !== 201 || accountBId === undefined) {
+      return fail(`POST /v1/accounts B → ${createdB.status} ${text(createdB.body)}`);
+    }
+    const memberA = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    const memberB = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountBId, role: "member" }),
+    });
+    checks.push([
+      "both accounts joined acme",
+      memberA.status === 201 && memberB.status === 201,
+    ]);
+
+    const first = await signIn("first", emailOld, password);
+    if (first?.cookie === undefined) return fail("the account centre sign-in set no session cookie");
+    const cookieA = { cookie: `monaca_session=${first.cookie}` };
+    const cookieJson = { ...cookieA, "content-type": "application/json" };
+
+    // --- request: the code goes to the new address, keyed by that address ------------------------
+    const requested = await call(`${base}/t/${TENANT}/account/email`, {
+      method: "POST",
+      headers: cookieJson,
+      body: JSON.stringify({ email: emailNew }),
+    });
+    checks.push([
+      "POST /account/email requests a code for the new address",
+      requested.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    const code = await mailCode(emailNew, "email_change");
+    checks.push([
+      "dev mail delivered an email_change code",
+      typeof code === "string" && /^\d{6}$/.test(code),
+    ]);
+
+    // A wrong code is refused and the address stays where it was.
+    const wrong = await call(`${base}/t/${TENANT}/account/email/verify`, {
+      method: "POST",
+      headers: cookieJson,
+      body: JSON.stringify({ email: emailNew, code: code === "000000" ? "111111" : "000000" }),
+    });
+    checks.push(["a wrong code is 401", wrong.status === 401]);
+
+    const confirmed = await call(`${base}/t/${TENANT}/account/email/verify`, {
+      method: "POST",
+      headers: cookieJson,
+      body: JSON.stringify({ email: emailNew, code: code ?? "" }),
+    });
+    checks.push([
+      "the right code moves the account and the profile shows the new address",
+      confirmed.status === 200 && (confirmed.body as { email?: unknown })?.email === emailNew,
+    ]);
+
+    const profile = await call(`${base}/t/${TENANT}/account`, { headers: cookieA });
+    checks.push([
+      "GET /account echoes the new address",
+      profile.status === 200 && (profile.body as { email?: unknown })?.email === emailNew,
+    ]);
+
+    // --- the old address stops signing in, the new one starts -----------------------------------
+    const byOld = await signIn("old", emailOld, password);
+    checks.push(["the old email no longer signs in", byOld?.status === 401]);
+
+    const byNew = await signIn("new", emailNew, password);
+    if (byNew === undefined) return fail("");
+    const newToken = await exchange((byNew.body as { redirect_to?: unknown })?.redirect_to, byNew.verifier);
+    checks.push([
+      "the new email signs in and mints a token",
+      byNew.status === 200 && newToken.status === 200,
+    ]);
+
+    // --- an address another account holds, and the account's own address ------------------------
+    const taken = await call(`${base}/t/${TENANT}/account/email`, {
+      method: "POST",
+      headers: cookieJson,
+      body: JSON.stringify({ email: emailB }),
+    });
+    checks.push([
+      "an address another account holds is 409 MONACA_EMAIL_TAKEN",
+      taken.status === 409 &&
+        (taken.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_EMAIL_TAKEN",
+    ]);
+
+    const same = await call(`${base}/t/${TENANT}/account/email`, {
+      method: "POST",
+      headers: cookieJson,
+      body: JSON.stringify({ email: emailNew }),
+    });
+    checks.push(["the account's own address is 400", same.status === 400]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "14",
+    title: "email change",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: request → code → wrong code 401 → confirm → old email 401 → new email token → conflict 409 → same address 400`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 function typeIdUuid(id: string): string {
   const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
   const suffix = id.slice(id.indexOf("_") + 1);
@@ -2571,6 +2807,7 @@ async function main(): Promise<number> {
   push(await backupCodeFlow(base, adminToken, parsed.consoleSecret));
   push(await passkeyFlow(base, adminToken, parsed.consoleSecret));
   push(await usernameFlow(base, adminToken, parsed.consoleSecret));
+  push(await emailChangeFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

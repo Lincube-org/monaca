@@ -94,6 +94,9 @@ pub mod kinds {
         "Username taken",
         409,
     );
+    /// An email address is already claimed by another account.
+    pub const EMAIL_TAKEN: ProblemKind =
+        ProblemKind::new("email_taken", "MONACA_EMAIL_TAKEN", "Email taken", 409);
     /// The server could not complete a valid request.
     pub const INTERNAL: ProblemKind =
         ProblemKind::new("internal", "MONACA_INTERNAL", "Internal error", 500);
@@ -194,7 +197,11 @@ impl From<monaca_store::StoreError> for ApiError {
                 ApiError::problem(kinds::NOT_FOUND, format!("{entity} `{id}` not found"))
             }
             monaca_store::StoreError::AlreadyExists { entity } => {
-                ApiError::problem(kinds::USERNAME_TAKEN, format!("{entity} is already taken"))
+                let kind = match *entity {
+                    "email" => kinds::EMAIL_TAKEN,
+                    _ => kinds::USERNAME_TAKEN,
+                };
+                ApiError::problem(kind, format!("{entity} is already taken"))
             }
             _ => ApiError::internal(err),
         }

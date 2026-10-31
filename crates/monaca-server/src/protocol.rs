@@ -540,6 +540,8 @@ pub(crate) const MIN_PASSWORD_LEN: usize = 8;
 const PURPOSE_SIGN_UP: &str = "sign_up";
 const PURPOSE_SIGN_IN: &str = "sign_in";
 const PURPOSE_PASSWORD_RESET: &str = "password_reset";
+/// A code mailed to a new address from the account centre (§6.1).
+pub(crate) const PURPOSE_EMAIL_CHANGE: &str = "email_change";
 
 /// The body of every code-request endpoint.
 #[derive(Debug, Deserialize)]
@@ -584,7 +586,7 @@ pub struct PasswordResetBody {
 }
 
 /// Normalise and validate an address the way the code table indexes it.
-fn normalise_email(email: &str) -> Result<String, ApiError> {
+pub(crate) fn normalise_email(email: &str) -> Result<String, ApiError> {
     let normalised = email.trim().to_lowercase();
     if normalised.is_empty() || !normalised.contains('@') {
         return Err(ApiError::problem(
@@ -649,7 +651,7 @@ async fn interaction_and_tenant(
 ///
 /// The answer is identical whether or not an account exists, so a caller cannot enumerate
 /// addresses; sign-in and forgot-password both call this unconditionally.
-async fn request_verification(
+pub(crate) async fn request_verification(
     state: &Arc<AppState>,
     tenant: &TenantRow,
     purpose: &str,
@@ -702,7 +704,7 @@ async fn request_verification(
 ///
 /// Every rejection is the same 401 except the brute-force limit, which is a 429: an attacker
 /// learns nothing about whether a live code existed, only that they have exhausted it.
-async fn take_verification_code(
+pub(crate) async fn take_verification_code(
     state: &Arc<AppState>,
     tenant: &TenantRow,
     purpose: &str,

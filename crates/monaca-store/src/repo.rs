@@ -365,15 +365,16 @@ fn subject_uuid(id: Option<&str>) -> Option<Uuid> {
     monaca_types::decode_suffix(suffix).ok()
 }
 
-/// Map PostgreSQL `unique_violation` (23505) to the "already taken" answer (§6.1 usernames).
+/// Map PostgreSQL `unique_violation` (23505) to the "already taken" answer (§6.1).
 ///
 /// The unique indexes are the authority on uniqueness, so the constraint — not a prior SELECT — is
-/// what decides; this keeps two concurrent claims from both succeeding.
-fn unique_conflict(err: sqlx::Error) -> StoreError {
+/// what decides; this keeps two concurrent claims from both succeeding. `entity` names the value
+/// the caller tried to claim, e.g. `username` or `email`.
+fn unique_conflict(err: sqlx::Error, entity: &'static str) -> StoreError {
     if let sqlx::Error::Database(ref db) = err
         && db.code().as_deref() == Some("23505")
     {
-        return StoreError::AlreadyExists { entity: "username" };
+        return StoreError::AlreadyExists { entity };
     }
     StoreError::Database(err.to_string())
 }
@@ -430,7 +431,7 @@ impl Store {
             .bind(username)
             .execute(&mut *tx)
             .await
-            .map_err(unique_conflict)?;
+            .map_err(|err| unique_conflict(err, "username"))?;
         }
 
         if let Some(phc) = password_phc {
@@ -583,7 +584,7 @@ impl Store {
                     .bind(username)
                     .execute(&mut *tx)
                     .await
-                    .map_err(unique_conflict)?;
+                    .map_err(|err| unique_conflict(err, "username"))?;
             }
             None => {
                 sqlx::query(
@@ -595,12 +596,51 @@ impl Store {
                 .bind(username)
                 .execute(&mut *tx)
                 .await
-                .map_err(unique_conflict)?;
+                .map_err(|err| unique_conflict(err, "username"))?;
             }
         }
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Replace the account's primary email, in `accounts` and in its email identifier (§6.1).
+    ///
+    /// Both writes share one transaction so sign-in never sees the old address after the new one is
+    /// recorded. The case-insensitive unique index is the authority: a race for an address that just
+    /// became free yields `AlreadyExists { entity: "email" }`.
+    pub async fn update_primary_email(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        email: &str,
+    ) -> Result<AccountRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+
+        let account = sqlx::query_as::<_, AccountRow>(
+            "UPDATE tenant.accounts SET primary_email = $2, updated_at = now()
+             WHERE id = $1
+             RETURNING id, primary_email, display_name, state, is_tenant_admin, created_at",
+        )
+        .bind(account_id.uuid())
+        .bind(email)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| unique_conflict(err, "email"))?;
+
+        sqlx::query(
+            "UPDATE tenant.account_identifiers SET value = $2, verified_at = now()
+             WHERE account_id = $1 AND kind = 'email'",
+        )
+        .bind(account_id.uuid())
+        .bind(email)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| unique_conflict(err, "email"))?;
+
+        tx.commit().await?;
+        Ok(account)
     }
 
     /// Replace the account's password with a new argon2id PHC string.
