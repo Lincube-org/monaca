@@ -10,6 +10,7 @@
 mod account;
 mod bootstrap;
 mod cli;
+mod clients;
 mod config;
 mod error;
 mod internal;

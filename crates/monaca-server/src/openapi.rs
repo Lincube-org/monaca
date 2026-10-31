@@ -45,6 +45,10 @@ pub const M0_ACTIONS: &[&str] = &[
     "interaction.sign_in.failed",
     "connector.created",
     "connector.deleted",
+    "client.created",
+    "client.updated",
+    "client.secret_rotated",
+    "client.deleted",
     "account.deleted",
     "role.created",
     "role.deleted",
@@ -182,7 +186,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 20);
+        assert_eq!(M0_ACTIONS.len(), 24);
         for action in [
             "account.created",
             "org.member.added",
@@ -200,6 +204,10 @@ mod tests {
             "interaction.sign_in.failed",
             "connector.created",
             "connector.deleted",
+            "client.created",
+            "client.updated",
+            "client.secret_rotated",
+            "client.deleted",
             "account.deleted",
             "role.created",
             "role.deleted",

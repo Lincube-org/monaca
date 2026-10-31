@@ -302,6 +302,20 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             delete(crate::social::delete_connector),
         )
         .route(
+            "/v1/clients",
+            get(crate::clients::list_clients).post(crate::clients::create_client),
+        )
+        .route(
+            "/v1/clients/{client}",
+            get(crate::clients::get_client)
+                .patch(crate::clients::update_client)
+                .delete(crate::clients::delete_client),
+        )
+        .route(
+            "/v1/clients/{client}/secret",
+            post(crate::clients::rotate_client_secret),
+        )
+        .route(
             "/v1/roles",
             get(crate::management::list_roles).post(crate::management::create_role),
         )

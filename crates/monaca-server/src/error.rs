@@ -100,6 +100,13 @@ pub mod kinds {
     /// A role name is already registered in this tenant.
     pub const ROLE_EXISTS: ProblemKind =
         ProblemKind::new("role_exists", "MONACA_ROLE_EXISTS", "Role exists", 409);
+    /// A protocol client id is already registered in this tenant.
+    pub const CLIENT_EXISTS: ProblemKind = ProblemKind::new(
+        "client_exists",
+        "MONACA_CLIENT_EXISTS",
+        "Client exists",
+        409,
+    );
     /// A connector slug is already registered in this tenant.
     pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
         "connector_exists",
@@ -233,6 +240,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "connector" => kinds::CONNECTOR_EXISTS,
                     "social identity" => kinds::SOCIAL_IDENTITY_TAKEN,
                     "role" => kinds::ROLE_EXISTS,
+                    "client" => kinds::CLIENT_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))

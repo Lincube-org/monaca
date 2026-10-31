@@ -153,6 +153,8 @@ pub struct ClientRow {
     pub scopes: Vec<String>,
     /// A third-party application must show a consent screen.
     pub is_third_party: bool,
+    /// When the application was registered.
+    pub created_at: OffsetDateTime,
 }
 
 /// One signing key row.
@@ -1735,7 +1737,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
             "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                    is_third_party
+                    is_third_party, created_at
              FROM tenant.clients WHERE client_id = $1",
         )
         .bind(client_id)
@@ -1752,7 +1754,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
             "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                    is_third_party
+                    is_third_party, created_at
              FROM tenant.clients WHERE id = $1",
         )
         .bind(id)
@@ -1841,6 +1843,154 @@ impl Store {
 
         tx.commit().await?;
         Ok(id)
+    }
+
+    /// Every client in the tenant, ordered by protocol id.
+    pub async fn clients(&self, tenant: &TenantRow) -> Result<Vec<ClientRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ClientRow>(
+            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
+                    is_third_party, created_at
+             FROM tenant.clients ORDER BY client_id",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Insert a client and its redirect URIs, atomically; a `client_id` another row holds is
+    /// `AlreadyExists { entity: "client" }`.
+    ///
+    /// Unlike [`Store::create_client`] — which upserts so seeding is idempotent — this refuses a
+    /// duplicate, because an administrator naming an application must get an honest conflict.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_client(
+        &self,
+        tenant: &TenantRow,
+        client_id: &str,
+        name: &str,
+        kind: &str,
+        secret_phc: Option<&str>,
+        token_auth_method: &str,
+        scopes: &[String],
+        redirect_uris: &[String],
+        post_logout_redirect_uris: &[String],
+        is_third_party: bool,
+    ) -> Result<ClientRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        let row = sqlx::query_as::<_, ClientRow>(
+            "INSERT INTO tenant.clients
+               (id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
+                post_logout_redirect_uris, is_third_party)
+             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9)
+             RETURNING id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
+                       is_third_party, created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(client_id)
+        .bind(name)
+        .bind(kind)
+        .bind(secret_phc)
+        .bind(token_auth_method)
+        .bind(scopes)
+        .bind(post_logout_redirect_uris)
+        .bind(is_third_party)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| unique_conflict(err, "client"))?;
+
+        for uri in redirect_uris {
+            sqlx::query(
+                "INSERT INTO tenant.redirect_uris (client_id, redirect_uri) VALUES ($1,$2)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(row.id)
+            .bind(uri)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Replace the editable fields of a client; false when the row does not exist.
+    ///
+    /// The protocol id, the kind and the secret are immutable here. A `None` list is left alone;
+    /// a `Some` list replaces the stored set wholesale (including an empty one).
+    pub async fn update_client(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+        name: Option<&str>,
+        scopes: Option<&[String]>,
+        redirect_uris: Option<&[String]>,
+        post_logout_redirect_uris: Option<&[String]>,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE tenant.clients
+             SET name = COALESCE($2, name),
+                 scopes = COALESCE($3, scopes),
+                 post_logout_redirect_uris = COALESCE($4, post_logout_redirect_uris)
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(scopes)
+        .bind(post_logout_redirect_uris)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(false);
+        }
+
+        if let Some(uris) = redirect_uris {
+            sqlx::query("DELETE FROM tenant.redirect_uris WHERE client_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            for uri in uris {
+                sqlx::query(
+                    "INSERT INTO tenant.redirect_uris (client_id, redirect_uri) VALUES ($1,$2)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(id)
+                .bind(uri)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Replace a client's secret hash; false when the row does not exist.
+    pub async fn set_client_secret(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+        secret_phc: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("UPDATE tenant.clients SET secret_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(secret_phc)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete a client; its codes, refresh tokens and redirect URIs cascade.
+    pub async fn delete_client(&self, tenant: &TenantRow, id: Uuid) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.clients WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // ---------------------------------------------------------------- sessions

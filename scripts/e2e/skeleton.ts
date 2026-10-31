@@ -215,6 +215,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "authorize without one reports null, and a hint naming an unknown address is echoed too (the " +
       "endpoint is not an address oracle); signing in with the hinted identifier mints a token",
   },
+  {
+    step: "22",
+    title: "applications",
+    assertion:
+      "POST /v1/clients registers a public client (no secret, PKCE-only) and a confidential one " +
+      "(a secret returned once); a duplicate client_id is 409 MONACA_CLIENT_EXISTS; each signs in " +
+      "through authorize → interaction → code → token; rotating the confidential secret refuses the " +
+      "old one and accepts the new one; PATCH renames it; GET /v1/clients lists both without secrets; " +
+      "DELETE removes one and authorize refuses its client_id",
+  },
 ];
 
 interface StepResult {
@@ -4113,6 +4123,308 @@ async function loginHintFlow(
   };
 }
 
+/**
+ * Step 22 — application management (§6.2).
+ *
+ * Creating a client is what lets an application use this tenant as its IdP. A public client signs
+ * in with PKCE only; a confidential client holds a secret that rotation replaces; a deleted
+ * application can no longer authorize.
+ */
+async function clientFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const email = `app-${runId}@demo.localhost`;
+  const password = `pw-${runId}-app`;
+  const publicClientId = `e2e-public-${runId}`;
+  const confidentialClientId = `e2e-confidential-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "22",
+    title: "applications",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction for `clientId`, asking for openid profile email. */
+  const begin = async (
+    clientId: string,
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `a-${tag}-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid profile email",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${clientId}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on an interaction, returning the authorization code. */
+  const codeFrom = async (started: { interaction: string; verifier: string }): Promise<string | undefined> => {
+    const signIn = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+    if (signIn.status !== 200 || typeof redirectTo !== "string") {
+      detail = `sign-in → ${signIn.status} ${text(signIn.body)}`;
+      return undefined;
+    }
+    return new URL(redirectTo).searchParams.get("code") ?? "";
+  };
+
+  const exchange = (
+    clientId: string,
+    verifier: string,
+    code: string,
+    basic?: string,
+  ): Promise<HttpResult> =>
+    tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: clientId, code_verifier: verifier },
+      basic,
+    );
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "App Owner", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    // --- a public application: no secret, PKCE only ----------------------------------------------
+    const publicCreated = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: publicClientId,
+        name: "E2E Public",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid", "profile", "email"],
+      }),
+    });
+    const publicRowId = (publicCreated.body as { id?: unknown })?.id;
+    const publicBody = publicCreated.body as {
+      client_secret?: unknown;
+      token_auth_method?: unknown;
+      redirect_uris?: unknown;
+    };
+    checks.push([
+      "POST /v1/clients creates a public client without a secret",
+      publicCreated.status === 201 &&
+        typeof publicRowId === "string" &&
+        publicRowId.startsWith("cli_") &&
+        publicBody.client_secret === undefined &&
+        publicBody.token_auth_method === "none" &&
+        JSON.stringify(publicBody.redirect_uris).includes(redirectUri),
+    ]);
+    if (typeof publicRowId !== "string") return fail("the public client carried no id");
+
+    const duplicate = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ client_id: publicClientId, name: "Duplicate", kind: "public" }),
+    });
+    checks.push([
+      "a duplicate client_id is 409 MONACA_CLIENT_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_CLIENT_EXISTS",
+    ]);
+
+    const fetched = await call(`${base}/v1/clients/${publicRowId}`, { headers });
+    checks.push([
+      "GET /v1/clients/{client} echoes the application",
+      fetched.status === 200 && JSON.stringify(fetched.body).includes(publicClientId),
+    ]);
+
+    const publicFlow = await begin(publicClientId, "pub");
+    if (publicFlow === undefined) return fail("");
+    const publicCode = await codeFrom(publicFlow);
+    if (publicCode === undefined) return fail("");
+    const publicToken = await exchange(publicClientId, publicFlow.verifier, publicCode);
+    const publicClaims = jwtClaims((publicToken.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "a public client exchanges the code without a secret",
+      publicToken.status === 200 &&
+        publicClaims?.aud === publicClientId &&
+        publicClaims?.email === email,
+    ]);
+
+    // --- a confidential application: the secret is returned once and rotation replaces it --------
+    const confidentialCreated = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: confidentialClientId,
+        name: "E2E Confidential",
+        kind: "confidential",
+        redirect_uris: [redirectUri],
+        post_logout_redirect_uris: [redirectUri],
+        scopes: ["openid", "profile", "email"],
+      }),
+    });
+    const confidentialRowId = (confidentialCreated.body as { id?: unknown })?.id;
+    const confidentialSecret = (confidentialCreated.body as { client_secret?: unknown })?.client_secret;
+    checks.push([
+      "a confidential client is issued a secret once",
+      confidentialCreated.status === 201 &&
+        typeof confidentialRowId === "string" &&
+        typeof confidentialSecret === "string" &&
+        confidentialSecret.length > 0 &&
+        (confidentialCreated.body as { token_auth_method?: unknown }).token_auth_method === "client_secret_basic",
+    ]);
+    if (typeof confidentialRowId !== "string" || typeof confidentialSecret !== "string") {
+      return fail("the confidential client carried no secret");
+    }
+
+    const confidentialFetch = await call(`${base}/v1/clients/${confidentialRowId}`, { headers });
+    checks.push([
+      "the secret is never returned again",
+      confidentialFetch.status === 200 &&
+        JSON.stringify(confidentialFetch.body).includes("post_logout_redirect_uris") &&
+        !JSON.stringify(confidentialFetch.body).includes(confidentialSecret),
+    ]);
+
+    const confidentialFlow = await begin(confidentialClientId, "conf");
+    if (confidentialFlow === undefined) return fail("");
+    const confidentialCode = await codeFrom(confidentialFlow);
+    if (confidentialCode === undefined) return fail("");
+    const confidentialToken = await exchange(
+      confidentialClientId,
+      confidentialFlow.verifier,
+      confidentialCode,
+      btoa(`${confidentialClientId}:${confidentialSecret}`),
+    );
+    checks.push([
+      "a confidential client exchanges the code with client_secret_basic",
+      confidentialToken.status === 200,
+    ]);
+
+    const rotated = await call(`${base}/v1/clients/${confidentialRowId}/secret`, {
+      method: "POST",
+      headers,
+    });
+    const rotatedSecret = (rotated.body as { client_secret?: unknown })?.client_secret;
+    checks.push([
+      "rotating the secret returns a new one",
+      rotated.status === 200 && typeof rotatedSecret === "string" && rotatedSecret !== confidentialSecret,
+    ]);
+    if (typeof rotatedSecret !== "string") return fail("the rotation returned no secret");
+
+    // Client authentication happens before the code is consumed, so the same code can be retried
+    // once the stale secret is refused.
+    const staleFlow = await begin(confidentialClientId, "stale");
+    if (staleFlow === undefined) return fail("");
+    const staleCode = await codeFrom(staleFlow);
+    if (staleCode === undefined) return fail("");
+    const staleToken = await exchange(
+      confidentialClientId,
+      staleFlow.verifier,
+      staleCode,
+      btoa(`${confidentialClientId}:${confidentialSecret}`),
+    );
+    checks.push([
+      "the previous secret is refused",
+      staleToken.status === 401 && (staleToken.body as { error?: unknown })?.error === "invalid_client",
+    ]);
+
+    const freshToken = await exchange(
+      confidentialClientId,
+      staleFlow.verifier,
+      staleCode,
+      btoa(`${confidentialClientId}:${rotatedSecret}`),
+    );
+    checks.push(["the new secret exchanges the same code", freshToken.status === 200]);
+
+    const renamed = await call(`${base}/v1/clients/${confidentialRowId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ name: "Renamed App" }),
+    });
+    checks.push([
+      "PATCH renames the application",
+      renamed.status === 200 && (renamed.body as { name?: unknown })?.name === "Renamed App",
+    ]);
+
+    const listed = await call(`${base}/v1/clients`, { headers });
+    const listedText = JSON.stringify(listed.body);
+    checks.push([
+      "GET /v1/clients lists both without secrets",
+      listed.status === 200 &&
+        listedText.includes(publicClientId) &&
+        listedText.includes(confidentialClientId) &&
+        !listedText.includes(rotatedSecret),
+    ]);
+
+    // --- deleting an application ends its ability to ask for codes -------------------------------
+    const removed = await call(`${base}/v1/clients/${publicRowId}`, { method: "DELETE", headers });
+    const afterDelete = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: publicClientId,
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-gone-${runId}`,
+        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge_method: "S256",
+      })}`,
+      { redirect: "manual" },
+    );
+    checks.push([
+      "DELETE removes the application and authorize refuses it",
+      removed.status === 204 && afterDelete.status === 400 && afterDelete.headers.get("location") === null,
+    ]);
+
+    const missing = await call(`${base}/v1/clients/${publicRowId}`, { method: "DELETE", headers });
+    checks.push(["deleting a missing application is 404", missing.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "22",
+    title: "applications",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: public → duplicate 409 → token → confidential secret → rotate → old refused → patch → list → delete → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -4363,6 +4675,7 @@ async function main(): Promise<number> {
   push(await roleFlow(base, adminToken, parsed.consoleSecret));
   push(await scopeGrantFlow(base, adminToken, parsed.consoleSecret));
   push(await loginHintFlow(base, adminToken, parsed.consoleSecret));
+  push(await clientFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
