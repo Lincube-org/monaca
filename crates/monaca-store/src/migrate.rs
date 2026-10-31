@@ -84,6 +84,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "social (OAuth2) connectors and linked identities (M1)",
         include_str!("../migrations/tenant_9.sql"),
     ),
+    (
+        10,
+        "trusted browsers that skip the second factor (M1)",
+        include_str!("../migrations/tenant_10.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

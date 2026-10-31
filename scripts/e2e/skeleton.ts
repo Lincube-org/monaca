@@ -161,6 +161,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "DELETE /account/social/{connector} is 204 and the profile no longer lists it; DELETE /v1/connectors " +
       "is 204 and a missing one is 404",
   },
+  {
+    step: "16",
+    title: "trusted browsers",
+    assertion:
+      "An account enrols an authenticator; a password sign-in answers mfa_required and " +
+      "POST …/mfa/verify {remember_device:true} sets a monaca_mfa_device cookie and mints a token; " +
+      "GET /account/mfa/devices lists the browser as current and GET /account counts it; the next sign-in " +
+      "with that cookie skips the challenge and mints a token, while an unknown cookie still asks; " +
+      "DELETE /account/mfa/devices/{device} is 204 and clears the caller's cookie; a sign-in with the " +
+      "revoked cookie asks again and the list and profile count zero",
+  },
 ];
 
 interface StepResult {
@@ -2977,6 +2988,240 @@ async function socialFlow(
   };
 }
 
+/**
+ * Step 16 — remembered browsers (§6.1 `mfa`).
+ *
+ * The account enrols an authenticator, proves the second factor once with `remember_device`, and
+ * receives a per-tenant cookie. The next sign-in with that cookie skips the challenge and mints a
+ * token; a bogus cookie does not. The account centre lists the browser, revoking it clears the
+ * cookie and makes the next sign-in ask again.
+ */
+async function trustedDeviceFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "16",
+    title: "trusted browsers",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `t-${tag}-${runId}-${"w".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in on a fresh interaction, with an optional extra cookie. */
+  const signIn = async (
+    tag: string,
+    identifier: string,
+    password: string,
+    cookie?: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown; cookie?: string } | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+      body: JSON.stringify({ identifier, password }),
+    });
+    const session = /monaca_session=([0-9a-f-]{36})/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    return { ...started, status: response.status, body: response.body, cookie: session };
+  };
+
+  /** Redeem the `redirect_to` a completed interaction returned for a token. */
+  const exchange = async (redirectTo: unknown, verifier: string): Promise<HttpResult> => {
+    const code = typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    return tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+      basic,
+    );
+  };
+
+  try {
+    // --- an account with an authenticator app ----------------------------------------------------
+    const email = `trusted-${runId}@demo.localhost`;
+    const password = `pw-${runId}-trusted`;
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Trusted browsers", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    const first = await signIn("first", email, password);
+    if (first?.cookie === undefined) return fail("the password sign-in set no session cookie");
+    const sessionCookie = `monaca_session=${first.cookie}`;
+    const accountHeaders = { cookie: sessionCookie };
+
+    const enrollment = await call(`${base}/t/${TENANT}/account/mfa/totp`, {
+      method: "POST",
+      headers: accountHeaders,
+    });
+    const secret = (enrollment.body as { secret?: unknown })?.secret;
+    if (member.status !== 201 || typeof secret !== "string") {
+      return fail(`POST /account/mfa/totp → ${enrollment.status} ${text(enrollment.body)}`);
+    }
+    const confirmed = await call(`${base}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: { ...accountHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push([
+      "the account enrols an authenticator app",
+      confirmed.status === 200 && ((await call(`${base}/t/${TENANT}/account`, { headers: accountHeaders })).body as { mfa?: { totp?: unknown } })?.mfa?.totp === true,
+    ]);
+
+    // --- prove the factor once and ask the server to remember this browser ----------------------
+    const challenged = await signIn("challenge", email, password);
+    if (challenged === undefined) return fail("");
+    checks.push([
+      "a password sign-in asks for the second factor",
+      challenged.status === 200 &&
+        (challenged.body as { mfa_required?: unknown })?.mfa_required === true,
+    ]);
+
+    const verified = await call(`${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: totpFromBase32(secret),
+        factor: "totp",
+        remember_device: true,
+      }),
+    });
+    const deviceToken = /monaca_mfa_device=([0-9a-f]{64})/.exec(verified.headers.get("set-cookie") ?? "")?.[1];
+    const verifiedToken = await exchange((verified.body as { redirect_to?: unknown })?.redirect_to, challenged.verifier);
+    checks.push([
+      "the code is accepted and the browser is remembered",
+      verified.status === 200 && deviceToken !== undefined && verifiedToken.status === 200,
+    ]);
+    if (deviceToken === undefined) return fail("no monaca_mfa_device cookie was set");
+
+    const deviceCookie = `monaca_mfa_device=${deviceToken}`;
+    const listed = await call(`${base}/t/${TENANT}/account/mfa/devices`, {
+      headers: { cookie: `${sessionCookie}; ${deviceCookie}` },
+    });
+    const devices = (listed.body as { items?: { id?: string; current?: boolean }[] })?.items ?? [];
+    checks.push([
+      "GET /account/mfa/devices lists this browser as current",
+      listed.status === 200 && devices.length === 1 && devices[0]?.current === true,
+    ]);
+    const profile = await call(`${base}/t/${TENANT}/account`, { headers: { cookie: `${sessionCookie}; ${deviceCookie}` } });
+    checks.push([
+      "the profile counts one trusted browser",
+      ((profile.body as { mfa?: { trusted_devices?: unknown } })?.mfa?.trusted_devices) === 1,
+    ]);
+
+    // --- the remembered browser skips the challenge; a bogus cookie does not --------------------
+    const trusted = await signIn("trusted", email, password, deviceCookie);
+    if (trusted === undefined) return fail("");
+    const trustedToken = await exchange((trusted.body as { redirect_to?: unknown })?.redirect_to, trusted.verifier);
+    checks.push([
+      "a remembered browser skips the second factor and mints a token",
+      trusted.status === 200 &&
+        "redirect_to" in (trusted.body as object) &&
+        trustedToken.status === 200,
+    ]);
+
+    const bogus = await signIn("bogus", email, password, `monaca_mfa_device=${"a".repeat(64)}`);
+    checks.push([
+      "an unknown device cookie still asks for the second factor",
+      bogus?.status === 200 &&
+        (bogus.body as { mfa_required?: unknown })?.mfa_required === true,
+    ]);
+
+    // --- revoking the browser clears the caller's cookie and ends the trust ---------------------
+    const deviceId = devices[0]?.id;
+    if (deviceId === undefined) return fail("the device list carried no id");
+    const revoke = await call(`${base}/t/${TENANT}/account/mfa/devices/${encodeURIComponent(deviceId)}`, {
+      method: "DELETE",
+      headers: { cookie: `${sessionCookie}; ${deviceCookie}` },
+    });
+    checks.push([
+      "DELETE clears the current browser's device cookie",
+      revoke.status === 204 &&
+        (revoke.headers.get("set-cookie") ?? "").includes("monaca_mfa_device="),
+    ]);
+
+    const after = await signIn("after", email, password, deviceCookie);
+    checks.push([
+      "a revoked browser is asked for the second factor again",
+      after?.status === 200 &&
+        (after.body as { mfa_required?: unknown })?.mfa_required === true,
+    ]);
+
+    const afterList = await call(`${base}/t/${TENANT}/account/mfa/devices`, {
+      headers: { cookie: sessionCookie },
+    });
+    checks.push([
+      "the device list is empty and the profile counts zero",
+      afterList.status === 200 &&
+        ((afterList.body as { items?: unknown[] })?.items?.length ?? 0) === 0 &&
+        ((await call(`${base}/t/${TENANT}/account`, { headers: { cookie: sessionCookie } })).body as { mfa?: { trusted_devices?: unknown } })?.mfa?.trusted_devices === 0,
+    ]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "16",
+    title: "trusted browsers",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: enrol → remember → skip MFA → bogus still asks → revoke clears → revoked asks again`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -3221,6 +3466,7 @@ async function main(): Promise<number> {
   push(await usernameFlow(base, adminToken, parsed.consoleSecret));
   push(await emailChangeFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await socialFlow(base, adminToken, parsed.consoleSecret));
+  push(await trustedDeviceFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

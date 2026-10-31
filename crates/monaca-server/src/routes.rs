@@ -199,6 +199,14 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             post(crate::account::verify_totp_enrollment),
         )
         .route(
+            "/t/{tenant}/account/mfa/devices",
+            get(crate::account::list_trusted_devices),
+        )
+        .route(
+            "/t/{tenant}/account/mfa/devices/{device}",
+            delete(crate::account::revoke_trusted_device),
+        )
+        .route(
             "/t/{tenant}/account/mfa/backup-codes",
             get(crate::account::list_backup_codes)
                 .post(crate::account::create_backup_codes)

@@ -17,7 +17,7 @@ export interface AccountProfile {
   /** False for a passwordless account; the page hides the change-password form then. */
   has_password: boolean;
   /** `backup_codes` is how many unused recovery codes remain; `passkeys` how many are registered. */
-  mfa: { totp: boolean; backup_codes: number; passkeys: number };
+  mfa: { totp: boolean; backup_codes: number; passkeys: number; trusted_devices: number };
   /** Provider accounts connected to this account, as the account centre lists them. */
   social: { connector: string; display_name: string }[];
 }
@@ -34,6 +34,16 @@ export interface AccountPasskey {
   transports: string[];
   created_at: string;
   last_used_at: string | null;
+}
+
+/** One browser remembered past the second factor. */
+export interface TrustedDevice {
+  id: string;
+  current: boolean;
+  user_agent: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
 }
 
 /** A freshly generated sheet of recovery codes; the plaintext is shown only in this response. */
@@ -133,6 +143,20 @@ export function generateBackupCodes(tenant: string): Promise<BackupCodeSheet> {
 
 export function disableBackupCodes(tenant: string): Promise<void> {
   return call<void>(`${base(tenant)}/mfa/backup-codes`, { method: "DELETE" });
+}
+
+/** The browsers that skip the second factor, with `current` marking the one asking. */
+export function listTrustedDevices(
+  tenant: string,
+): Promise<{ items: TrustedDevice[]; next: null }> {
+  return call<{ items: TrustedDevice[]; next: null }>(`${base(tenant)}/mfa/devices`);
+}
+
+/** Forget one browser; revoking the caller's own browser also clears its cookie. */
+export function revokeTrustedDevice(tenant: string, device: string): Promise<void> {
+  return call<void>(`${base(tenant)}/mfa/devices/${encodeURIComponent(device)}`, {
+    method: "DELETE",
+  });
 }
 
 /**

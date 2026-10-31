@@ -10,10 +10,32 @@ use uuid::Uuid;
 /// The cookie's name.
 pub const COOKIE_NAME: &str = "monaca_session";
 
+/// The remembered-browser cookie's name (§6.1 `mfa`).
+pub const DEVICE_COOKIE_NAME: &str = "monaca_mfa_device";
+
 /// The `Set-Cookie` value that establishes a session.
 pub fn set_cookie(session_id: Uuid, ttl_secs: u64, secure: bool) -> String {
     format!(
         "{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl_secs}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// The `Set-Cookie` value that remembers this browser past the second factor.
+///
+/// The path is scoped to the tenant's API prefix, so a trust minted for one tenant is never
+/// offered to another — and the row still names the account, so the two checks agree.
+pub fn set_device_cookie(token: &str, ttl_secs: u64, secure: bool, tenant: &str) -> String {
+    format!(
+        "{DEVICE_COOKIE_NAME}={token}; Path=/t/{tenant}; HttpOnly; SameSite=Lax; Max-Age={ttl_secs}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// The `Set-Cookie` value that forgets it.
+pub fn clear_device_cookie(secure: bool, tenant: &str) -> String {
+    format!(
+        "{DEVICE_COOKIE_NAME}=; Path=/t/{tenant}; HttpOnly; SameSite=Lax; Max-Age=0{}",
         if secure { "; Secure" } else { "" }
     )
 }
@@ -43,6 +65,25 @@ pub fn session_id(headers: &HeaderMap) -> Option<Uuid> {
         };
         if name == COOKIE_NAME {
             return Uuid::parse_str(value.trim()).ok();
+        }
+    }
+    None
+}
+
+/// The remembered-browser token in the request's `Cookie` header.
+///
+/// The value is validated as 64 hex characters (a 32-byte random token), so a hand-edited cookie
+/// can never reach a hash lookup with an unexpected shape.
+pub fn trusted_device_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        if name == DEVICE_COOKIE_NAME {
+            let value = value.trim();
+            return (value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+                .then(|| value.to_ascii_lowercase());
         }
     }
     None

@@ -9,14 +9,15 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use monaca_crypto::{
     BACKUP_CODE_COUNT, format_backup_code, generate_backup_codes, generate_challenge,
     generate_totp_secret, hash_password, hash_secret, seal, totp_base32, totp_otpauth_url,
     verify_password, verify_registration, verify_totp,
 };
-use monaca_store::{AccountRow, PasskeyRow, SessionRow, TenantRow};
-use monaca_types::{AccountId, PasskeyId, SessionId, TypedId};
+use monaca_store::{AccountRow, PasskeyRow, SessionRow, TenantRow, TrustedDeviceRow};
+use monaca_types::{AccountId, PasskeyId, SessionId, TrustedDeviceId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::Duration;
@@ -112,13 +113,23 @@ async fn profile_json(
         .store
         .social_identities(tenant, account.account_id())
         .await?;
+    let trusted_devices = state
+        .store
+        .trusted_devices(tenant, account.account_id())
+        .await?
+        .len();
     Ok(json!({
         "id": account.account_id().to_typed_string(),
         "email": account.primary_email,
         "username": username,
         "display_name": account.display_name,
         "has_password": has_password,
-        "mfa": { "totp": totp, "backup_codes": backup_codes, "passkeys": passkeys },
+        "mfa": {
+            "totp": totp,
+            "backup_codes": backup_codes,
+            "passkeys": passkeys,
+            "trusted_devices": trusted_devices,
+        },
         "social": social
             .iter()
             .map(|row| json!({ "connector": row.connector, "display_name": row.display_name }))
@@ -415,6 +426,77 @@ pub async fn revoke_other_sessions(
         .revoke_other_sessions(&tenant, account.account_id(), current)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// One remembered browser as the account centre sees it, with `current` marking this one.
+fn trusted_device_json(device: &TrustedDeviceRow, current: Option<&str>) -> Value {
+    json!({
+        "id": TrustedDeviceId::from_uuid(device.id).to_typed_string(),
+        "current": current == Some(device.token_hash.as_str()),
+        "user_agent": device.user_agent,
+        "created_at": crate::management::ts(device.created_at),
+        "last_used_at": device.last_used_at.map(crate::management::ts),
+        "expires_at": crate::management::ts(device.expires_at),
+    })
+}
+
+/// `GET /t/{tenant}/account/mfa/devices` — the browsers remembered past the second factor.
+pub async fn list_trusted_devices(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let devices = state
+        .store
+        .trusted_devices(&tenant, account.account_id())
+        .await?;
+    let current = session::trusted_device_token(&headers).map(|token| hash_secret(&token));
+    let items: Vec<Value> = devices
+        .iter()
+        .map(|device| trusted_device_json(device, current.as_deref()))
+        .collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `DELETE /t/{tenant}/account/mfa/devices/{device}` — forget one remembered browser.
+///
+/// Revoking the browser that made this request also clears its cookie, so the page and the
+/// browser agree immediately instead of waiting for the next sign-in to discover the trust is gone.
+pub async fn revoke_trusted_device(
+    State(state): State<Arc<AppState>>,
+    Path((tenant, device)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let device_id = TrustedDeviceId::parse(&device)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a trusted-device id"))?;
+    let devices = state
+        .store
+        .trusted_devices(&tenant, account.account_id())
+        .await?;
+    let Some(row) = devices.iter().find(|row| row.id == device_id.uuid()) else {
+        return Err(ApiError::not_found("trusted device"));
+    };
+    let current = session::trusted_device_token(&headers).map(|token| hash_secret(&token));
+    let is_current = current.as_deref() == Some(row.token_hash.as_str());
+    if !state
+        .store
+        .revoke_trusted_device(&tenant, account.account_id(), device_id.uuid())
+        .await?
+    {
+        return Err(ApiError::not_found("trusted device"));
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if is_current {
+        let secure = session::secure_origin(&state.config);
+        let cookie = session::clear_device_cookie(secure, &tenant.slug);
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie).map_err(ApiError::internal)?,
+        );
+    }
+    Ok(response)
 }
 
 /// `POST /t/{tenant}/account/mfa/totp` — start an enrollment.

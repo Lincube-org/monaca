@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, Skeleton } from "@monaca/ui";
-import { AlertCircle, KeyRound, Link2, Loader2, Mail, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
+import { AlertCircle, KeyRound, Link2, Loader2, Mail, MonitorSmartphone, ShieldCheck, ShieldOff, User } from "lucide-vue-next";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
@@ -16,11 +16,13 @@ import {
   getAccount,
   listPasskeys,
   listSessions,
+  listTrustedDevices,
   registerPasskey,
   renamePasskey,
   requestEmailChange,
   revokeOtherSessions,
   revokeSession,
+  revokeTrustedDevice,
   updateProfile,
   unlinkSocial,
   verifyEmailChange,
@@ -29,6 +31,7 @@ import {
   type AccountProfile,
   type AccountSession,
   type TotpEnrollment,
+  type TrustedDevice,
 } from "@/api/account";
 import { PasskeyError, createPasskey, passkeysSupported } from "@/api/webauthn";
 import {
@@ -78,6 +81,12 @@ const socialConnectors = ref<SocialConnector[]>([]);
 const socialBusy = ref<string | null>(null);
 const socialError = ref<string | null>(null);
 const socialNotice = ref<MessageKey | null>(null);
+
+/** Browsers remembered past the second factor, and the one asking to forget itself. */
+const trustedDevices = ref<TrustedDevice[] | null>(null);
+const devicesBusyId = ref<string | null>(null);
+const devicesError = ref<string | null>(null);
+const devicesNotice = ref<MessageKey | null>(null);
 
 const currentPassword = ref("");
 const newPassword = ref("");
@@ -166,6 +175,16 @@ async function loadPasskeys(): Promise<void> {
   }
 }
 
+async function loadTrustedDevices(): Promise<void> {
+  try {
+    trustedDevices.value = (await listTrustedDevices(tenant.value)).items;
+    devicesError.value = null;
+  } catch (error) {
+    trustedDevices.value = null;
+    devicesError.value = messageOf(error);
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   try {
@@ -191,6 +210,7 @@ async function load(): Promise<void> {
     socialConnectors.value = await listSocialConnectors(tenant.value);
     await loadSessions();
     await loadPasskeys();
+    await loadTrustedDevices();
   } catch (error) {
     account.value = null;
     loadError.value = error instanceof AccountError ? error : new AccountError(0, String(error));
@@ -225,6 +245,22 @@ async function disconnectSocial(connector: string): Promise<void> {
     socialError.value = messageOf(error);
   } finally {
     socialBusy.value = null;
+  }
+}
+
+/** Forget one remembered browser; the server clears the cookie when it is the caller's own. */
+async function forgetDevice(deviceId: string): Promise<void> {
+  devicesBusyId.value = deviceId;
+  devicesError.value = null;
+  devicesNotice.value = null;
+  try {
+    await revokeTrustedDevice(tenant.value, deviceId);
+    await loadTrustedDevices();
+    devicesNotice.value = "account.trustedRevoked";
+  } catch (error) {
+    devicesError.value = messageOf(error);
+  } finally {
+    devicesBusyId.value = null;
   }
 }
 
@@ -1000,6 +1036,71 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
           <p v-if="mfaNotice" class="text-[12.5px] leading-snug text-ink-muted" role="status">
             {{ t(mfaNotice) }}
           </p>
+
+          <!-- Trusted browsers: the second factor is skipped on each until it is forgotten. -->
+          <div
+            v-if="totpEnabled"
+            class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3"
+          >
+            <div class="flex items-center gap-1.5">
+              <MonitorSmartphone class="size-3.5 text-ink-faint" aria-hidden="true" />
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.trustedTitle") }}</h2>
+            </div>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.trustedNote") }}</p>
+            <p
+              v-if="trustedDevices === null || trustedDevices.length === 0"
+              class="text-[11.5px] leading-snug text-ink-faint"
+            >
+              {{ t("account.trustedEmpty") }}
+            </p>
+            <div v-else class="flex flex-col gap-2">
+              <div
+                v-for="device in trustedDevices"
+                :key="device.id"
+                class="flex items-start justify-between gap-2"
+              >
+                <div class="flex min-w-0 flex-col gap-0.5">
+                  <span class="flex items-center gap-1.5 text-[12.5px] text-ink">
+                    <span class="min-w-0 truncate">
+                      {{ device.user_agent ?? t("account.trustedUnknown") }}
+                    </span>
+                    <Badge v-if="device.current" variant="muted">
+                      {{ t("account.trustedCurrent") }}
+                    </Badge>
+                  </span>
+                  <span class="text-[11px] text-ink-faint">
+                    {{ t("account.trustedCreated", { when: formatDate(device.created_at) }) }}
+                    ·
+                    {{ t("account.trustedExpires", { when: formatDate(device.expires_at) }) }}
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  :disabled="devicesBusyId !== null"
+                  :aria-busy="devicesBusyId === device.id"
+                  @click="forgetDevice(device.id)"
+                >
+                  {{
+                    devicesBusyId === device.id
+                      ? t("account.trustedRevoking")
+                      : t("account.trustedRevoke")
+                  }}
+                </Button>
+              </div>
+            </div>
+            <p
+              v-if="devicesError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ devicesError }}
+            </p>
+            <p v-else-if="devicesNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(devicesNotice) }}
+            </p>
+          </div>
 
           <!-- Recovery codes: a way back in when the authenticator app is lost. -->
           <div

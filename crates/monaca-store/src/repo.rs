@@ -91,6 +91,25 @@ pub struct SocialStateRow {
     pub account_id: Option<Uuid>,
 }
 
+/// A browser remembered past the second factor (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct TrustedDeviceRow {
+    /// Row id; its typed form is the `mfd_…` id the account centre revokes.
+    pub id: Uuid,
+    /// The account the remembered browser signs in.
+    pub account_id: Uuid,
+    /// SHA-256 hex of the cookie value, never the value itself.
+    pub token_hash: String,
+    /// The browser's user agent, as the request carried it.
+    pub user_agent: Option<String>,
+    /// When the browser was remembered.
+    pub created_at: OffsetDateTime,
+    /// When it last skipped the second factor.
+    pub last_used_at: Option<OffsetDateTime>,
+    /// When the trust expires, whether or not it was revoked.
+    pub expires_at: OffsetDateTime,
+}
+
 /// A client in `tenant.clients`.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClientRow {
@@ -904,6 +923,103 @@ impl Store {
         .bind(state_id)
         .fetch_optional(&pool)
         .await?)
+    }
+
+    /// Record a browser this account chose to trust past the second factor.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_trusted_device(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        token_hash: &str,
+        user_agent: Option<&str>,
+        expires_at: OffsetDateTime,
+    ) -> Result<TrustedDeviceRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, TrustedDeviceRow>(
+            "INSERT INTO tenant.mfa_trusted_devices
+                (id, account_id, token_hash, user_agent, expires_at)
+             VALUES ($1,$2,$3,$4,$5)
+             RETURNING id, account_id, token_hash, user_agent, created_at, last_used_at, expires_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(account_id.uuid())
+        .bind(token_hash)
+        .bind(user_agent)
+        .bind(expires_at)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// The live trust a cookie value names, if any.
+    pub async fn trusted_device(
+        &self,
+        tenant: &TenantRow,
+        token_hash: &str,
+    ) -> Result<Option<TrustedDeviceRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, TrustedDeviceRow>(
+            "SELECT id, account_id, token_hash, user_agent, created_at, last_used_at, expires_at
+             FROM tenant.mfa_trusted_devices
+             WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()
+             LIMIT 1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Record that a trusted browser just used its trust.
+    pub async fn touch_trusted_device(
+        &self,
+        tenant: &TenantRow,
+        device_id: Uuid,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query("UPDATE tenant.mfa_trusted_devices SET last_used_at = $2 WHERE id = $1")
+            .bind(device_id)
+            .bind(at)
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The account's live trusted browsers, newest first.
+    pub async fn trusted_devices(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Vec<TrustedDeviceRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, TrustedDeviceRow>(
+            "SELECT id, account_id, token_hash, user_agent, created_at, last_used_at, expires_at
+             FROM tenant.mfa_trusted_devices
+             WHERE account_id = $1 AND revoked_at IS NULL AND expires_at > now()
+             ORDER BY created_at DESC",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Revoke one trusted browser; false when it is not the account's own live trust.
+    pub async fn revoke_trusted_device(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        device_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.mfa_trusted_devices SET revoked_at = now()
+             WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(device_id)
+        .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Replace the account's password with a new argon2id PHC string.

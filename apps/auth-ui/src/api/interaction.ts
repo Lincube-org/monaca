@@ -256,10 +256,11 @@ export function verifyMfa(
   iid: string,
   code: string,
   factor: "totp" | "backup_code" = "totp",
+  rememberDevice = false,
 ): Promise<SignInResult> {
   return call<SignInResult>(`${base(tenant, iid)}/mfa/verify`, {
     method: "POST",
-    body: JSON.stringify({ code, factor }),
+    body: JSON.stringify({ code, factor, remember_device: rememberDevice }),
   });
 }
 

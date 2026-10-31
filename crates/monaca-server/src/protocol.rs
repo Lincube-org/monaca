@@ -436,6 +436,23 @@ pub(crate) async fn finish_sign_in(
         .await?
         .is_some()
     {
+        // A browser this account chose to remember skips the second factor until it is revoked or
+        // expires (§6.1 `mfa`). The cookie is per tenant and the row names the account, so a stale
+        // trust from another account does nothing.
+        if let Some(token) = session::trusted_device_token(headers)
+            && let Some(device) = state
+                .store
+                .trusted_device(&tenant, &hash_secret(&token))
+                .await?
+            && device.account_id == account.id
+        {
+            state
+                .store
+                .touch_trusted_device(&tenant, device.id, state.now())
+                .await?;
+            return complete_sign_in(state, tenant, interaction, iid, headers, account).await;
+        }
+
         state
             .mark_mfa_pending(iid, account.id)
             .await
@@ -1022,6 +1039,47 @@ pub struct MfaVerifyBody {
     pub code: String,
     /// `totp` (default) or `backup_code`.
     pub factor: Option<String>,
+    /// Ask the server to remember this browser for thirty days once the factor is accepted.
+    #[serde(default)]
+    pub remember_device: bool,
+}
+
+/// How long a remembered browser may skip the second factor.
+const TRUSTED_DEVICE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Mint a trust for this browser and return the cookie that carries it.
+///
+/// Only the SHA-256 of the token is stored; the cookie is the one place the token exists in
+/// plaintext, and it is per tenant and HttpOnly.
+async fn issue_trusted_device(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    account: &AccountRow,
+    headers: &HeaderMap,
+) -> Result<HeaderValue, ApiError> {
+    let token = hex::encode(generate_challenge());
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|raw| raw.chars().take(160).collect::<String>());
+    state
+        .store
+        .insert_trusted_device(
+            tenant,
+            account.account_id(),
+            &hash_secret(&token),
+            user_agent.as_deref(),
+            state.now() + Duration::seconds(TRUSTED_DEVICE_TTL_SECS as i64),
+        )
+        .await?;
+    let secure = session::secure_origin(&state.config);
+    HeaderValue::from_str(&session::set_device_cookie(
+        &token,
+        TRUSTED_DEVICE_TTL_SECS,
+        secure,
+        &tenant.slug,
+    ))
+    .map_err(ApiError::internal)
 }
 
 /// Refuse a second-factor attempt, counting it against the interaction's limit.
@@ -1129,7 +1187,17 @@ pub async fn mfa_verify(
         .await
         .map_err(ApiError::Interaction)?;
 
-    complete_sign_in(state, tenant, interaction, &iid, &headers, account).await
+    let trust = if body.remember_device {
+        Some(issue_trusted_device(&state, &tenant, &account, &headers).await?)
+    } else {
+        None
+    };
+    let mut response =
+        complete_sign_in(state, tenant, interaction, &iid, &headers, account).await?;
+    if let Some(cookie) = trust {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    Ok(response)
 }
 
 /// Record a rejected passkey sign-in.

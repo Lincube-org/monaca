@@ -67,6 +67,7 @@ export const messages = {
     backupNote:
       "Enter one of the single-use codes you saved when you turned on two-step verification.",
     usePasskey: "Use a passkey instead",
+    rememberDevice: "Trust this browser for 30 days",
   },
   /** Passkeys, the passwordless factor: a device-bound credential instead of a typed secret. */
   passkey: {
@@ -179,6 +180,16 @@ export const messages = {
     socialUnlinked: "The provider account was disconnected.",
     socialTaken: "That provider account is already connected to another user.",
     socialFailed: "The provider account could not be connected. Try again.",
+    trustedTitle: "Trusted browsers",
+    trustedNote: "Browsers that skip the second factor for thirty days.",
+    trustedEmpty: "No browser is trusted yet.",
+    trustedCurrent: "This browser",
+    trustedUnknown: "Unknown browser",
+    trustedCreated: "Trusted {when}",
+    trustedExpires: "Until {when}",
+    trustedRevoke: "Forget",
+    trustedRevoking: "Forgetting",
+    trustedRevoked: "That browser will be asked for the second factor next time.",
   },
   emailCode: {
     title: "Sign in with an email code",

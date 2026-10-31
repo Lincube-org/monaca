@@ -180,6 +180,7 @@ fn is_known_prefix(prefix: &str) -> bool {
             | "int"
             | "key"
             | "pky"
+            | "mfd"
     )
 }
 
@@ -331,6 +332,11 @@ typed_id!(
     /// Passkey credential (`pky_…`); the raw WebAuthn credential id is a separate column.
     PasskeyId,
     "pky"
+);
+typed_id!(
+    /// Trusted MFA device (`mfd_…`): a browser remembered past the second factor.
+    TrustedDeviceId,
+    "mfd"
 );
 
 #[cfg(test)]

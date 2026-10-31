@@ -89,6 +89,8 @@ const mfaInput = ref<InstanceType<typeof Input> | null>(null);
 /** Which factors this challenge accepts; `backup_code` unlocks the recovery-code form. */
 const mfaFactors = ref<string[]>([]);
 const useBackupCode = ref(false);
+/** When checked, the code step also leaves a thirty-day trust for this browser. */
+const rememberDevice = ref(false);
 
 /** The recovery-code toggle is offered only when the account actually has unused codes. */
 const backupCodeAvailable = computed(() => mfaFactors.value.includes("backup_code"));
@@ -342,6 +344,7 @@ onMounted(async () => {
     if (details.value.mfa_required) {
       mfaRequired.value = true;
       mfaFactors.value = details.value.mfa_factors;
+      rememberDevice.value = false;
     }
     socialConnectors.value = await listSocialConnectors(tenantFromUrl.value);
   } catch (error) {
@@ -405,6 +408,7 @@ function handleResult(result: SignInResult): void {
     mfaRequired.value = true;
     mfaFactors.value = result.factors;
     useBackupCode.value = false;
+    rememberDevice.value = false;
     mfaPasskeyError.value = null;
     password.value = "";
     void nextTick(() => mfaInput.value?.$el?.focus?.());
@@ -446,6 +450,7 @@ async function verifySecondFactor(): Promise<void> {
         interactionId.value,
         submitted,
         useBackupCode.value ? "backup_code" : "totp",
+        rememberDevice.value,
       ),
     );
   } catch (error) {
@@ -818,6 +823,17 @@ async function cancel(): Promise<void> {
                 {{ t(useBackupCode ? "mfa.useTotp" : "mfa.useBackupCode") }}
               </button>
             </div>
+
+            <!-- Remembering this browser is the one-way choice out of the second factor. -->
+            <label class="flex items-start gap-2 text-[12.5px] leading-snug text-ink-muted">
+              <input
+                v-model="rememberDevice"
+                type="checkbox"
+                name="remember_device"
+                class="mt-0.5 size-3.5 accent-[var(--brand)]"
+              />
+              <span>{{ t("mfa.rememberDevice") }}</span>
+            </label>
 
             <p
               v-if="fieldError || mfaError"

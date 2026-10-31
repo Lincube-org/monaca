@@ -35,7 +35,7 @@ pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, AuditRow, AuthCodeRow, ClientRow, GrantRow, ParRow,
     PasskeyRow, RefreshRow, SessionRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow,
-    SocialStateRow, VerificationRow,
+    SocialStateRow, TrustedDeviceRow, VerificationRow,
 };
 
 /// A storage failure.
