@@ -74,6 +74,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "case-insensitive usernames as a sign-in identifier (M1)",
         include_str!("../migrations/tenant_7.sql"),
     ),
+    (
+        8,
+        "email change codes from the account centre (M1)",
+        include_str!("../migrations/tenant_8.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.
