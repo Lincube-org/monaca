@@ -13,9 +13,9 @@ use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::hash_password;
 use monaca_oidc::{is_absolute_http_url, valid_scope};
-use monaca_store::{AccountRow, AgentKeyRow, AgentRow, GrantRow, SessionRow, TenantRow};
+use monaca_store::{AccountRow, AgentKeyRow, AgentRow, GrantRow, RoleRow, SessionRow, TenantRow};
 use monaca_types::{
-    AccountId, AgentId, AgentKeyId, EventId, GrantId, SessionId, TenantId, TypedId,
+    AccountId, AgentId, AgentKeyId, EventId, GrantId, RoleId, SessionId, TenantId, TypedId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -277,7 +277,7 @@ pub async fn create_account(
         tracing::warn!(%err, "could not append account.created audit event");
     }
 
-    Ok((StatusCode::CREATED, Json(account_json(&account))).into_response())
+    Ok((StatusCode::CREATED, Json(account_json(&account, &[]))).into_response())
 }
 
 /// `GET /v1/accounts/{id}`.
@@ -294,7 +294,190 @@ pub async fn get_account(
         .account_by_id(&tenant, id)
         .await?
         .ok_or_else(|| ApiError::not_found("account"))?;
-    Ok(Json(account_json(&account)))
+    let roles = state
+        .store
+        .account_roles(&tenant, account.account_id())
+        .await?;
+    Ok(Json(account_json(&account, &roles)))
+}
+
+/// The body of `POST /v1/roles`.
+#[derive(Debug, Deserialize)]
+pub struct CreateRoleBody {
+    /// The unique name the id_token carries.
+    pub name: String,
+    /// Free-form description.
+    #[serde(default)]
+    pub description: String,
+    /// Permission scopes the role grants.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+/// `POST /v1/roles` — define a role.
+pub async fn create_role(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRoleBody>,
+) -> Result<Response, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "name must be 1-80 characters",
+        ));
+    }
+    let mut permissions: Vec<String> = Vec::new();
+    for permission in &body.permissions {
+        let permission = permission.trim();
+        if !valid_scope(permission) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "permissions must match the scope grammar",
+            ));
+        }
+        if !permissions.iter().any(|existing| existing == permission) {
+            permissions.push(permission.to_owned());
+        }
+    }
+
+    let role = state
+        .store
+        .create_role(&tenant, name, body.description.trim(), &permissions)
+        .await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "role.created".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: None,
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "name": role.name }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append role.created audit event");
+    }
+
+    Ok((StatusCode::CREATED, Json(role_json(&role))).into_response())
+}
+
+/// `GET /v1/roles` — every role the tenant defined.
+pub async fn list_roles(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let rows = state.store.roles(&tenant).await?;
+    let items: Vec<Value> = rows.iter().map(role_json).collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `DELETE /v1/roles/{role}` — remove a role and every assignment of it.
+pub async fn delete_role(
+    State(state): State<Arc<AppState>>,
+    Path(role): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let role_id = RoleId::parse(&role)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a role id"))?;
+    let Some(row) = state.store.role_by_id(&tenant, role_id.uuid()).await? else {
+        return Err(ApiError::not_found("role"));
+    };
+    if !state.store.delete_role(&tenant, role_id.uuid()).await? {
+        return Err(ApiError::not_found("role"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "role.deleted".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: None,
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "name": row.name }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append role.deleted audit event");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/accounts/{id}/roles/{role}` — assign a role; repeating it is a no-op.
+pub async fn assign_role(
+    State(state): State<Arc<AppState>>,
+    Path((account, role)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let account_id = AccountId::parse(&account)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))?;
+    let role_id = RoleId::parse(&role)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a role id"))?;
+    if state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("account"));
+    }
+    if state
+        .store
+        .role_by_id(&tenant, role_id.uuid())
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("role"));
+    }
+    state
+        .store
+        .assign_role(&tenant, account_id, role_id.uuid())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/accounts/{id}/roles/{role}` — remove an assignment.
+pub async fn unassign_role(
+    State(state): State<Arc<AppState>>,
+    Path((account, role)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let account_id = AccountId::parse(&account)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))?;
+    let role_id = RoleId::parse(&role)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a role id"))?;
+    if !state
+        .store
+        .unassign_role(&tenant, account_id, role_id.uuid())
+        .await?
+    {
+        return Err(ApiError::not_found("role assignment"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn role_json(role: &RoleRow) -> Value {
+    json!({
+        "id": role.role_id().to_typed_string(),
+        "name": role.name,
+        "description": role.description,
+        "permissions": role.permissions,
+        "created_at": ts(role.created_at),
+    })
 }
 
 /// `GET /v1/accounts/{id}/sessions`.
@@ -926,13 +1109,17 @@ pub struct AuditBounds {
     pub to: Option<i64>,
 }
 
-fn account_json(account: &AccountRow) -> Value {
+fn account_json(account: &AccountRow, roles: &[RoleRow]) -> Value {
     json!({
         "id": account.account_id().to_typed_string(),
         "email": account.primary_email,
         "display_name": account.display_name,
         "state": account.state,
         "created_at": ts(account.created_at),
+        "roles": roles
+            .iter()
+            .map(|role| json!({ "id": role.role_id().to_typed_string(), "name": role.name }))
+            .collect::<Vec<_>>(),
     })
 }
 

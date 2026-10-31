@@ -19,7 +19,7 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use ctx::{OrgCtx, Principal, TenantCtx};
 pub use id::{
     AccountId, AgentId, AgentKeyId, ApprovalId, ClientId, DelegationId, EventId, GrantId,
-    InteractionId, KeyId, OrgId, PasskeyId, SessionId, TenantId, TrustedDeviceId, TypedId,
+    InteractionId, KeyId, OrgId, PasskeyId, RoleId, SessionId, TenantId, TrustedDeviceId, TypedId,
     TypedIdError, decode_suffix, encode_suffix,
 };
 pub use problem::{Problem, ProblemKind};

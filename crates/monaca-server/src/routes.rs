@@ -301,6 +301,15 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             "/v1/connectors/{connector}",
             delete(crate::social::delete_connector),
         )
+        .route(
+            "/v1/roles",
+            get(crate::management::list_roles).post(crate::management::create_role),
+        )
+        .route("/v1/roles/{role}", delete(crate::management::delete_role))
+        .route(
+            "/v1/accounts/{id}/roles/{role}",
+            post(crate::management::assign_role).delete(crate::management::unassign_role),
+        )
 }
 
 /// `/internal/*` — §6.3. The gateway must never proxy this group.

@@ -97,6 +97,9 @@ pub mod kinds {
     /// An email address is already claimed by another account.
     pub const EMAIL_TAKEN: ProblemKind =
         ProblemKind::new("email_taken", "MONACA_EMAIL_TAKEN", "Email taken", 409);
+    /// A role name is already registered in this tenant.
+    pub const ROLE_EXISTS: ProblemKind =
+        ProblemKind::new("role_exists", "MONACA_ROLE_EXISTS", "Role exists", 409);
     /// A connector slug is already registered in this tenant.
     pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
         "connector_exists",
@@ -229,6 +232,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "email" => kinds::EMAIL_TAKEN,
                     "connector" => kinds::CONNECTOR_EXISTS,
                     "social identity" => kinds::SOCIAL_IDENTITY_TAKEN,
+                    "role" => kinds::ROLE_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))

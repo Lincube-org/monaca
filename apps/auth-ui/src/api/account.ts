@@ -20,6 +20,8 @@ export interface AccountProfile {
   mfa: { totp: boolean; backup_codes: number; passkeys: number; trusted_devices: number };
   /** Provider accounts connected to this account, as the account centre lists them. */
   social: { connector: string; display_name: string }[];
+  /** RBAC roles an administrator assigned to this account. */
+  roles: { id: string; name: string }[];
 }
 
 /**

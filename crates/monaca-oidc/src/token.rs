@@ -381,6 +381,8 @@ pub struct IdTokenClaims {
     pub auth_time: Option<i64>,
     /// `at_hash`, the access token's left-half digest (OIDC Core §3.1.3.6).
     pub at_hash: Option<String>,
+    /// `roles`, the RBAC role names granted to this account; omitted when it holds none (§7.3).
+    pub roles: Vec<String>,
 }
 
 impl IdTokenClaims {
@@ -409,6 +411,9 @@ impl IdTokenClaims {
         }
         if let Some(at_hash) = &self.at_hash {
             value["at_hash"] = Value::String(at_hash.clone());
+        }
+        if !self.roles.is_empty() {
+            value["roles"] = json!(self.roles);
         }
         value
     }
@@ -627,10 +632,32 @@ mod tests {
             name: None,
             auth_time: Some(90),
             at_hash: Some(at_hash("access-token")),
+            roles: vec!["admin".into()],
         };
         let value = claims.to_json();
         assert_eq!(value["auth_time"], json!(90));
         assert_eq!(value["at_hash"], json!(at_hash("access-token")));
+        assert_eq!(value["roles"], json!(["admin"]));
+    }
+
+    #[test]
+    fn an_account_without_roles_gets_no_roles_claim() {
+        let claims = IdTokenClaims {
+            iss: "http://localhost:8080/t/demo".into(),
+            sub: "acc_x".into(),
+            aud: "monaca-console".into(),
+            tid: "ten_x".into(),
+            org: "org_x".into(),
+            iat: 100,
+            exp: 200,
+            nonce: None,
+            email: None,
+            name: None,
+            auth_time: None,
+            at_hash: None,
+            roles: Vec::new(),
+        };
+        assert!(claims.to_json().get("roles").is_none());
     }
 
     #[test]

@@ -91,6 +91,28 @@ pub struct SocialStateRow {
     pub account_id: Option<Uuid>,
 }
 
+/// An RBAC role in `tenant.roles` (§6.2).
+#[derive(Debug, Clone, FromRow)]
+pub struct RoleRow {
+    /// Row id; its typed form is the `rol_…` id the API uses.
+    pub id: Uuid,
+    /// The unique, human-readable name.
+    pub name: String,
+    /// Free-form description.
+    pub description: String,
+    /// The permission scopes the role grants.
+    pub permissions: Vec<String>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+impl RoleRow {
+    /// The role's typed id.
+    pub fn role_id(&self) -> monaca_types::RoleId {
+        monaca_types::RoleId::from_uuid(self.id)
+    }
+}
+
 /// A browser remembered past the second factor (§6.1).
 #[derive(Debug, Clone, FromRow)]
 pub struct TrustedDeviceRow {
@@ -1090,6 +1112,122 @@ impl Store {
             .execute(&pool)
             .await?;
         Ok(true)
+    }
+
+    /// Every role the tenant defined, by name.
+    pub async fn roles(&self, tenant: &TenantRow) -> Result<Vec<RoleRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, RoleRow>(
+            "SELECT id, name, description, permissions, created_at
+             FROM tenant.roles ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One role by its typed uuid.
+    pub async fn role_by_id(
+        &self,
+        tenant: &TenantRow,
+        role_id: Uuid,
+    ) -> Result<Option<RoleRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, RoleRow>(
+            "SELECT id, name, description, permissions, created_at
+             FROM tenant.roles WHERE id = $1",
+        )
+        .bind(role_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Create a role; a name another row holds is `AlreadyExists { entity: "role" }`.
+    pub async fn create_role(
+        &self,
+        tenant: &TenantRow,
+        name: &str,
+        description: &str,
+        permissions: &[String],
+    ) -> Result<RoleRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query_as::<_, RoleRow>(
+            "INSERT INTO tenant.roles (id, name, description, permissions)
+             VALUES ($1,$2,$3,$4)
+             RETURNING id, name, description, permissions, created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(name)
+        .bind(description)
+        .bind(permissions)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| unique_conflict(err, "role"))
+    }
+
+    /// Delete a role, and with it every assignment; false when it did not exist.
+    pub async fn delete_role(&self, tenant: &TenantRow, role_id: Uuid) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.roles WHERE id = $1")
+            .bind(role_id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Assign a role to an account; the primary key makes a second assignment a no-op the caller
+    /// treats as success.
+    pub async fn assign_role(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        role_id: Uuid,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.account_roles (account_id, role_id) VALUES ($1,$2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(account_id.uuid())
+        .bind(role_id)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove one assignment; false when the account did not hold the role.
+    pub async fn unassign_role(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        role_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result =
+            sqlx::query("DELETE FROM tenant.account_roles WHERE account_id = $1 AND role_id = $2")
+                .bind(account_id.uuid())
+                .bind(role_id)
+                .execute(&pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// The roles an account holds, by name.
+    pub async fn account_roles(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Vec<RoleRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, RoleRow>(
+            "SELECT r.id, r.name, r.description, r.permissions, r.created_at
+             FROM tenant.roles r
+             JOIN tenant.account_roles a ON a.role_id = r.id
+             WHERE a.account_id = $1
+             ORDER BY r.name",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&pool)
+        .await?)
     }
 
     /// Replace the account's password with a new argon2id PHC string.

@@ -99,6 +99,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "one-time sign-in links (M1)",
         include_str!("../migrations/tenant_12.sql"),
     ),
+    (
+        13,
+        "RBAC roles and account assignments (M1)",
+        include_str!("../migrations/tenant_13.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

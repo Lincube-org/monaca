@@ -2282,6 +2282,13 @@ async fn authorization_code_grant(
                 .then(|| account.display_name.clone()),
             auth_time: Some(row.auth_time.unix_timestamp()),
             at_hash: Some(at_hash(&access_token)),
+            roles: state
+                .store
+                .account_roles(&tenant, account.account_id())
+                .await?
+                .into_iter()
+                .map(|role| role.name)
+                .collect(),
         };
         Some(
             key.sign("JWT", &id_claims.to_json())
@@ -2459,6 +2466,13 @@ async fn refresh_grant(
                 .then(|| account.display_name.clone()),
             auth_time: Some(row.auth_time.unix_timestamp()),
             at_hash: Some(at_hash(&access_token)),
+            roles: state
+                .store
+                .account_roles(&tenant, account.account_id())
+                .await?
+                .into_iter()
+                .map(|role| role.name)
+                .collect(),
         };
         Some(
             key.sign("JWT", &id_claims.to_json())

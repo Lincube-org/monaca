@@ -190,6 +190,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "with a code and the token exchange mints an id_token for the account; the same URL is 401 on " +
       "replay and a made-up token is 401",
   },
+  {
+    step: "19",
+    title: "roles",
+    assertion:
+      "POST /v1/roles creates a role with permission scopes (a duplicate name is 409 MONACA_ROLE_EXISTS) " +
+      "and GET lists it; assigning it to an account is 204 and the id_token carries it in `roles`; " +
+      "assigning an unknown role is 404; unassigning is 204 and the next id_token has no roles claim; " +
+      "DELETE /v1/roles is 204 and a missing one is 404",
+  },
 ];
 
 interface StepResult {
@@ -3574,6 +3583,203 @@ async function signInLinkFlow(
   };
 }
 
+/**
+ * Step 19 — RBAC roles (§6.2, §7.3).
+ *
+ * A role names permission scopes; assigning it to an account makes its name appear in that
+ * account's id_token `roles` claim. Unassigning removes it, deleting the role removes every
+ * assignment, and duplicate names or unknown roles are refused.
+ */
+async function roleFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const roleName = `role-${runId}`;
+  const email = `role-${runId}@demo.localhost`;
+  const password = `pw-${runId}-role`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "19",
+    title: "roles",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction. */
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `r-${tag}-${runId}-${"t".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in, returning the token the flow minted. */
+  const signInToken = async (tag: string): Promise<Record<string, unknown> | undefined> => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const signIn = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+    if (signIn.status !== 200 || typeof redirectTo !== "string") {
+      detail = `sign-in(${tag}) → ${signIn.status} ${text(signIn.body)}`;
+      return undefined;
+    }
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: started.verifier },
+      basic,
+    );
+    const claims = jwtClaims((token.body as { id_token?: unknown })?.id_token);
+    if (token.status !== 200 || claims === undefined) {
+      detail = `token(${tag}) → ${token.status} ${text(token.body)}`;
+      return undefined;
+    }
+    return claims;
+  };
+
+  try {
+    // --- a role, its uniqueness and its permissions ----------------------------------------------
+    const created = await call(`${base}/v1/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, description: "e2e", permissions: ["tools:read"] }),
+    });
+    const roleId = (created.body as { id?: string })?.id;
+    checks.push([
+      "POST /v1/roles is 201 and echoes the permission",
+      created.status === 201 &&
+        roleId !== undefined &&
+        Array.isArray((created.body as { permissions?: unknown })?.permissions) &&
+        ((created.body as { permissions: string[] }).permissions).includes("tools:read"),
+    ]);
+    if (roleId === undefined) return fail("the role carried no id");
+
+    const duplicate = await call(`${base}/v1/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, permissions: [] }),
+    });
+    checks.push([
+      "a duplicate role name is 409 MONACA_ROLE_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_ROLE_EXISTS",
+    ]);
+
+    const listed = await call(`${base}/v1/roles`, { headers });
+    checks.push([
+      "GET /v1/roles lists the role",
+      listed.status === 200 && JSON.stringify(listed.body).includes(roleName),
+    ]);
+
+    // --- assigning it puts the name in the account and its id_token -----------------------------
+    const createdAccount = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Role holder", password }),
+    });
+    const accountId = (createdAccount.body as { id?: string })?.id;
+    if (createdAccount.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${createdAccount.status} ${text(createdAccount.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const assigned = await call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "POST",
+      headers,
+    });
+    const fetched = await call(`${base}/v1/accounts/${accountId}`, { headers });
+    checks.push([
+      "POST /v1/accounts/{id}/roles/{role} is 204 and GET lists it",
+      assigned.status === 204 && JSON.stringify(fetched.body).includes(roleName),
+    ]);
+
+    const claims = await signInToken("assigned");
+    if (claims === undefined) return fail("");
+    checks.push([
+      "the id_token carries the role name",
+      Array.isArray(claims.roles) && (claims.roles as string[]).includes(roleName),
+    ]);
+
+    const unknown = await call(`${base}/v1/accounts/${accountId}/roles/rol_01h455vb4pex5vsknk084sn02q`, {
+      method: "POST",
+      headers,
+    });
+    checks.push(["assigning an unknown role is 404", unknown.status === 404]);
+
+    // --- unassigning removes it; re-signing in has no roles claim --------------------------------
+    const unassigned = await call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["DELETE /v1/accounts/{id}/roles/{role} is 204", unassigned.status === 204]);
+
+    const claimsAfter = await signInToken("unassigned");
+    if (claimsAfter === undefined) return fail("");
+    checks.push([
+      "re-signing in carries no roles claim",
+      claimsAfter.roles === undefined,
+    ]);
+
+    // --- deleting the role removes it (and any assignment left) ---------------------------------
+    const removed = await call(`${base}/v1/roles/${roleId}`, { method: "DELETE", headers });
+    checks.push(["DELETE /v1/roles/{role} is 204", removed.status === 204]);
+
+    const missing = await call(`${base}/v1/roles/${roleId}`, { method: "DELETE", headers });
+    checks.push(["deleting a missing role is 404", missing.status === 404]);
+  } catch (error) {
+    // A thrown fetch means a request never got an answer; a step with only passing checks so far
+    // must not be reported as green.
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "19",
+    title: "roles",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: create → duplicate 409 → assign → id_token roles → unknown 404 → unassign → no claim → delete → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -3821,6 +4027,7 @@ async function main(): Promise<number> {
   push(await trustedDeviceFlow(base, adminToken, parsed.consoleSecret));
   push(await accountDeletionFlow(base, adminToken, parsed.internalSecret));
   push(await signInLinkFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
+  push(await roleFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

@@ -181,6 +181,7 @@ fn is_known_prefix(prefix: &str) -> bool {
             | "key"
             | "pky"
             | "mfd"
+            | "rol"
     )
 }
 
@@ -337,6 +338,11 @@ typed_id!(
     /// Trusted MFA device (`mfd_…`): a browser remembered past the second factor.
     TrustedDeviceId,
     "mfd"
+);
+typed_id!(
+    /// RBAC role (`rol_…`): a named set of permission scopes.
+    RoleId,
+    "rol"
 );
 
 #[cfg(test)]

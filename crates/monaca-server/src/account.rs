@@ -119,6 +119,10 @@ async fn profile_json(
         .trusted_devices(tenant, account.account_id())
         .await?
         .len();
+    let roles = state
+        .store
+        .account_roles(tenant, account.account_id())
+        .await?;
     Ok(json!({
         "id": account.account_id().to_typed_string(),
         "email": account.primary_email,
@@ -134,6 +138,10 @@ async fn profile_json(
         "social": social
             .iter()
             .map(|row| json!({ "connector": row.connector, "display_name": row.display_name }))
+            .collect::<Vec<_>>(),
+        "roles": roles
+            .iter()
+            .map(|row| json!({ "id": row.role_id().to_typed_string(), "name": row.name }))
             .collect::<Vec<_>>(),
     }))
 }

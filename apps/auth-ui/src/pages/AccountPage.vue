@@ -937,6 +937,20 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
             </p>
           </div>
 
+          <!-- Roles are assigned by an administrator; the account centre only reports them. -->
+          <div
+            v-if="account.roles.length > 0"
+            class="flex flex-col gap-1.5 rounded-lg border border-rule bg-surface-muted px-3 py-3"
+          >
+            <h2 class="text-[13px] font-semibold text-ink">{{ t("account.rolesTitle") }}</h2>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.rolesNote") }}</p>
+            <div class="flex flex-wrap gap-1.5">
+              <Badge v-for="role in account.roles" :key="role.id" variant="muted">
+                {{ role.name }}
+              </Badge>
+            </div>
+          </div>
+
           <!-- Password: proving the current one means a stolen cookie cannot lock the owner out. -->
           <div v-if="hasPassword" class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
             <div class="flex items-center gap-1.5">
