@@ -2069,26 +2069,28 @@ async fn end_session_core(
     };
 
     // End the browser's session, whether or not the caller named a client.
-    if let Some(session_id) = session::session_id(&headers) {
-        let revoked = state.store.revoke_session(&tenant, session_id).await?;
-        if revoked {
-            let event = AuditEvent {
-                id: EventId::new(),
-                at: state.now(),
-                action: "session.logout".into(),
-                actor_chain: Vec::new(),
-                subject: AuditSubject {
-                    subject_type: AuditActorType::Session,
-                    id: Some(monaca_types::SessionId::from_uuid(session_id).to_typed_string()),
-                },
-                decision: AuditDecision::Allow,
-                grant_id: None,
-                jti: None,
-                payload: json!({ "client_id": client.as_ref().map(|c| c.client_id.clone()) }),
-            };
-            if let Err(err) = state.audit_tenant(&tenant, &event).await {
-                tracing::warn!(%err, "could not append session.logout audit event");
-            }
+    if let Some(session_id) = session::session_id(&headers)
+        && let Some(row) = state.store.session_by_id(&tenant, session_id).await?
+        && state.store.revoke_session(&tenant, session_id).await?
+    {
+        // The account behind the session is the actor: §8.1 forbids an empty chain, and the
+        // session row is the only place it can be read.
+        let event = AuditEvent {
+            id: EventId::new(),
+            at: state.now(),
+            action: "session.logout".into(),
+            actor_chain: vec![AuditActor::account(AccountId::from_uuid(row.account_id))],
+            subject: AuditSubject {
+                subject_type: AuditActorType::Session,
+                id: Some(monaca_types::SessionId::from_uuid(session_id).to_typed_string()),
+            },
+            decision: AuditDecision::Allow,
+            grant_id: None,
+            jti: None,
+            payload: json!({ "client_id": client.as_ref().map(|c| c.client_id.clone()) }),
+        };
+        if let Err(err) = state.audit_tenant(&tenant, &event).await {
+            tracing::warn!(%err, "could not append session.logout audit event");
         }
     }
 
