@@ -17,7 +17,7 @@ use monaca_crypto::{
     generate_totp_secret, hash_password, hash_secret, seal, totp_base32, totp_otpauth_url,
     verify_password, verify_registration, verify_totp,
 };
-use monaca_store::{AccountRow, PasskeyRow, SessionRow, TenantRow, TrustedDeviceRow};
+use monaca_store::{AccountRow, PasskeyRow, SessionRow, TenantRow, TrustedDeviceRow, topics};
 use monaca_types::{AccountId, EventId, PasskeyId, SessionId, TrustedDeviceId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -284,6 +284,7 @@ pub async fn verify_email_change(
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
     let email = crate::protocol::normalise_email(&body.email)?;
+    let previous = account.primary_email.clone();
     crate::protocol::take_verification_code(
         &state,
         &tenant,
@@ -296,7 +297,29 @@ pub async fn verify_email_change(
         .store
         .update_primary_email(&tenant, account.account_id(), &email)
         .await?;
+    // The previous owner of the address is told the address no longer belongs to this account.
+    notify(&state, &tenant, &previous, "email_changed").await?;
     Ok(Json(profile_json(&state, &tenant, &account).await?))
+}
+
+/// Mail a security notice through the dev outbox. There is no code: the payload is the fact itself.
+async fn notify(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    to: &str,
+    purpose: &str,
+) -> Result<(), ApiError> {
+    let mut tx = state.store.begin_tenant(tenant).await?;
+    state
+        .store
+        .outbox_append(
+            &mut *tx,
+            topics::MAIL,
+            &json!({ "to": to, "purpose": purpose }),
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// The body of `POST /t/{tenant}/account/deletion/confirm`.
@@ -344,6 +367,7 @@ pub async fn confirm_deletion(
         &body.code,
     )
     .await?;
+    notify(&state, &tenant, &account.primary_email, "account_deleted").await?;
     if !state
         .store
         .delete_account(&tenant, account.account_id())
@@ -443,6 +467,7 @@ pub async fn change_password(
         .store
         .revoke_other_sessions(&tenant, account.account_id(), current_session)
         .await?;
+    notify(&state, &tenant, &account.primary_email, "password_changed").await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

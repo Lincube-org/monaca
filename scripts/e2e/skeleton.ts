@@ -1400,7 +1400,11 @@ async function mfaFlow(base: string, adminToken: string, consoleSecret: string):
  * the password change has another session to revoke and the sessions list has a `current` row to
  * mark. Revoking a session is checked by calling `GET /account` with that cookie afterwards.
  */
-async function accountFlow(base: string, adminToken: string): Promise<StepResult> {
+async function accountFlow(
+  base: string,
+  adminToken: string,
+  internalSecret: string,
+): Promise<StepResult> {
   const t = performance.now();
   const runId = Date.now().toString(36);
   const redirectUri = "http://localhost:5173/bff/callback";
@@ -1530,6 +1534,12 @@ async function accountFlow(base: string, adminToken: string): Promise<StepResult
       body: JSON.stringify({ current_password: firstPassword, new_password: secondPassword }),
     });
     checks.push(["the right current password changes it", changed.status === 204]);
+
+    const passwordNotice = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "password_changed" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    checks.push(["the password change mails a notice", passwordNotice.status === 200]);
 
     const stale = await signIn("stale", firstPassword);
     checks.push(["the old password no longer signs in", stale !== undefined && stale.status === 401]);
@@ -2629,6 +2639,12 @@ async function emailChangeFlow(
       confirmed.status === 200 && (confirmed.body as { email?: unknown })?.email === emailNew,
     ]);
 
+    const changeNotice = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: emailOld, purpose: "email_changed" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    checks.push(["the previous address is told about the change", changeNotice.status === 200]);
+
     const profile = await call(`${base}/t/${TENANT}/account`, { headers: cookieA });
     checks.push([
       "GET /account echoes the new address",
@@ -3396,6 +3412,12 @@ async function accountDeletionFlow(
       confirmed.status === 204 &&
         (confirmed.headers.get("set-cookie") ?? "").includes("monaca_session="),
     ]);
+
+    const deletionNotice = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "account_deleted" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    checks.push(["the deletion mails a notice", deletionNotice.status === 200]);
 
     const oldSession = await call(`${base}/t/${TENANT}/account`, { headers: cookie });
     checks.push(["the old session is no longer accepted", oldSession.status === 401]);
@@ -4176,7 +4198,7 @@ async function main(): Promise<number> {
   push(await sessionFlow(base, parsed.consoleSecret, adminToken));
   push(await emailFlow(base, parsed.consoleSecret, parsed.internalSecret));
   push(await mfaFlow(base, adminToken, parsed.consoleSecret));
-  push(await accountFlow(base, adminToken));
+  push(await accountFlow(base, adminToken, parsed.internalSecret));
   push(await backupCodeFlow(base, adminToken, parsed.consoleSecret));
   push(await passkeyFlow(base, adminToken, parsed.consoleSecret));
   push(await usernameFlow(base, adminToken, parsed.consoleSecret));
