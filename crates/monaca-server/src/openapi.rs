@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 14);
+        assert_eq!(M0_ACTIONS.len(), 16);
         for action in [
             "account.created",
             "org.member.added",
@@ -194,6 +194,8 @@ mod tests {
             "tool.denied",
             "interaction.sign_in.succeeded",
             "interaction.sign_in.failed",
+            "connector.created",
+            "connector.deleted",
         ] {
             assert!(
                 M0_ACTIONS.contains(&action),
