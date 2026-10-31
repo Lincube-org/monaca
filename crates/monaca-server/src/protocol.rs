@@ -1066,11 +1066,13 @@ pub struct LinkTokenQuery {
 /// consent) redirects back to the sign-in page, exactly like any other primary proof.
 pub async fn sign_in_link_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Query(query): Query<LinkTokenQuery>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    // The token is checked before the interaction: a replay must answer 401 like any other dead
+    // link, not disclose that the interaction was already consumed.
+    let tenant = state.tenant(&tenant_slug).await?;
     let invalid = || {
         ApiError::problem(
             kinds::INVALID_VERIFICATION_CODE,
@@ -1097,6 +1099,17 @@ pub async fn sign_in_link_verify(
         .await?
     {
         return Err(invalid());
+    }
+
+    let interaction = state
+        .peek_interaction(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    if interaction.tenant != tenant.slug {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the interaction belongs to another tenant",
+        ));
     }
 
     let Some((account, _)) = state
