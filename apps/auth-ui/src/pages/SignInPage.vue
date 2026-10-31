@@ -339,6 +339,11 @@ onMounted(async () => {
 
   try {
     details.value = await getInteraction(tenantFromUrl.value, interactionId.value);
+    // A `login_hint` from the authorize request prefills the identifier. It stays editable: it is
+    // a hint about who the client expects, not an assertion about who this browser is.
+    if (details.value.login_hint) {
+      email.value = details.value.login_hint;
+    }
     // A valid SSO session already authenticated this interaction; only the consent step remains.
     if (details.value.signed_in && details.value.consent_required) {
       consentRequired.value = true;
@@ -358,6 +363,8 @@ onMounted(async () => {
     await nextTick();
     if (!loadError.value) {
       if (mfaRequired.value) mfaInput.value?.$el?.focus?.();
+      // With a prefilled identifier the password is the only thing left to type.
+      else if (details.value?.login_hint && mode.value === "password") passwordInput.value?.$el?.focus?.();
       else emailInput.value?.$el?.focus?.();
     }
   }

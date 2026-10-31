@@ -34,6 +34,8 @@ pub struct Interaction {
     pub code_challenge: String,
     /// OIDC nonce.
     pub nonce: Option<String>,
+    /// The authorize request's `login_hint`, so the page can prefill its identifier field.
+    pub login_hint: Option<String>,
     /// RFC 8707 resource.
     pub resource: Option<String>,
     /// The `state` to echo on the final redirect.
@@ -58,6 +60,7 @@ impl Interaction {
             "client": { "client_id": self.client_id, "name": self.client_name },
             "scopes": self.scopes,
             "organization": self.organization,
+            "login_hint": self.login_hint,
             "consent_required": self.consent_required,
             "signed_in": signed_in,
             "expires_at": self.expires_at,
@@ -125,6 +128,7 @@ mod tests {
             organization: "acme".into(),
             code_challenge: "challenge".into(),
             nonce: None,
+            login_hint: Some("person@demo.localhost".into()),
             resource: None,
             state: "s".into(),
             dpop_jkt: None,
@@ -141,6 +145,7 @@ mod tests {
         assert_eq!(value["client"]["name"], "Monaca Console");
         assert_eq!(value["scopes"], json!(["openid"]));
         assert_eq!(value["organization"], "acme");
+        assert_eq!(value["login_hint"], "person@demo.localhost");
         assert_eq!(value["consent_required"], json!(false));
         assert_eq!(value["signed_in"], json!(false));
         assert_eq!(
@@ -153,6 +158,14 @@ mod tests {
         assert!(value.get("state").is_none());
         assert!(value.get("nonce").is_none());
         assert!(value.get("dpop_jkt").is_none());
+    }
+
+    #[test]
+    fn an_absent_login_hint_is_reported_as_null() {
+        // The key is always present so the page can bind it without a conditional type.
+        let mut value = interaction();
+        value.login_hint = None;
+        assert_eq!(value.to_public_json(false)["login_hint"], json!(null));
     }
 
     #[test]

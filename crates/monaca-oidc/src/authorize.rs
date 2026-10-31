@@ -29,6 +29,8 @@ pub struct AuthorizeParams {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce, echoed into the id_token.
     pub nonce: Option<String>,
+    /// OpenID Connect Core §3.1.2.1: a hint naming the account the client expects to sign in.
+    pub login_hint: Option<String>,
     /// RFC 8707 resource.
     pub resource: Option<String>,
     /// Monaca extension: the org slug the flow issues into.
@@ -58,6 +60,8 @@ pub struct AuthorizeRequest {
     pub code_challenge: String,
     /// Echoed into the id_token.
     pub nonce: Option<String>,
+    /// A non-binding hint for the auth-ui's identifier field.
+    pub login_hint: Option<String>,
     /// RFC 8707 resource, which becomes the access token's `aud`.
     pub resource: Option<String>,
     /// The requested org slug.
@@ -172,6 +176,14 @@ impl AuthorizeParams {
             state,
             code_challenge,
             nonce: self.nonce.clone().filter(|value| !value.is_empty()),
+            // The hint is never checked against the account table: doing so would turn the
+            // authorize endpoint into an address oracle, and the page must let it be edited.
+            login_hint: self
+                .login_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             resource: self.resource.clone().filter(|value| !value.is_empty()),
             organization: self.organization.clone().filter(|value| !value.is_empty()),
             prompt,
@@ -271,6 +283,7 @@ mod tests {
             code_challenge: Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into()),
             code_challenge_method: Some("S256".into()),
             nonce: Some("n".into()),
+            login_hint: None,
             resource: Some("http://localhost:8080/v1".into()),
             organization: Some("acme".into()),
             prompt: None,
@@ -387,6 +400,20 @@ mod tests {
         let mut params = valid();
         params.max_age = Some("".into());
         assert_eq!(params.validate().expect("valid").max_age, None);
+    }
+
+    #[test]
+    fn login_hint_is_trimmed_and_optional() {
+        let mut params = valid();
+        params.login_hint = Some("  person@demo.localhost  ".into());
+        assert_eq!(
+            params.validate().expect("valid").login_hint.as_deref(),
+            Some("person@demo.localhost")
+        );
+
+        let mut params = valid();
+        params.login_hint = Some("   ".into());
+        assert_eq!(params.validate().expect("valid").login_hint, None);
     }
 
     #[test]

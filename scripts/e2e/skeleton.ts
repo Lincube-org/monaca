@@ -207,6 +207,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "403 MONACA_INSUFFICIENT_SCOPE; after a role granting tools:read is assigned the same sign-in " +
       "completes and the access token carries tools:read; deleting the role is 204",
   },
+  {
+    step: "21",
+    title: "login hint",
+    assertion:
+      "GET authorize with `login_hint` → GET interaction echoes it for the auth-ui to prefill; an " +
+      "authorize without one reports null, and a hint naming an unknown address is echoed too (the " +
+      "endpoint is not an address oracle); signing in with the hinted identifier mints a token",
+  },
 ];
 
 interface StepResult {
@@ -3960,6 +3968,151 @@ async function scopeGrantFlow(
   };
 }
 
+/**
+ * Step 21 — OIDC `login_hint` prefills the hosted sign-in page (OpenID Connect Core §3.1.2.1).
+ *
+ * The hint travels with the authorize request into the interaction details, so the page can put it
+ * in the identifier field. It is only a hint: a request without one reports null, a hint naming an
+ * address that has no account is echoed just the same (the endpoint is not an address oracle), and
+ * the visitor may type another identifier. Signing in with the hinted address proves the flow
+ * still completes.
+ */
+async function loginHintFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const email = `hint-${runId}@demo.localhost`;
+  const password = `pw-${runId}-hint`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "21",
+    title: "login hint",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction, optionally carrying `login_hint`. */
+  const begin = async (hint?: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `h-${runId}-${"u".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const query = new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email",
+      state: `st-hint-${runId}`,
+      nonce: `n-hint-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    });
+    if (hint !== undefined) query.set("login_hint", hint);
+    const response = await call(`${base}/t/${TENANT}/oauth2/authorize?${query}`, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${hint ?? "none"}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Hint holder", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    // --- the hint is carried into the interaction details, and stays optional --------------------
+    const hinted = await begin(email);
+    const without = await begin();
+    if (hinted === undefined || without === undefined) return fail("");
+
+    const hintedDetails = await call(`${base}/t/${TENANT}/interaction/${hinted.interaction}`);
+    checks.push([
+      "GET interaction echoes the login_hint for the page to prefill",
+      hintedDetails.status === 200 &&
+        (hintedDetails.body as { login_hint?: unknown })?.login_hint === email,
+    ]);
+
+    const plainDetails = await call(`${base}/t/${TENANT}/interaction/${without.interaction}`);
+    checks.push([
+      "an authorize without login_hint reports null",
+      plainDetails.status === 200 && (plainDetails.body as { login_hint?: unknown })?.login_hint === null,
+    ]);
+
+    // --- a hint is not a lookup: an address with no account is echoed just the same --------------
+    const unknownEmail = `nobody-${runId}@demo.localhost`;
+    const unknown = await begin(unknownEmail);
+    if (unknown === undefined) return fail("");
+    const unknownDetails = await call(`${base}/t/${TENANT}/interaction/${unknown.interaction}`);
+    checks.push([
+      "a hint naming an unknown address is echoed without disclosing anything",
+      unknownDetails.status === 200 &&
+        (unknownDetails.body as { login_hint?: unknown })?.login_hint === unknownEmail,
+    ]);
+
+    // --- the prefilled identifier completes the flow like any other sign-in ----------------------
+    const signIn = await call(`${base}/t/${TENANT}/interaction/${hinted.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "signing in with the hinted identifier completes",
+      signIn.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (typeof redirectTo !== "string") return fail("the hinted sign-in returned no redirect_to");
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: hinted.verifier },
+      basic,
+    );
+    const claims = jwtClaims((token.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "the token exchange mints an id_token for that account",
+      token.status === 200 && claims?.email === email,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "21",
+    title: "login hint",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: hint echoed → absent null → unknown echoed → sign-in → id_token`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -4209,6 +4362,7 @@ async function main(): Promise<number> {
   push(await signInLinkFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await roleFlow(base, adminToken, parsed.consoleSecret));
   push(await scopeGrantFlow(base, adminToken, parsed.consoleSecret));
+  push(await loginHintFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

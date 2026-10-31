@@ -33,6 +33,8 @@ export interface InteractionDetails {
   client: { client_id: string; name: string };
   scopes: string[];
   organization: string | null;
+  /** The authorize request's `login_hint`, prefilled into the identifier field (OIDC Core §3.1.2.1). */
+  login_hint: string | null;
   /** Whether the flow must show the consent screen before a code is issued. */
   consent_required: boolean;
   /** Whether a cross-application session already authenticated this interaction. */

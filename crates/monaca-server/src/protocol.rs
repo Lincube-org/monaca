@@ -266,6 +266,7 @@ fn build_interaction(
         organization: org.slug.clone(),
         code_challenge: request.code_challenge.clone(),
         nonce: request.nonce.clone(),
+        login_hint: request.login_hint.clone(),
         resource: request.resource.clone(),
         state: request.state.clone(),
         dpop_jkt: request.dpop_jkt.clone(),
