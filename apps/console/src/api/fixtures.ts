@@ -17,6 +17,7 @@ import type {
   OrgRole,
   OrgRoleDetail,
   SignInExperience,
+  SsoConnector,
   TenantRole,
 } from "./types";
 
@@ -399,6 +400,34 @@ export function seedConnectors(): Connector[] {
       client_id: "demo-google-client",
       scopes: ["openid", "profile", "email"],
       created_at: at(360 * 60),
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Enterprise SSO
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One federated identity provider.
+ *
+ * The demo tenant's accounts are at `demo.localhost`, so the seeded connector owns a separate
+ * partner domain: the sign-in page routes any address there to the provider instead of the password
+ * form, and the demo directory keeps its ordinary sign-in.
+ */
+export function seedSsoConnectors(): SsoConnector[] {
+  return [
+    {
+      connector_id: "partner-oidc",
+      display_name: "Partner OIDC",
+      issuer: "https://idp.partner.example",
+      authorize_url: "https://idp.partner.example/oauth2/authorize",
+      token_url: "https://idp.partner.example/oauth2/token",
+      userinfo_url: "https://idp.partner.example/oauth2/userinfo",
+      client_id: "demo-partner-client",
+      scopes: ["openid", "profile", "email"],
+      email_domains: ["partner.example"],
+      created_at: at(300 * 60),
     },
   ];
 }

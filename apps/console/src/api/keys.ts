@@ -24,6 +24,8 @@ export const queryKeys = {
 
   connectors: () => ["connectors"] as const,
 
+  ssoConnectors: () => ["sso-connectors"] as const,
+
   signInExperience: () => ["sign-in-experience"] as const,
 
   members: (org: string) => ["members", org] as const,

@@ -72,6 +72,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Connectors" },
   },
   {
+    path: "/sso-connectors",
+    name: "sso-connectors",
+    component: () => import("@/pages/SsoConnectorsPage.vue"),
+    meta: { title: "Enterprise SSO" },
+  },
+  {
     path: "/agents",
     name: "agents",
     component: () => import("@/pages/AgentsPage.vue"),

@@ -20,6 +20,7 @@ import type {
   CreateOrganizationRequest,
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
+  CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
   CreatedClient,
   Grant,
@@ -36,6 +37,7 @@ import type {
   RevokedSessions,
   SessionInfo,
   SignInExperience,
+  SsoConnector,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
@@ -115,6 +117,14 @@ export interface MonacaApi {
   listConnectors(): Promise<Page<Connector>>;
   createConnector(body: CreateConnectorRequest): Promise<Connector>;
   deleteConnector(connectorId: string): Promise<void>;
+
+  /**
+   * Enterprise SSO identity providers, tenant-level like social connectors. A connector owns the
+   * email domains whose sign-ins it federates, and its client secret is never returned.
+   */
+  listSsoConnectors(): Promise<Page<SsoConnector>>;
+  createSsoConnector(body: CreateSsoConnectorRequest): Promise<SsoConnector>;
+  deleteSsoConnector(connectorId: string): Promise<void>;
 
   /**
    * The hosted sign-in switches — the one tenant-level screen that changes what every application's

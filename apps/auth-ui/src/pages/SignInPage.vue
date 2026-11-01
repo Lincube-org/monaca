@@ -3,6 +3,7 @@ import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, Scope
 import {
   AlertCircle,
   ArrowLeft,
+  Building2,
   Check,
   Eye,
   EyeOff,
@@ -12,7 +13,7 @@ import {
   Mail,
   ShieldCheck,
 } from "lucide-vue-next";
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 
 import {
   InteractionError,
@@ -44,6 +45,7 @@ import {
   socialSignInUrl,
   type SocialConnector,
 } from "@/api/social";
+import { findSsoConnector, ssoSignInUrl, type SsoConnector } from "@/api/sso";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 
@@ -161,6 +163,18 @@ const username = ref("");
 
 /** Provider buttons; the tenant's public list is fetched once and never blocks the page. */
 const socialConnectors = ref<SocialConnector[]>([]);
+
+/**
+ * Enterprise SSO routing.
+ *
+ * The connector that owns the typed address's domain, if any. A matching address is sent to the
+ * provider before the password form can be submitted — the tenant cannot check a password it does
+ * not hold. The redirect happens at most once per interaction: the provider round-trip returns to
+ * this page on failure, and a page that redirected again on load would loop.
+ */
+const ssoConnector = ref<SsoConnector | null>(null);
+const ssoRedirecting = ref(false);
+let ssoLookupToken = 0;
 
 /**
  * The tenant's hosted switches. `null` means "everything is offered": a failed read must not lock
@@ -377,6 +391,9 @@ onMounted(async () => {
       experience.value = null;
     }
     socialConnectors.value = await listSocialConnectors(tenantFromUrl.value);
+    // A prefilled `login_hint` may already name a federated domain; route it without waiting for a
+    // keystroke. The call is fire-and-forget: the ordinary form stays usable until it answers.
+    if (email.value.trim().length > 0) void checkSso(email.value.trim());
   } catch (error) {
     loadError.value = error instanceof Error ? error : new Error(String(error));
   } finally {
@@ -399,6 +416,75 @@ function signInWithProvider(connector: string): void {
   );
 }
 
+/** The sessionStorage marker that limits an automatic SSO redirect to one per interaction. */
+function ssoRedirectMarker(): string | null {
+  return interactionId.value ? `monaca.sso.redirected.${interactionId.value}` : null;
+}
+
+function ssoCanAutoRedirect(): boolean {
+  const marker = ssoRedirectMarker();
+  if (!marker) return false;
+  try {
+    if (sessionStorage.getItem(marker) === "1") return false;
+    sessionStorage.setItem(marker, "1");
+    return true;
+  } catch {
+    // Storage can be unavailable (private mode, an embedded browser); do not redirect then, and
+    // leave the explicit button as the way forward.
+    return false;
+  }
+}
+
+/**
+ * Ask the tenant which connector owns this address's domain.
+ *
+ * Only the flows that accept an email are routed. A code, sign-up or reset form has its own
+ * semantics, and a federated address should not be turned into a local account there.
+ */
+async function checkSso(address: string): Promise<void> {
+  ssoConnector.value = null;
+  ssoRedirecting.value = false;
+
+  const tenant = tenantFromUrl.value;
+  const iid = interactionId.value;
+  if (
+    !tenant ||
+    !iid ||
+    !address.includes("@") ||
+    mfaRequired.value ||
+    consentRequired.value ||
+    awaitingCode.value ||
+    mode.value === "signup" ||
+    mode.value === "reset"
+  ) {
+    return;
+  }
+
+  const token = ++ssoLookupToken;
+  const connector = await findSsoConnector(tenant, address);
+  // A slower lookup for an address the visitor has already replaced must not hijack the form.
+  if (token !== ssoLookupToken) return;
+  ssoConnector.value = connector;
+  if (connector && ssoCanAutoRedirect()) {
+    ssoRedirecting.value = true;
+    window.location.assign(ssoSignInUrl(tenant, connector.connector_id, iid));
+  }
+}
+
+function signInWithSso(): void {
+  const connector = ssoConnector.value;
+  if (!connector || !tenantFromUrl.value || !interactionId.value) return;
+  ssoRedirecting.value = true;
+  window.location.assign(
+    ssoSignInUrl(tenantFromUrl.value, connector.connector_id, interactionId.value),
+  );
+}
+
+watch(email, (value) => {
+  // A short pause after the keystroke keeps a typed address from costing one lookup per character.
+  window.setTimeout(() => void checkSso(value.trim()), 300);
+});
+
 /** Leave the form for whichever flow the visitor picked, keeping only what it can reuse. */
 function switchMode(next: Mode): void {
   mode.value = next;
@@ -413,6 +499,9 @@ function switchMode(next: Mode): void {
   fieldError.value = null;
   submitError.value = null;
   passkeyError.value = null;
+  ssoLookupToken += 1;
+  ssoConnector.value = null;
+  ssoRedirecting.value = false;
   void nextTick(() => {
     if (next === "password") passwordInput.value?.$el?.focus?.();
     else emailInput.value?.$el?.focus?.();
@@ -975,6 +1064,33 @@ async function cancel(): Promise<void> {
               >
                 {{ t(changeEmailKey) }}
               </button>
+            </div>
+
+            <!-- A federated domain signs in at its provider, not with a password this tenant cannot check. -->
+            <div
+              v-if="ssoConnector && !awaitingCode && mode !== 'signup' && mode !== 'reset'"
+              class="flex flex-col gap-2 rounded-md border border-rule bg-surface-muted px-3 py-2.5"
+            >
+              <p class="flex items-start gap-1.5 text-[12px] leading-snug text-ink-muted">
+                <Building2 class="mt-px size-3.5 shrink-0 text-ink-faint" aria-hidden="true" />
+                {{ t("signIn.ssoNote", { name: ssoConnector.display_name }) }}
+              </p>
+              <Button
+                type="button"
+                variant="secondary"
+                block
+                :disabled="ssoRedirecting"
+                :aria-busy="ssoRedirecting"
+                @click="signInWithSso"
+              >
+                <Loader2 v-if="ssoRedirecting" class="animate-spin" />
+                <Building2 v-else />
+                {{
+                  ssoRedirecting
+                    ? t("signIn.ssoRedirecting", { name: ssoConnector.display_name })
+                    : t("signIn.ssoContinue", { name: ssoConnector.display_name })
+                }}
+              </Button>
             </div>
 
             <div v-if="awaitingCode" class="flex flex-col gap-1.5">

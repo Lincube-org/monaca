@@ -21,6 +21,7 @@ import type {
   CreateOrganizationRequest,
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
+  CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
   CreatedClient,
   Grant,
@@ -37,6 +38,7 @@ import type {
   RevokedSessions,
   SessionInfo,
   SignInExperience,
+  SsoConnector,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
@@ -242,6 +244,23 @@ export const httpApi: MonacaApi = {
 
   deleteConnector(connectorId: string): Promise<void> {
     return request<void>(`/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" });
+  },
+
+  listSsoConnectors(): Promise<Page<SsoConnector>> {
+    return request<Page<SsoConnector>>("/sso-connectors");
+  },
+
+  createSsoConnector(body: CreateSsoConnectorRequest): Promise<SsoConnector> {
+    return request<SsoConnector>("/sso-connectors", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteSsoConnector(connectorId: string): Promise<void> {
+    return request<void>(`/sso-connectors/${encodeURIComponent(connectorId)}`, {
+      method: "DELETE",
+    });
   },
 
   getSignInExperience(): Promise<SignInExperience> {

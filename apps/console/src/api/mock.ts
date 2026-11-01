@@ -21,6 +21,7 @@ import {
   seedOrgRoles,
   seedResources,
   seedSignInExperience,
+  seedSsoConnectors,
   seedTenantRoles,
   verifyLog,
   type AuditLog,
@@ -50,6 +51,7 @@ import type {
   CreateOrganizationRequest,
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
+  CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
   CreatedClient,
   Grant,
@@ -65,6 +67,7 @@ import type {
   RevokedSessions,
   SessionInfo,
   SignInExperience,
+  SsoConnector,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
@@ -108,6 +111,7 @@ class MockStore {
   private clientSecrets = new Map<string, string>();
   private resources: ApiResource[] = seedResources();
   private connectors: Connector[] = seedConnectors();
+  private ssoConnectors: SsoConnector[] = seedSsoConnectors();
   private experience: SignInExperience = seedSignInExperience();
   private members: Member[] = seedMembers(this.accounts);
   private emailDomains: SeededEmailDomain[] = seedEmailDomains();
@@ -903,6 +907,140 @@ class MockStore {
     });
   }
 
+  listSsoConnectors(): Page<SsoConnector> {
+    return { items: this.ssoConnectors.map(cloneSsoConnector), next: null };
+  }
+
+  async createSsoConnector(body: CreateSsoConnectorRequest): Promise<SsoConnector> {
+    const connectorId = body.connector_id.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{1,31}$/.test(connectorId)) {
+      throw new ApiError("connector_id must be 2-32 lowercase letters, digits or hyphens", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const displayName = body.display_name.trim();
+    if (displayName.length === 0) {
+      throw new ApiError("display_name must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    for (const [field, url] of [
+      ["issuer", body.issuer],
+      ["authorize_url", body.authorize_url],
+      ["token_url", body.token_url],
+      ["userinfo_url", body.userinfo_url],
+    ] as const) {
+      if (!/^https?:\/\/[^\s]+$/.test(url.trim())) {
+        throw new ApiError(`${field} must be an absolute http(s) URL`, {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
+    if (body.client_id.trim().length === 0 || body.client_secret.length === 0) {
+      throw new ApiError("client_id and client_secret must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    const domains: string[] = [];
+    for (const raw of body.email_domains) {
+      const domain = normaliseDomain(raw);
+      if (domain === null) {
+        throw new ApiError("email_domains must be DNS names of lowercase letters, digits, `-` and `.`", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      if (!domains.includes(domain)) domains.push(domain);
+    }
+    if (domains.length === 0) {
+      throw new ApiError("email_domains must name at least one domain", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    if (this.ssoConnectors.some((connector) => connector.connector_id === connectorId)) {
+      throw new ApiError("SSO connector is already taken", {
+        status: 409,
+        code: "MONACA_SSO_CONNECTOR_EXISTS",
+      });
+    }
+    const claimed = this.ssoConnectors.find((connector) =>
+      connector.email_domains.some((domain) => domains.includes(domain)),
+    );
+    if (claimed) {
+      throw new ApiError("an SSO connector already owns that email domain", {
+        status: 409,
+        code: "MONACA_SSO_DOMAIN_TAKEN",
+      });
+    }
+
+    const scopes: string[] = [];
+    for (const scope of body.scopes ?? []) {
+      const trimmed = scope.trim();
+      if (trimmed.length === 0 || /\s/.test(trimmed)) {
+        throw new ApiError("each scope must be a single non-empty token", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      if (!scopes.includes(trimmed)) scopes.push(trimmed);
+    }
+    if (scopes.length === 0) scopes.push("openid", "profile", "email");
+
+    const connector: SsoConnector = {
+      connector_id: connectorId,
+      display_name: displayName,
+      issuer: body.issuer.trim(),
+      authorize_url: body.authorize_url.trim(),
+      token_url: body.token_url.trim(),
+      userinfo_url: body.userinfo_url.trim(),
+      client_id: body.client_id.trim(),
+      scopes,
+      email_domains: domains,
+      created_at: new Date().toISOString(),
+    };
+    this.ssoConnectors = [...this.ssoConnectors, connector];
+
+    await this.append({
+      action: "sso_connector.created",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { connector_id: connector.connector_id, email_domains: connector.email_domains },
+    });
+    return cloneSsoConnector(connector);
+  }
+
+  async deleteSsoConnector(connectorId: string): Promise<void> {
+    const index = this.ssoConnectors.findIndex(
+      (connector) => connector.connector_id === connectorId,
+    );
+    const connector = this.ssoConnectors[index];
+    if (!connector) {
+      throw new ApiError("SSO connector not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    this.ssoConnectors = [
+      ...this.ssoConnectors.slice(0, index),
+      ...this.ssoConnectors.slice(index + 1),
+    ];
+    await this.append({
+      action: "sso_connector.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { connector_id: connector.connector_id },
+    });
+  }
+
   getSignInExperience(): SignInExperience {
     return { ...this.experience };
   }
@@ -1612,6 +1750,14 @@ function cloneConnector(connector: Connector): Connector {
   return { ...connector, scopes: [...connector.scopes] };
 }
 
+function cloneSsoConnector(connector: SsoConnector): SsoConnector {
+  return {
+    ...connector,
+    scopes: [...connector.scopes],
+    email_domains: [...connector.email_domains],
+  };
+}
+
 /** The server's `RoleId::parse`: a typed `rol_…` id, nothing else. */
 function parseRoleId(roleId: string): void {
   if (!/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(roleId)) {
@@ -1837,6 +1983,18 @@ export const mockApi: MonacaApi = {
   async deleteConnector(connectorId) {
     await delay();
     return store.deleteConnector(connectorId);
+  },
+  async listSsoConnectors() {
+    await delay();
+    return store.listSsoConnectors();
+  },
+  async createSsoConnector(body) {
+    await delay();
+    return store.createSsoConnector(body);
+  },
+  async deleteSsoConnector(connectorId) {
+    await delay();
+    return store.deleteSsoConnector(connectorId);
   },
   async getSignInExperience() {
     await delay();

@@ -25,6 +25,7 @@ import type {
   CreateOrganizationRequest,
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
+  CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
   CreatedClient,
   Grant,
@@ -39,6 +40,7 @@ import type {
   RevokedSessions,
   SessionInfo,
   SignInExperience,
+  SsoConnector,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
@@ -443,6 +445,37 @@ export function useDeleteConnector() {
     mutationFn: ({ connectorId }) => api.deleteConnector(connectorId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.connectors() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+/** Enterprise SSO providers: tenant-level configuration, ordered by slug server-side. */
+export function useSsoConnectors(): UseQueryReturnType<Page<SsoConnector>, Error> {
+  return useQuery({
+    queryKey: queryKeys.ssoConnectors(),
+    queryFn: () => api.listSsoConnectors(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateSsoConnector() {
+  const client = useQueryClient();
+  return useMutation<SsoConnector, Error, CreateSsoConnectorRequest>({
+    mutationFn: (body) => api.createSsoConnector(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.ssoConnectors() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteSsoConnector() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { connectorId: string }>({
+    mutationFn: ({ connectorId }) => api.deleteSsoConnector(connectorId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.ssoConnectors() });
       invalidateTenantAudit(client);
     },
   });

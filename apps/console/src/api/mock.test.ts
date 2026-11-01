@@ -925,6 +925,142 @@ describe("connectors", () => {
   });
 });
 
+describe("enterprise SSO", () => {
+  async function freshSsoSuffix(): Promise<string> {
+    return Math.random().toString(36).slice(2, 8);
+  }
+
+  it("lists the seeded provider with its domains and no secret", async () => {
+    const page = await mockApi.listSsoConnectors();
+    expect(page.next).toBe(null);
+    const seeded = page.items.find((connector) => connector.connector_id === "partner-oidc");
+    expect(seeded?.email_domains).toEqual(["partner.example"]);
+    expect(seeded?.display_name).toBe("Partner OIDC");
+    expect("client_secret" in (seeded ?? {})).toBe(false);
+  });
+
+  it("registers a provider, normalises its domains and appends sso_connector.created", async () => {
+    const suffix = await freshSsoSuffix();
+    const connectorId = `sso-${suffix}`;
+    const domain = `sso-${suffix}.example.com`;
+    const created = await mockApi.createSsoConnector({
+      connector_id: connectorId.toUpperCase(),
+      display_name: "Acme SSO",
+      issuer: "https://sso.example",
+      authorize_url: "https://sso.example/authorize",
+      token_url: "https://sso.example/token",
+      userinfo_url: "https://sso.example/userinfo",
+      client_id: "sso-client",
+      client_secret: "shhh",
+      scopes: [],
+      email_domains: [` ${domain.toUpperCase()} `],
+    });
+    expect(created.connector_id).toBe(connectorId);
+    expect(created.email_domains).toEqual([domain]);
+    expect(created.scopes).toEqual(["openid", "profile", "email"]);
+
+    const audit = await mockApi.listAudit(ORG, { action: "sso_connector.created", limit: 200 });
+    expect(audit.items.some((event) => event.payload["connector_id"] === connectorId)).toBe(true);
+
+    const duplicate = await mockApi
+      .createSsoConnector({
+        connector_id: connectorId,
+        display_name: "Copy",
+        issuer: "https://sso.example",
+        authorize_url: "https://sso.example/authorize",
+        token_url: "https://sso.example/token",
+        userinfo_url: "https://sso.example/userinfo",
+        client_id: "sso-client",
+        client_secret: "x",
+        email_domains: [domain],
+      })
+      .catch((error: unknown) => error);
+    expect((duplicate as ApiError).status).toBe(409);
+    expect((duplicate as ApiError).code).toBe("MONACA_SSO_CONNECTOR_EXISTS");
+
+    const claimed = await mockApi
+      .createSsoConnector({
+        connector_id: `claim-${suffix}`,
+        display_name: "Claim",
+        issuer: "https://sso.example",
+        authorize_url: "https://sso.example/authorize",
+        token_url: "https://sso.example/token",
+        userinfo_url: "https://sso.example/userinfo",
+        client_id: "sso-client",
+        client_secret: "x",
+        email_domains: [domain],
+      })
+      .catch((error: unknown) => error);
+    expect((claimed as ApiError).status).toBe(409);
+    expect((claimed as ApiError).code).toBe("MONACA_SSO_DOMAIN_TAKEN");
+
+    await mockApi.deleteSsoConnector(connectorId);
+  });
+
+  it("refuses a relative issuer, no domains and a malformed domain", async () => {
+    const suffix = await freshSsoSuffix();
+    const valid = {
+      connector_id: `sso-${suffix}`,
+      display_name: "Acme SSO",
+      issuer: "https://sso.example",
+      authorize_url: "https://sso.example/authorize",
+      token_url: "https://sso.example/token",
+      userinfo_url: "https://sso.example/userinfo",
+      client_id: "sso-client",
+      client_secret: "shhh",
+      email_domains: [`sso-${suffix}.example.com`],
+    };
+
+    const relative = await mockApi
+      .createSsoConnector({ ...valid, issuer: "sso.example" })
+      .catch((error: unknown) => error);
+    expect((relative as ApiError).status).toBe(400);
+
+    const noDomains = await mockApi
+      .createSsoConnector({ ...valid, email_domains: [] })
+      .catch((error: unknown) => error);
+    expect((noDomains as ApiError).status).toBe(400);
+
+    const badDomain = await mockApi
+      .createSsoConnector({ ...valid, email_domains: ["not a domain"] })
+      .catch((error: unknown) => error);
+    expect((badDomain as ApiError).status).toBe(400);
+
+    const noSecret = await mockApi
+      .createSsoConnector({ ...valid, client_secret: "" })
+      .catch((error: unknown) => error);
+    expect((noSecret as ApiError).status).toBe(400);
+  });
+
+  it("deletes a provider, records sso_connector.deleted, and refuses the second delete", async () => {
+    const suffix = await freshSsoSuffix();
+    const connectorId = `gone-${suffix}`;
+    await mockApi.createSsoConnector({
+      connector_id: connectorId,
+      display_name: "Ephemeral SSO",
+      issuer: "https://gone.example",
+      authorize_url: "https://gone.example/authorize",
+      token_url: "https://gone.example/token",
+      userinfo_url: "https://gone.example/userinfo",
+      client_id: "sso-client",
+      client_secret: "shhh",
+      email_domains: [`gone-${suffix}.example.com`],
+    });
+
+    await mockApi.deleteSsoConnector(connectorId);
+    expect((await mockApi.listSsoConnectors()).items.some((row) => row.connector_id === connectorId)).toBe(
+      false,
+    );
+
+    const second = await mockApi.deleteSsoConnector(connectorId).catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "sso_connector.deleted", limit: 200 });
+    expect(audit.items.some((event) => event.payload["connector_id"] === connectorId)).toBe(true);
+  });
+});
+
 describe("sign-in experience", () => {
   it("reads the seeded switches, all methods on", async () => {
     const experience = await mockApi.getSignInExperience();

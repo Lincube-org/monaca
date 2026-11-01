@@ -122,6 +122,25 @@ export interface OrganizationInvitation {
 }
 
 /**
+ * A tenant-level enterprise SSO connector (§6.2).
+ *
+ * The secret is never part of this object. A connector owns one or more email domains and routes
+ * their sign-ins to its identity provider; deleting it also drops its pending sign-in states.
+ */
+export interface SsoConnector {
+  connector_id: string;
+  display_name: string;
+  issuer: string;
+  authorize_url: string;
+  token_url: string;
+  userinfo_url: string;
+  client_id: string;
+  scopes: string[];
+  email_domains: string[];
+  created_at: string;
+}
+
+/**
  * A named set of scopes defined inside one organization (§6.2).
  *
  * Distinct from the membership rank in `Member.role`: an org role grants scopes only while signing
@@ -302,6 +321,20 @@ export interface CreateOrgInvitationRequest {
   email: string;
   role?: OrgRole;
   expires_in_days?: number;
+}
+
+/** Empty `scopes` defaults to `openid profile email`; `email_domains` must name at least one. */
+export interface CreateSsoConnectorRequest {
+  connector_id: string;
+  display_name: string;
+  issuer: string;
+  authorize_url: string;
+  token_url: string;
+  userinfo_url: string;
+  client_id: string;
+  client_secret: string;
+  scopes?: string[];
+  email_domains: string[];
 }
 
 /** `permissions` is the wire name for the role's scope set; duplicates are dropped. */
