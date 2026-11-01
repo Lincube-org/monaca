@@ -1080,6 +1080,7 @@ describe("sign-in experience", () => {
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+      custom_css: null,
     });
     expect(Number.isNaN(Date.parse(experience.updated_at))).toBe(false);
   });
@@ -1112,6 +1113,7 @@ describe("sign-in experience", () => {
         primary_color: null,
         terms_url: null,
         privacy_url: null,
+        custom_css: null,
       },
     });
 
@@ -1247,7 +1249,7 @@ describe("sign-in experience", () => {
       privacy_url: "https://acme.example/privacy",
     };
     const written = await mockApi.updateSignInExperience({ branding });
-    expect(written.branding).toEqual(branding);
+    expect(written.branding).toEqual({ ...branding, custom_css: null });
 
     const cleared = await mockApi.updateSignInExperience({
       branding: { logo_url: "" },
@@ -1268,6 +1270,7 @@ describe("sign-in experience", () => {
         primary_color: "",
         terms_url: "",
         privacy_url: "",
+        custom_css: "",
       },
     });
     const reset = await mockApi.getSignInExperience();
@@ -1277,7 +1280,29 @@ describe("sign-in experience", () => {
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+      custom_css: null,
     });
+  });
+
+  it("round-trips custom CSS and refuses more than 20,000 characters", async () => {
+    const css = ".mono-card { border-radius: 12px; }";
+    const written = await mockApi.updateSignInExperience({ branding: { custom_css: css } });
+    expect(written.branding.custom_css).toBe(css);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({ branding: { custom_css: css } });
+
+    const tooLong = await mockApi
+      .updateSignInExperience({ branding: { custom_css: "x".repeat(20_001) } })
+      .catch((error: unknown) => error);
+    expect(tooLong).toBeInstanceOf(ApiError);
+    expect((tooLong as ApiError).status).toBe(400);
+
+    const cleared = await mockApi.updateSignInExperience({ branding: { custom_css: "" } });
+    expect(cleared.branding.custom_css).toBeNull();
   });
 
   it("sets the session and refresh-token lifetimes and refuses values outside their ranges", async () => {

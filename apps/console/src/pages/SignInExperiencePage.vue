@@ -14,6 +14,7 @@ import {
   Label,
   NativeSelect,
   Separator,
+  Textarea,
   toast,
 } from "@monaca/ui";
 import { CircleAlert, RefreshCw, TriangleAlert } from "lucide-vue-next";
@@ -62,12 +63,13 @@ const SESSION_MIN_DAYS = 1;
 const SESSION_MAX_DAYS = 90;
 const REFRESH_MIN_DAYS = 1;
 const REFRESH_MAX_DAYS = 365;
-/** Branding is edited as five strings; empty means "use the built-in look". */
+/** Branding is edited as six strings; empty means "use the built-in look". */
 const brandName = ref("");
 const logoUrl = ref("");
 const primaryColor = ref("");
 const termsUrl = ref("");
 const privacyUrl = ref("");
+const customCss = ref("");
 const formError = ref<string | null>(null);
 
 /** The last server values the form was synchronised with; the save diffs against it. */
@@ -79,7 +81,8 @@ function sameBranding(a: Branding, b: Branding): boolean {
     a.logo_url === b.logo_url &&
     a.primary_color === b.primary_color &&
     a.terms_url === b.terms_url &&
-    a.privacy_url === b.privacy_url
+    a.privacy_url === b.privacy_url &&
+    a.custom_css === b.custom_css
   );
 }
 
@@ -92,6 +95,7 @@ function brandingValues(): Branding {
     primary_color: value(primaryColor.value),
     terms_url: value(termsUrl.value),
     privacy_url: value(privacyUrl.value),
+    custom_css: value(customCss.value),
   };
 }
 
@@ -160,6 +164,7 @@ function adopt(value: SignInExperience): void {
   primaryColor.value = value.branding.primary_color ?? "";
   termsUrl.value = value.branding.terms_url ?? "";
   privacyUrl.value = value.branding.privacy_url ?? "";
+  customCss.value = value.branding.custom_css ?? "";
 }
 
 /**
@@ -187,7 +192,7 @@ const dirty = computed(() => {
   return !sameSwitches(base, formValues());
 });
 
-watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl], () => (formError.value = null));
+watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl, customCss], () => (formError.value = null));
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
 
@@ -292,6 +297,10 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidBrandingColor");
     return;
   }
+  if ([...customCss.value.trim()].length > 20_000) {
+    formError.value = t("signInExperience.invalidBrandingCss");
+    return;
+  }
 
   const body: UpdateSignInExperienceRequest = {};
   if (signUp.value !== base.sign_up_enabled) body.sign_up_enabled = signUp.value;
@@ -316,6 +325,7 @@ async function save(): Promise<void> {
       primary_color: primaryColor.value.trim(),
       terms_url: termsUrl.value.trim(),
       privacy_url: privacyUrl.value.trim(),
+      custom_css: customCss.value.trim(),
     };
   }
   if (Object.keys(body).length === 0) return;
@@ -490,6 +500,27 @@ function formatStamp(at: string): string {
               <p class="text-[11.5px] leading-snug text-ink-faint">
                 {{ t('signInExperience.brandingFieldsHint') }}
               </p>
+
+              <Separator />
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="brand-custom-css">{{ t('signInExperience.brandCustomCss') }}</Label>
+                <Textarea
+                  id="brand-custom-css"
+                  v-model="customCss"
+                  rows="6"
+                  :invalid="[...customCss.trim()].length > 20_000"
+                  :disabled="update.isPending.value"
+                  placeholder=".mono-card { border-radius: 12px; }"
+                  spellcheck="false"
+                />
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.brandCustomCssHint') }}
+                </p>
+                <p v-if="[...customCss.trim()].length > 20_000" class="text-[11.5px] leading-snug text-deny">
+                  {{ t('signInExperience.invalidBrandingCss') }}
+                </p>
+              </div>
             </CardContent>
           </Card>
 

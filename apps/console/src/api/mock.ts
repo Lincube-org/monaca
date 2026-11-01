@@ -130,6 +130,7 @@ class MockStore {
     primary_color: null,
     terms_url: null,
     privacy_url: null,
+    custom_css: null,
   };
   /**
    * Webhook subscriptions. The signing key is kept in memory only so a rotation can return a new
@@ -2264,6 +2265,12 @@ function checkBrandingPatch(patch: BrandingPatch): void {
       code: "MONACA_INVALID_REQUEST",
     });
   }
+  if (patch.custom_css !== undefined && [...patch.custom_css.trim()].length > 20_000) {
+    throw new ApiError("custom_css must be at most 20000 characters", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
 }
 
 /** Trim what was sent; an empty string becomes `null`, the stored form of "unset". */
@@ -2275,6 +2282,7 @@ function normaliseBrandingPatch(patch: BrandingPatch): Partial<Branding> {
     "primary_color",
     "terms_url",
     "privacy_url",
+    "custom_css",
   ] as const) {
     const value = patch[key];
     if (value !== undefined) out[key] = value.trim() === "" ? null : value.trim();

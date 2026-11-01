@@ -459,6 +459,7 @@ export function seedSignInExperience(): SignInExperience {
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+      custom_css: null,
     },
     updated_at: at(900 * 60),
   };

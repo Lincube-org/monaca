@@ -159,6 +159,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "tenant password complexity: minimum character types (M1)",
         include_str!("../migrations/tenant_24.sql"),
     ),
+    (
+        25,
+        "tenant custom CSS for the hosted page (M1)",
+        include_str!("../migrations/tenant_25.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

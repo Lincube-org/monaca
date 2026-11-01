@@ -80,6 +80,8 @@ pub struct BrandingRow {
     pub terms_url: Option<String>,
     /// Privacy-policy link.
     pub privacy_url: Option<String>,
+    /// Tenant CSS appended after the built-in stylesheet.
+    pub custom_css: Option<String>,
     /// When a branding field last changed.
     pub updated_at: OffsetDateTime,
 }
@@ -867,7 +869,8 @@ impl Store {
     pub async fn branding(&self, tenant: &TenantRow) -> Result<BrandingRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, BrandingRow>(
-            "SELECT display_name, logo_url, primary_color, terms_url, privacy_url, updated_at
+            "SELECT display_name, logo_url, primary_color, terms_url, privacy_url, custom_css,
+                    updated_at
              FROM tenant.branding WHERE singleton",
         )
         .fetch_one(&pool)
@@ -885,6 +888,7 @@ impl Store {
         primary_color: Option<&str>,
         terms_url: Option<&str>,
         privacy_url: Option<&str>,
+        custom_css: Option<&str>,
     ) -> Result<BrandingRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, BrandingRow>(
@@ -899,15 +903,19 @@ impl Store {
                                   WHEN $4 = '' THEN NULL ELSE $4 END,
                  privacy_url = CASE WHEN $5 IS NULL THEN privacy_url
                                     WHEN $5 = '' THEN NULL ELSE $5 END,
+                 custom_css = CASE WHEN $6 IS NULL THEN custom_css
+                                   WHEN $6 = '' THEN NULL ELSE $6 END,
                  updated_at = now()
              WHERE singleton
-             RETURNING display_name, logo_url, primary_color, terms_url, privacy_url, updated_at",
+             RETURNING display_name, logo_url, primary_color, terms_url, privacy_url, custom_css,
+                       updated_at",
         )
         .bind(display_name)
         .bind(logo_url)
         .bind(primary_color)
         .bind(terms_url)
         .bind(privacy_url)
+        .bind(custom_css)
         .fetch_one(&pool)
         .await?)
     }

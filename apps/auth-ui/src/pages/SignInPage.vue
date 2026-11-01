@@ -225,6 +225,27 @@ const brandName = computed(
 const brandLogo = computed(() => experience.value?.branding.logo_url ?? null);
 /** The brand variables the tenant colour implies; empty when unset. */
 const brandStyleVars = computed(() => brandStyle(experience.value?.branding.primary_color));
+
+/**
+ * Append the tenant's CSS after the built-in sheet.
+ *
+ * The rule is written into a `<style>` element's text rather than through a template, so the value
+ * stays CSS text: it can style the page but cannot close the tag or inject markup.
+ */
+const tenantCssElementId = "monaca-tenant-css";
+watch(
+  () => experience.value?.branding.custom_css ?? null,
+  (css) => {
+    let element = document.getElementById(tenantCssElementId);
+    if (element === null) {
+      element = document.createElement("style");
+      element.id = tenantCssElementId;
+      document.head.appendChild(element);
+    }
+    element.textContent = css ?? "";
+  },
+  { immediate: true },
+);
 /** Legal links, shown under the card only when the tenant configured one. */
 const brandLinks = computed<{ href: string; label: MessageKey }[]>(() => {
   const branding = experience.value?.branding;

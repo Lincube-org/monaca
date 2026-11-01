@@ -590,6 +590,10 @@ export const messages = {
     invalidBrandingName: "The display name must be at most 64 characters.",
     invalidBrandingUrl: "A logo or legal link must be an absolute http(s) URL.",
     invalidBrandingColor: "The primary colour must be `#rrggbb`.",
+    brandCustomCss: "Custom CSS",
+    brandCustomCssHint:
+      "Plain CSS appended after the built-in stylesheet, so it can override the look. No HTML or JavaScript. At most 20,000 characters; an empty field removes it.",
+    invalidBrandingCss: "The custom CSS must be at most 20,000 characters.",
     mfa: "Multi-factor authentication",
     mfaHint:
       "Whether enrolled authenticators and passkeys are demanded, and whether every account must set one up before it can sign in.",

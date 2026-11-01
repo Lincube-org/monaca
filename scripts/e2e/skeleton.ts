@@ -389,6 +389,13 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "MONACA_WEAK_PASSWORD, while a password using three character types completes; restoring 1 accepts the " +
       "lowercase-only password",
   },
+  {
+    step: "40",
+    title: "custom CSS",
+    assertion:
+      "PATCH /v1/sign-in-experience {branding:{custom_css:…}} is 200 and the public read echoes the stylesheet; " +
+      "a stylesheet over 20,000 characters is 400; an empty string clears it back to null",
+  },
 ];
 
 interface StepResult {
@@ -8127,6 +8134,69 @@ async function passwordComplexityFlow(
   }
 }
 
+/**
+ * Step 40: a tenant can append its own CSS to the hosted page.
+ *
+ * The public read is the page's only source for branding, so it is what proves the stylesheet
+ * reached the hosted side; the management response alone would only prove it was stored.
+ */
+async function customCssFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const css = ".mono-card { border-radius: 12px; }\n.mono-card button { letter-spacing: 0.02em; }";
+
+  const branding = (body: unknown) =>
+    (body as { branding?: { custom_css?: unknown } } | undefined)?.branding;
+
+  const patch = (customCss: string): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { custom_css: customCss } }),
+    });
+
+  try {
+    const written = await patch(css);
+    checks.push([
+      "PATCH stores the stylesheet",
+      written.status === 200 && branding(written.body)?.custom_css === css,
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read echoes it",
+      publicRead.status === 200 && branding(publicRead.body)?.custom_css === css,
+    ]);
+
+    const tooLong = await patch("x".repeat(20_001));
+    checks.push(["a stylesheet over 20,000 characters is 400", tooLong.status === 400]);
+
+    const cleared = await patch("");
+    checks.push([
+      "an empty string clears it",
+      cleared.status === 200 && branding(cleared.body)?.custom_css === null,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await patch("").catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "40",
+    title: "custom CSS",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: write → public echo → 20,001 is 400 → empty clears`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -8395,6 +8465,7 @@ async function main(): Promise<number> {
   push(await accountProfileFlow(base, adminToken));
   push(await sessionSettingsFlow(base, adminToken, parsed.consoleSecret));
   push(await passwordComplexityFlow(base, adminToken, parsed.internalSecret));
+  push(await customCssFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

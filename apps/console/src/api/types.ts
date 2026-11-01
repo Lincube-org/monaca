@@ -235,6 +235,8 @@ export interface Branding {
   primary_color: string | null;
   terms_url: string | null;
   privacy_url: string | null;
+  /** CSS appended after the built-in stylesheet; `null` keeps the built-in look. */
+  custom_css: string | null;
 }
 
 /**
@@ -467,6 +469,7 @@ export interface BrandingPatch {
   primary_color?: string;
   terms_url?: string;
   privacy_url?: string;
+  custom_css?: string;
 }
 
 /**

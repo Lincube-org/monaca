@@ -535,6 +535,8 @@ pub struct BrandingPatch {
     pub terms_url: Option<String>,
     /// Privacy-policy link.
     pub privacy_url: Option<String>,
+    /// CSS appended after the built-in stylesheet, at most 20 000 characters.
+    pub custom_css: Option<String>,
 }
 
 impl BrandingPatch {
@@ -544,6 +546,7 @@ impl BrandingPatch {
             && self.primary_color.is_none()
             && self.terms_url.is_none()
             && self.privacy_url.is_none()
+            && self.custom_css.is_none()
     }
 }
 
@@ -706,6 +709,7 @@ pub async fn update_sign_in_experience(
             let primary_color = trimmed(&patch.primary_color);
             let terms_url = trimmed(&patch.terms_url);
             let privacy_url = trimmed(&patch.privacy_url);
+            let custom_css = patch.custom_css.as_deref().map(str::trim).map(str::to_owned);
             state
                 .store
                 .update_branding(
@@ -715,6 +719,7 @@ pub async fn update_sign_in_experience(
                     primary_color.as_deref(),
                     terms_url.as_deref(),
                     privacy_url.as_deref(),
+                    custom_css.as_deref(),
                 )
                 .await?
         }
@@ -777,6 +782,7 @@ pub(crate) fn branding_json(branding: &BrandingRow) -> Value {
         "primary_color": branding.primary_color,
         "terms_url": branding.terms_url,
         "privacy_url": branding.privacy_url,
+        "custom_css": branding.custom_css,
     })
 }
 
@@ -819,6 +825,14 @@ fn check_branding(branding: &BrandingPatch) -> Result<(), ApiError> {
                 "primary_color must be `#rrggbb` or empty",
             ));
         }
+    }
+    if let Some(css) = branding.custom_css.as_deref()
+        && css.trim().chars().count() > 20_000
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "custom_css must be at most 20000 characters",
+        ));
     }
     Ok(())
 }

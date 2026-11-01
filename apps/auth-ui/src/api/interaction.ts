@@ -55,6 +55,8 @@ export interface Branding {
   primary_color: string | null;
   terms_url: string | null;
   privacy_url: string | null;
+  /** CSS appended after the built-in stylesheet; `null` keeps the built-in look. */
+  custom_css: string | null;
 }
 
 /** The tenant's hosted switches, read before the page decides which forms to offer (§6.1). */
