@@ -231,6 +231,16 @@ pub async fn list_public_sso_connectors(
     if !tenant.is_active() {
         return Err(ApiError::not_found("tenant"));
     }
+    // The switch hides SSO from the hosted page: an empty lookup is a fallback to the ordinary
+    // forms, not an error, so a disabled method cannot block a visitor who could sign in another way.
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .single_sign_on_enabled
+    {
+        return Ok(Json(json!({ "items": [], "next": null })));
+    }
 
     let rows = match query.email.as_deref().and_then(email_domain) {
         Some(domain) => state
@@ -271,6 +281,17 @@ pub async fn sso_authorize(
     if !tenant.is_active() {
         return Err(ApiError::not_found("tenant"));
     }
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .single_sign_on_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::SSO_DISABLED,
+            "single sign-on is disabled for this tenant",
+        ));
+    }
     let Some(connector) = state.store.sso_connector(&tenant, &connector_id).await? else {
         return Err(ApiError::not_found("SSO connector"));
     };
@@ -307,6 +328,19 @@ pub async fn sso_callback(
     let tenant = state.tenant(&tenant_slug).await?;
     if !tenant.is_active() {
         return Err(ApiError::not_found("tenant"));
+    }
+    // A provider round-trip that started before the switch was turned off must not complete a
+    // sign-in through a method the tenant has since disabled.
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .single_sign_on_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::SSO_DISABLED,
+            "single sign-on is disabled for this tenant",
+        ));
     }
     let Ok(state_id) = Uuid::parse_str(&query.state) else {
         return Err(ApiError::problem(

@@ -63,6 +63,13 @@ pub mod kinds {
         "Passkey sign-in disabled",
         403,
     );
+    /// Enterprise SSO is switched off for this tenant.
+    pub const SSO_DISABLED: ProblemKind = ProblemKind::new(
+        "sso_disabled",
+        "MONACA_SSO_DISABLED",
+        "Single sign-on disabled",
+        403,
+    );
     /// The resource does not exist, or is outside the caller's tenant.
     pub const NOT_FOUND: ProblemKind =
         ProblemKind::new("not_found", "MONACA_NOT_FOUND", "Not found", 404);

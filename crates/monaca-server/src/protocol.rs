@@ -81,6 +81,7 @@ pub async fn sign_in_experience(
         "password_sign_in_enabled": experience.password_sign_in_enabled,
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
         "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
+        "single_sign_on_enabled": experience.single_sign_on_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "mfa_trusted_devices_enabled": experience.mfa_trusted_devices_enabled,

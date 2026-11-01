@@ -257,6 +257,8 @@ export interface SignInExperience {
   email_code_sign_in_enabled: boolean;
   /** Whether passwordless passkey sign-in is offered. */
   passkey_sign_in_enabled: boolean;
+  /** Whether enterprise SSO connectors are reachable from the hosted page. */
+  single_sign_on_enabled: boolean;
   mfa_enabled: boolean;
   mfa_policy: "user_controlled" | "mandatory";
   /** Whether a browser may be remembered past the second factor. */
@@ -498,6 +500,7 @@ export interface UpdateSignInExperienceRequest {
   password_sign_in_enabled?: boolean;
   email_code_sign_in_enabled?: boolean;
   passkey_sign_in_enabled?: boolean;
+  single_sign_on_enabled?: boolean;
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
   mfa_trusted_devices_enabled?: boolean;

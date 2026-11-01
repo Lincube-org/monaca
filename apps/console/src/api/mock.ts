@@ -1294,6 +1294,7 @@ class MockStore {
       body.password_sign_in_enabled === undefined &&
       body.email_code_sign_in_enabled === undefined &&
       body.passkey_sign_in_enabled === undefined &&
+      body.single_sign_on_enabled === undefined &&
       body.mfa_enabled === undefined &&
       body.mfa_policy === undefined &&
       body.mfa_trusted_devices_enabled === undefined &&
@@ -1393,6 +1394,8 @@ class MockStore {
       email_code_sign_in_enabled: emailCode,
       passkey_sign_in_enabled:
         body.passkey_sign_in_enabled ?? this.experience.passkey_sign_in_enabled,
+      single_sign_on_enabled:
+        body.single_sign_on_enabled ?? this.experience.single_sign_on_enabled,
       mfa_enabled: mfaEnabled,
       mfa_policy: mfaPolicy,
       mfa_trusted_devices_enabled:
@@ -1429,6 +1432,7 @@ class MockStore {
         password_sign_in_enabled: updated.password_sign_in_enabled,
         email_code_sign_in_enabled: updated.email_code_sign_in_enabled,
         passkey_sign_in_enabled: updated.passkey_sign_in_enabled,
+        single_sign_on_enabled: updated.single_sign_on_enabled,
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
         mfa_trusted_devices_enabled: updated.mfa_trusted_devices_enabled,

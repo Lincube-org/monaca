@@ -1134,6 +1134,7 @@ describe("sign-in experience", () => {
       password_sign_in_enabled: true,
       email_code_sign_in_enabled: true,
       passkey_sign_in_enabled: true,
+      single_sign_on_enabled: true,
       mfa_enabled: true,
       mfa_policy: "user_controlled",
       mfa_trusted_devices_enabled: true,
@@ -1170,6 +1171,19 @@ describe("sign-in experience", () => {
     expect(audit.items[0]?.payload["passkey_sign_in_enabled"]).toBe(false);
 
     await mockApi.updateSignInExperience({ passkey_sign_in_enabled: true });
+  });
+
+  it("toggles enterprise SSO and records the new value", async () => {
+    const off = await mockApi.updateSignInExperience({ single_sign_on_enabled: false });
+    expect(off.single_sign_on_enabled).toBe(false);
+
+    const read = await mockApi.getSignInExperience();
+    expect(read.single_sign_on_enabled).toBe(false);
+
+    const audit = await mockApi.listAudit(ORG, { action: "sign_in_experience.updated", limit: 200 });
+    expect(audit.items[0]?.payload["single_sign_on_enabled"]).toBe(false);
+
+    await mockApi.updateSignInExperience({ single_sign_on_enabled: true });
   });
 
   it("sets the trusted-device policy and refuses a duration outside 1–365 days", async () => {

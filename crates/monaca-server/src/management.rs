@@ -581,6 +581,8 @@ pub struct UpdateSignInExperienceBody {
     pub email_code_sign_in_enabled: Option<bool>,
     /// Whether passwordless passkey sign-in is offered.
     pub passkey_sign_in_enabled: Option<bool>,
+    /// Whether enterprise SSO connectors are reachable from the hosted page.
+    pub single_sign_on_enabled: Option<bool>,
     /// Whether second factors are used at sign-in at all.
     pub mfa_enabled: Option<bool>,
     /// `user_controlled` | `mandatory`.
@@ -633,6 +635,7 @@ pub async fn update_sign_in_experience(
         && body.password_sign_in_enabled.is_none()
         && body.email_code_sign_in_enabled.is_none()
         && body.passkey_sign_in_enabled.is_none()
+        && body.single_sign_on_enabled.is_none()
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
         && body.mfa_trusted_devices_enabled.is_none()
@@ -750,6 +753,7 @@ pub async fn update_sign_in_experience(
             body.refresh_token_ttl_secs,
             body.mfa_trusted_devices_enabled,
             body.mfa_trusted_device_ttl_days,
+            body.single_sign_on_enabled,
         )
         .await?;
     let branding = match &body.branding {
@@ -796,6 +800,7 @@ pub async fn update_sign_in_experience(
             "password_sign_in_enabled": experience.password_sign_in_enabled,
             "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
             "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
+            "single_sign_on_enabled": experience.single_sign_on_enabled,
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
             "mfa_trusted_devices_enabled": experience.mfa_trusted_devices_enabled,
@@ -824,6 +829,7 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "password_sign_in_enabled": experience.password_sign_in_enabled,
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
         "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
+        "single_sign_on_enabled": experience.single_sign_on_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "mfa_trusted_devices_enabled": experience.mfa_trusted_devices_enabled,

@@ -453,6 +453,7 @@ export function seedSignInExperience(): SignInExperience {
     password_sign_in_enabled: true,
     email_code_sign_in_enabled: true,
     passkey_sign_in_enabled: true,
+    single_sign_on_enabled: true,
     mfa_enabled: true,
     mfa_policy: "user_controlled",
     mfa_trusted_devices_enabled: true,

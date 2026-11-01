@@ -564,6 +564,9 @@ export const messages = {
     passkeyField: "Passkey sign-in",
     passkeyFieldHint:
       "Lets an account sign in with a registered passkey instead of a password. Off answers the passkey endpoints with 403 MONACA_PASSKEY_SIGN_IN_DISABLED.",
+    ssoField: "Enterprise SSO",
+    ssoFieldHint:
+      "Routes an address at a configured connector domain to its identity provider. Off makes the SSO lookup empty and answers the provider redirect with 403 MONACA_SSO_DISABLED.",
     invalidMethods: "Keep password sign-in or email code sign-in enabled.",
     passwordPolicy: "Password policy",
     passwordPolicyHint: "The length and complexity every new password must meet.",

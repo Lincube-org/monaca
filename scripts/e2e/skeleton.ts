@@ -446,6 +446,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "uses that Max-Age and its row expires that many days out; switching the policy off makes an existing device " +
       "cookie ask for MFA again and a new remember_device request is not remembered",
   },
+  {
+    step: "47",
+    title: "enterprise SSO switch",
+    assertion:
+      "with a registered connector, GET /t/demo/sso-connectors?email= finds it; PATCH " +
+      "{single_sign_on_enabled:false} is 200 and the public read follows, the lookup becomes empty, and both the " +
+      "provider authorize and callback are 403 MONACA_SSO_DISABLED; switching it back on restores the lookup and a " +
+      "302 provider redirect",
+  },
 ];
 
 interface StepResult {
@@ -9302,6 +9311,202 @@ async function trustedDevicePolicyFlow(base: string, adminToken: string): Promis
   };
 }
 
+/**
+ * Step 47: enterprise SSO can be switched off without deleting the connectors.
+ *
+ * The lookup turns empty rather than failing, so the hosted page falls back to its ordinary forms;
+ * the provider redirect and callback are refused, so an in-flight round-trip cannot complete a
+ * sign-in through a method the tenant has since disabled.
+ */
+async function ssoSwitchFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const connectorId = `sso-switch-${runId}`;
+  const domain = `switch-${runId}.example`;
+  const clientId = `e2e-sso-switch-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const authorizeUrl = "https://idp.example/authorize";
+
+  const enabled = (body: unknown): unknown =>
+    (body as { single_sign_on_enabled?: unknown } | undefined)?.single_sign_on_enabled;
+  const lookupIds = (body: unknown): string[] =>
+    ((body as { items?: { connector_id?: string }[] } | undefined)?.items ?? []).map(
+      (item) => item.connector_id ?? "",
+    );
+
+  const setSwitch = (value: boolean): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ single_sign_on_enabled: value }),
+    });
+  const publicRead = (): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/sign-in-experience`);
+  const lookup = (): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/sso-connectors?email=${encodeURIComponent(`user@${domain}`)}`);
+
+  let clientRowId: string | undefined;
+  try {
+    const registered = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connector_id: connectorId,
+        display_name: "SSO switch",
+        issuer: "https://idp.example",
+        authorize_url: authorizeUrl,
+        token_url: "https://idp.example/token",
+        userinfo_url: "https://idp.example/userinfo",
+        client_id: "switch-client",
+        client_secret: `secret-${runId}`,
+        email_domains: [domain],
+      }),
+    });
+    checks.push(["POST registers the connector", registered.status === 201]);
+
+    const found = await lookup();
+    checks.push([
+      "the enabled lookup finds the connector",
+      found.status === 200 && lookupIds(found.body).includes(connectorId),
+    ]);
+
+    const off = await setSwitch(false);
+    checks.push([
+      "PATCH turns enterprise SSO off",
+      off.status === 200 && enabled(off.body) === false,
+    ]);
+    const publicOff = await publicRead();
+    checks.push([
+      "the public read follows the switch",
+      publicOff.status === 200 && enabled(publicOff.body) === false,
+    ]);
+
+    const hidden = await lookup();
+    checks.push([
+      "the lookup is empty while SSO is off",
+      hidden.status === 200 && lookupIds(hidden.body).length === 0,
+    ]);
+
+    const app = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E SSO switch",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+      }),
+    });
+    const appRowId = (app.body as { id?: unknown } | undefined)?.id;
+    if (typeof appRowId === "string") clientRowId = appRowId;
+    const verifier = `ss-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        scope: "openid",
+        state: `st-sso-${runId}`,
+        nonce: `n-sso-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(
+      authorize.headers.get("location") ?? "",
+      base,
+    ).searchParams.get("interaction");
+    checks.push([
+      "authorize opens an interaction",
+      authorize.status === 302 && interaction !== null,
+    ]);
+    if (interaction === null || clientRowId === undefined) {
+      return {
+        step: "47",
+        title: "enterprise SSO switch",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `authorize → ${authorize.status} ${text(authorize.body)}`,
+      };
+    }
+
+    const href = `${base}/t/${TENANT}/sso/${encodeURIComponent(connectorId)}/authorize?interaction=${encodeURIComponent(interaction)}`;
+    const refused = await call(href, { redirect: "manual" });
+    checks.push([
+      "the provider redirect is 403 MONACA_SSO_DISABLED",
+      refused.status === 403 &&
+        (refused.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_SSO_DISABLED",
+    ]);
+
+    const refusedCallback = await call(
+      `${base}/t/${TENANT}/sso/${encodeURIComponent(connectorId)}/callback?state=01920000-0000-7000-8000-000000000000&code=x`,
+    );
+    checks.push([
+      "the callback is 403 MONACA_SSO_DISABLED",
+      refusedCallback.status === 403 &&
+        (refusedCallback.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_SSO_DISABLED",
+    ]);
+
+    const on = await setSwitch(true);
+    checks.push([
+      "PATCH turns enterprise SSO back on",
+      on.status === 200 && enabled(on.body) === true,
+    ]);
+    const publicOn = await publicRead();
+    checks.push([
+      "the public read follows it back on",
+      publicOn.status === 200 && enabled(publicOn.body) === true,
+    ]);
+
+    const foundAgain = await lookup();
+    checks.push([
+      "the lookup finds the connector again",
+      foundAgain.status === 200 && lookupIds(foundAgain.body).includes(connectorId),
+    ]);
+
+    const redirect = await call(href, { redirect: "manual" });
+    const location = redirect.headers.get("location") ?? "";
+    checks.push([
+      "the provider redirect is a 302 to the connector's authorize URL",
+      redirect.status === 302 && location.startsWith(authorizeUrl),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/sso-connectors/${encodeURIComponent(connectorId)}`, {
+      method: "DELETE",
+      headers,
+    }).catch(() => undefined);
+    if (clientRowId !== undefined) {
+      await call(`${base}/v1/clients/${clientRowId}`, { method: "DELETE", headers }).catch(() => undefined);
+    }
+    await setSwitch(true).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "47",
+    title: "enterprise SSO switch",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: register → lookup → off → public read → empty lookup → 403 redirect/callback → on → lookup → 302`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -9577,6 +9782,7 @@ async function main(): Promise<number> {
   push(await passkeySignInSwitchFlow(base, adminToken));
   push(await accountAvatarFlow(base, adminToken));
   push(await trustedDevicePolicyFlow(base, adminToken));
+  push(await ssoSwitchFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

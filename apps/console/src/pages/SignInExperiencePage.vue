@@ -53,6 +53,7 @@ const signUp = ref(false);
 const password = ref(true);
 const emailCode = ref(true);
 const passkey = ref(true);
+const sso = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const trustedDevices = ref(true);
@@ -135,6 +136,7 @@ interface SwitchForm {
   password: boolean;
   emailCode: boolean;
   passkey: boolean;
+  sso: boolean;
   mfaEnabled: boolean;
   mfaPolicy: "user_controlled" | "mandatory";
   trustedDevices: boolean;
@@ -155,6 +157,7 @@ function formValues(): SwitchForm {
     password: password.value,
     emailCode: emailCode.value,
     passkey: passkey.value,
+    sso: sso.value,
     mfaEnabled: mfaEnabled.value,
     mfaPolicy: mfaPolicy.value,
     trustedDevices: trustedDevices.value,
@@ -176,6 +179,7 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.password_sign_in_enabled === form.password &&
     value.email_code_sign_in_enabled === form.emailCode &&
     value.passkey_sign_in_enabled === form.passkey &&
+    value.single_sign_on_enabled === form.sso &&
     value.mfa_enabled === form.mfaEnabled &&
     value.mfa_policy === form.mfaPolicy &&
     value.mfa_trusted_devices_enabled === form.trustedDevices &&
@@ -197,6 +201,7 @@ function adopt(value: SignInExperience): void {
   password.value = value.password_sign_in_enabled;
   emailCode.value = value.email_code_sign_in_enabled;
   passkey.value = value.passkey_sign_in_enabled;
+  sso.value = value.single_sign_on_enabled;
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
   trustedDevices.value = value.mfa_trusted_devices_enabled;
@@ -266,12 +271,13 @@ const stats = computed(() => {
 
 const socials = computed(() => connectors.data.value?.items ?? []);
 
-function setSwitch(field: "signUp" | "password" | "emailCode" | "passkey", value: boolean | "indeterminate"): void {
+function setSwitch(field: "signUp" | "password" | "emailCode" | "passkey" | "sso", value: boolean | "indeterminate"): void {
   const next = value === true;
   if (field === "signUp") signUp.value = next;
   if (field === "password") password.value = next;
   if (field === "emailCode") emailCode.value = next;
   if (field === "passkey") passkey.value = next;
+  if (field === "sso") sso.value = next;
   formError.value = null;
 }
 
@@ -393,6 +399,7 @@ async function save(): Promise<void> {
   if (password.value !== base.password_sign_in_enabled) body.password_sign_in_enabled = password.value;
   if (emailCode.value !== base.email_code_sign_in_enabled) body.email_code_sign_in_enabled = emailCode.value;
   if (passkey.value !== base.passkey_sign_in_enabled) body.passkey_sign_in_enabled = passkey.value;
+  if (sso.value !== base.single_sign_on_enabled) body.single_sign_on_enabled = sso.value;
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
   if (trustedDevices.value !== base.mfa_trusted_devices_enabled) {
@@ -677,6 +684,23 @@ function formatStamp(at: string): string {
                   <Label for="passkey-sign-in-enabled">{{ t('signInExperience.passkeyField') }}</Label>
                   <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
                     {{ t('signInExperience.passkeyFieldHint') }}
+                  </p>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="sso-sign-in-enabled"
+                  :model-value="sso"
+                  :disabled="update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => setSwitch('sso', value)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="sso-sign-in-enabled">{{ t('signInExperience.ssoField') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.ssoFieldHint') }}
                   </p>
                 </div>
               </div>

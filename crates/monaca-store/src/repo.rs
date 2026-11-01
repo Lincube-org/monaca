@@ -55,6 +55,8 @@ pub struct SignInExperienceRow {
     pub email_code_sign_in_enabled: bool,
     /// Whether passwordless passkey sign-in is offered.
     pub passkey_sign_in_enabled: bool,
+    /// Whether enterprise SSO connectors are reachable from the hosted page.
+    pub single_sign_on_enabled: bool,
     /// Whether second factors are used at sign-in at all.
     pub mfa_enabled: bool,
     /// `user_controlled` (an enrolled factor is challenged) | `mandatory` (everyone must enroll).
@@ -825,7 +827,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                    passkey_sign_in_enabled, mfa_enabled, mfa_policy,
+                    passkey_sign_in_enabled, single_sign_on_enabled, mfa_enabled, mfa_policy,
                     mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,
                     password_min_length, password_min_character_types, password_reject_user_info,
                     password_reject_repetition_and_sequence, password_rejected_words,
@@ -856,6 +858,7 @@ impl Store {
         refresh_token_ttl_secs: Option<i32>,
         mfa_trusted_devices_enabled: Option<bool>,
         mfa_trusted_device_ttl_days: Option<i32>,
+        single_sign_on_enabled: Option<bool>,
     ) -> Result<SignInExperienceRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
@@ -876,10 +879,11 @@ impl Store {
                  refresh_token_ttl_secs = COALESCE($13, refresh_token_ttl_secs),
                  mfa_trusted_devices_enabled = COALESCE($14, mfa_trusted_devices_enabled),
                  mfa_trusted_device_ttl_days = COALESCE($15, mfa_trusted_device_ttl_days),
+                 single_sign_on_enabled = COALESCE($16, single_sign_on_enabled),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                       passkey_sign_in_enabled, mfa_enabled, mfa_policy,
+                       passkey_sign_in_enabled, single_sign_on_enabled, mfa_enabled, mfa_policy,
                        mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,
                        password_min_length, password_min_character_types,
                        password_reject_user_info, password_reject_repetition_and_sequence,
@@ -901,6 +905,7 @@ impl Store {
         .bind(refresh_token_ttl_secs)
         .bind(mfa_trusted_devices_enabled)
         .bind(mfa_trusted_device_ttl_days)
+        .bind(single_sign_on_enabled)
         .fetch_one(&pool)
         .await?)
     }

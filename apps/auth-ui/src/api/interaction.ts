@@ -69,6 +69,8 @@ export interface SignInExperience {
   email_code_sign_in_enabled: boolean;
   /** Whether passwordless passkey sign-in is offered. */
   passkey_sign_in_enabled: boolean;
+  /** Whether enterprise SSO connectors are reachable from this page. */
+  single_sign_on_enabled: boolean;
   /** Whether second factors are used at all. */
   mfa_enabled: boolean;
   /** `user_controlled` | `mandatory`. */
