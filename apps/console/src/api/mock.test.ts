@@ -1187,6 +1187,95 @@ describe("organization email domains", () => {
   });
 });
 
+describe("organization invitations", () => {
+  async function freshEmail(): Promise<string> {
+    return `invitee-${Math.random().toString(36).slice(2, 8)}@demo.localhost`;
+  }
+
+  it("lists the seeded pending invitation with its role and expiry", async () => {
+    const page = await mockApi.listOrgInvitations(ORG);
+    expect(page.next).toBe(null);
+    const seeded = page.items.find((entry) => entry.email === "new-teammate@demo.localhost");
+    expect(seeded?.role).toBe("member");
+    expect(seeded?.id.startsWith("inv_")).toBe(true);
+    expect(Date.parse(seeded?.expires_at ?? "") > Date.now()).toBe(true);
+  });
+
+  it("normalises an address, invites it, and appends org.invitation.created", async () => {
+    const raw = await freshEmail();
+    const created = await mockApi.createOrgInvitation(ORG, {
+      email: `  ${raw.toUpperCase()} `,
+      role: "admin",
+      expires_in_days: 3,
+    });
+    expect(created.email).toBe(raw);
+    expect(created.role).toBe("admin");
+    expect(created.id.startsWith("inv_")).toBe(true);
+    expect(created.invited_by).toBe((await mockApi.getSession()).account_id);
+
+    const listed = await mockApi.listOrgInvitations(ORG);
+    expect(listed.items.some((entry) => entry.id === created.id)).toBe(true);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.invitation.created", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ org: ORG, email: raw, role: "admin" });
+    expect(audit.items[0]?.subject.type).toBe("org");
+
+    await mockApi.revokeOrgInvitation(ORG, created.id);
+  });
+
+  it("refuses a live duplicate and malformed addresses", async () => {
+    const duplicate = await mockApi
+      .createOrgInvitation(ORG, { email: "New-Teammate@Demo.LocalHost" })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).status).toBe(409);
+    expect((duplicate as ApiError).code).toBe("MONACA_INVITATION_EXISTS");
+
+    for (const bad of ["", "teammate", "@example.com", "teammate@", "two@@at.com", "a b@c.d"]) {
+      const rejected = await mockApi
+        .createOrgInvitation(ORG, { email: bad })
+        .catch((error: unknown) => error);
+      expect(rejected).toBeInstanceOf(ApiError);
+      expect((rejected as ApiError).status).toBe(400);
+    }
+
+    const badExpiry = await mockApi
+      .createOrgInvitation(ORG, { email: await freshEmail(), expires_in_days: 0 })
+      .catch((error: unknown) => error);
+    expect(badExpiry).toBeInstanceOf(ApiError);
+    expect((badExpiry as ApiError).status).toBe(400);
+  });
+
+  it("revokes an invitation, refuses the second revoke, and records org.invitation.revoked", async () => {
+    const created = await mockApi.createOrgInvitation(ORG, { email: await freshEmail() });
+    await mockApi.revokeOrgInvitation(ORG, created.id);
+
+    expect((await mockApi.listOrgInvitations(ORG)).items.some((entry) => entry.id === created.id)).toBe(false);
+
+    const second = await mockApi
+      .revokeOrgInvitation(ORG, created.id)
+      .catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.invitation.revoked", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ org: ORG, email: created.email, invitation: created.id });
+    expect(audit.items[0]?.decision).toBe("deny");
+  });
+
+  it("is org-scoped: an unknown slug is a 404 for reads and writes", async () => {
+    for (const call of [
+      () => mockApi.listOrgInvitations("no-such-org"),
+      () => mockApi.createOrgInvitation("no-such-org", { email: "someone@example.com" }),
+      () => mockApi.revokeOrgInvitation("no-such-org", newId("inv")),
+    ]) {
+      const missing = await call().catch((error: unknown) => error);
+      expect(missing).toBeInstanceOf(ApiError);
+      expect((missing as ApiError).status).toBe(404);
+    }
+  });
+});
+
 describe("tenant roles", () => {
   async function freshRoleName(): Promise<string> {
     return `role-${Math.random().toString(36).slice(2, 8)}`;

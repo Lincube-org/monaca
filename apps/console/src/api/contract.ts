@@ -18,6 +18,7 @@ import type {
   CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateTenantRoleRequest,
   CreatedClient,
@@ -27,6 +28,7 @@ import type {
   Member,
   Organization,
   OrganizationEmailDomain,
+  OrganizationInvitation,
   OrgRoleDetail,
   Page,
   ProblemDetails,
@@ -133,6 +135,16 @@ export interface MonacaApi {
   listOrgEmailDomains(org: string): Promise<Page<OrganizationEmailDomain>>;
   addOrgEmailDomain(org: string, body: AddOrgEmailDomainRequest): Promise<OrganizationEmailDomain>;
   removeOrgEmailDomain(org: string, domain: string): Promise<void>;
+
+  /**
+   * Pending invitations, which admit one address with one role at sign-in.
+   *
+   * Listing returns only live invitations: an accepted or expired one disappears from the page
+   * without deleting the record that acceptance happened.
+   */
+  listOrgInvitations(org: string): Promise<Page<OrganizationInvitation>>;
+  createOrgInvitation(org: string, body: CreateOrgInvitationRequest): Promise<OrganizationInvitation>;
+  revokeOrgInvitation(org: string, invitationId: string): Promise<void>;
 
   /**
    * Org roles are scoped to the org in the path; the same member may hold different roles, and so

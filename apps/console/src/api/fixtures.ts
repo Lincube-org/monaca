@@ -223,6 +223,43 @@ export function seedEmailDomains(): SeededEmailDomain[] {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Organization invitations
+// ---------------------------------------------------------------------------------------------
+
+export interface SeededOrgInvitation {
+  org: string;
+  id: string;
+  email: string;
+  role: OrgRole;
+  invited_by: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+/** A timestamp `days` after the fixture base, so seeded expiry looks live on every reload. */
+function expiresIn(days: number): string {
+  return new Date(BASE + days * 24 * HOUR_MS).toISOString();
+}
+
+/**
+ * One pending invitation, so the Members page has the state an administrator actually sees between
+ * sending an invitation and the invitee's next sign-in.
+ */
+export function seedOrgInvitations(): SeededOrgInvitation[] {
+  return [
+    {
+      org: DEFAULT_ORG,
+      id: newId("inv", BASE - 180 * 60_000),
+      email: "new-teammate@demo.localhost",
+      role: "member",
+      invited_by: null,
+      created_at: at(180 * 60),
+      expires_at: expiresIn(4),
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------------------------
 // Tenant roles
 // ---------------------------------------------------------------------------------------------
 

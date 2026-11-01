@@ -19,6 +19,7 @@ import type {
   CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateTenantRoleRequest,
   CreatedClient,
@@ -28,6 +29,7 @@ import type {
   Member,
   Organization,
   OrganizationEmailDomain,
+  OrganizationInvitation,
   OrgRoleDetail,
   Page,
   ProblemDetails,
@@ -278,6 +280,27 @@ export const httpApi: MonacaApi = {
   removeOrgEmailDomain(org: string, domain: string): Promise<void> {
     return request<void>(
       `/orgs/${encodeURIComponent(org)}/email-domains/${encodeURIComponent(domain)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  listOrgInvitations(org: string): Promise<Page<OrganizationInvitation>> {
+    return request<Page<OrganizationInvitation>>(`/orgs/${encodeURIComponent(org)}/invitations`);
+  },
+
+  createOrgInvitation(
+    org: string,
+    body: CreateOrgInvitationRequest,
+  ): Promise<OrganizationInvitation> {
+    return request<OrganizationInvitation>(`/orgs/${encodeURIComponent(org)}/invitations`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  revokeOrgInvitation(org: string, invitationId: string): Promise<void> {
+    return request<void>(
+      `/orgs/${encodeURIComponent(org)}/invitations/${encodeURIComponent(invitationId)}`,
       { method: "DELETE" },
     );
   },

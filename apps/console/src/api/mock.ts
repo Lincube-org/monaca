@@ -17,6 +17,7 @@ import {
   seedEmailDomains,
   seedMemberRoleIndexes,
   seedMembers,
+  seedOrgInvitations,
   seedOrgRoles,
   seedResources,
   seedSignInExperience,
@@ -24,6 +25,7 @@ import {
   verifyLog,
   type AuditLog,
   type SeededEmailDomain,
+  type SeededOrgInvitation,
 } from "./fixtures";
 import type {
   AccountRole,
@@ -46,6 +48,7 @@ import type {
   CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateTenantRoleRequest,
   CreatedClient,
@@ -55,6 +58,7 @@ import type {
   Member,
   Organization,
   OrganizationEmailDomain,
+  OrganizationInvitation,
   OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
@@ -107,6 +111,7 @@ class MockStore {
   private experience: SignInExperience = seedSignInExperience();
   private members: Member[] = seedMembers(this.accounts);
   private emailDomains: SeededEmailDomain[] = seedEmailDomains();
+  private invitations: SeededOrgInvitation[] = seedOrgInvitations();
   private tenantRoles: TenantRole[] = seedTenantRoles();
   /** account id → the tenant role ids it holds. A role may be held by many accounts. */
   private accountRoles = new Map<string, Set<string>>();
@@ -1035,6 +1040,110 @@ class MockStore {
     });
   }
 
+  listOrgInvitations(org: string): Page<OrganizationInvitation> {
+    const row = this.orgBySlug(org);
+    const now = Date.now();
+    const items = this.invitations
+      .filter((entry) => entry.org === row.slug && Date.parse(entry.expires_at) > now)
+      // Oldest first, as `organization_invitations` orders by `created_at`.
+      .slice()
+      .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+      .map(({ id, email, role, invited_by, created_at, expires_at }) => ({
+        id,
+        email,
+        role,
+        invited_by,
+        created_at,
+        expires_at,
+      }));
+    return { items, next: null };
+  }
+
+  async createOrgInvitation(
+    org: string,
+    body: CreateOrgInvitationRequest,
+  ): Promise<OrganizationInvitation> {
+    const row = this.orgBySlug(org);
+    const email = normaliseEmail(body.email);
+    if (email === null) {
+      throw new ApiError("email must be a single address without whitespace", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const role = body.role ?? "member";
+    const days = body.expires_in_days ?? 7;
+    if (!Number.isInteger(days) || days < 1 || days > 90) {
+      throw new ApiError("expires_in_days must be between 1 and 90", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    const now = Date.now();
+    if (
+      this.invitations.some(
+        (entry) =>
+          entry.org === row.slug && entry.email === email && Date.parse(entry.expires_at) > now,
+      )
+    ) {
+      throw new ApiError("an invitation for that address is already pending", {
+        status: 409,
+        code: "MONACA_INVITATION_EXISTS",
+      });
+    }
+
+    const invitation: SeededOrgInvitation = {
+      org: row.slug,
+      id: newId("inv"),
+      email,
+      role,
+      invited_by: this.session().account_id,
+      created_at: new Date(now).toISOString(),
+      expires_at: new Date(now + days * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    this.invitations = [...this.invitations, invitation];
+    await this.append({
+      action: "org.invitation.created",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: row.id,
+      decision: "allow",
+      payload: { org: row.slug, email, role, expires_at: invitation.expires_at },
+    });
+    return {
+      id: invitation.id,
+      email: invitation.email,
+      role: invitation.role,
+      invited_by: invitation.invited_by,
+      created_at: invitation.created_at,
+      expires_at: invitation.expires_at,
+    };
+  }
+
+  async revokeOrgInvitation(org: string, invitationId: string): Promise<void> {
+    const row = this.orgBySlug(org);
+    const index = this.invitations.findIndex(
+      (entry) => entry.org === row.slug && entry.id === invitationId,
+    );
+    if (index < 0) {
+      throw new ApiError("invitation not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const removed = this.invitations[index] as SeededOrgInvitation;
+    this.invitations = [
+      ...this.invitations.slice(0, index),
+      ...this.invitations.slice(index + 1),
+    ];
+    await this.append({
+      action: "org.invitation.revoked",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: row.id,
+      decision: "deny",
+      payload: { org: row.slug, email: removed.email, invitation: removed.id },
+    });
+  }
+
   async addMember(body: AddMemberRequest): Promise<Member> {
     const account = this.accounts.find((candidate) => candidate.id === body.account_id);
     if (!account) {
@@ -1585,6 +1694,16 @@ function normaliseDomain(raw: string): string | null {
   return valid ? domain : null;
 }
 
+/** The server's invitation email rule: trim, lowercase, and one `local@domain`. */
+function normaliseEmail(raw: string): string | null {
+  const email = raw.trim().toLowerCase();
+  if (email.split("@").length !== 2 || /\s/.test(email)) return null;
+  const [local, domain] = email.split("@");
+  return local !== undefined && domain !== undefined && local.length > 0 && domain.length > 0
+    ? email
+    : null;
+}
+
 /** A 256-bit base64url secret, the shape the server's `generate_client_secret` produces. */
 function generateClientSecret(): string {
   const bytes = new Uint8Array(32);
@@ -1742,6 +1861,18 @@ export const mockApi: MonacaApi = {
   async removeOrgEmailDomain(org, domain) {
     await delay();
     return store.removeOrgEmailDomain(org, domain);
+  },
+  async listOrgInvitations(org) {
+    await delay();
+    return store.listOrgInvitations(org);
+  },
+  async createOrgInvitation(org, body) {
+    await delay();
+    return store.createOrgInvitation(org, body);
+  },
+  async revokeOrgInvitation(org, invitationId) {
+    await delay();
+    return store.revokeOrgInvitation(org, invitationId);
   },
   async addMember(_org, body) {
     await delay();

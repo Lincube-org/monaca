@@ -107,6 +107,21 @@ export interface OrganizationEmailDomain {
 }
 
 /**
+ * A pending invitation to join an organization (§6.2).
+ *
+ * There is no token to share: acceptance is the invited address's account signing in to the org,
+ * and it joins with the role carried here. Accepted and expired invitations are not listed.
+ */
+export interface OrganizationInvitation {
+  id: string;
+  email: string;
+  role: OrgRole;
+  invited_by: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+/**
  * A named set of scopes defined inside one organization (§6.2).
  *
  * Distinct from the membership rank in `Member.role`: an org role grants scopes only while signing
@@ -280,6 +295,13 @@ export interface AddMemberRequest {
 /** A DNS name; the server lowercases it and rejects malformed values with a 400. */
 export interface AddOrgEmailDomainRequest {
   domain: string;
+}
+
+/** `role` defaults to `member`; `expires_in_days` defaults to 7 and must be 1–90. */
+export interface CreateOrgInvitationRequest {
+  email: string;
+  role?: OrgRole;
+  expires_in_days?: number;
 }
 
 /** `permissions` is the wire name for the role's scope set; duplicates are dropped. */

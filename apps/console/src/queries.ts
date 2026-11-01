@@ -23,6 +23,7 @@ import type {
   CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateTenantRoleRequest,
   CreatedClient,
@@ -31,6 +32,7 @@ import type {
   Member,
   Organization,
   OrganizationEmailDomain,
+  OrganizationInvitation,
   OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
@@ -238,6 +240,39 @@ export function useRemoveOrgEmailDomain(org: OrgRef) {
     mutationFn: (domain) => api.removeOrgEmailDomain(orgValue(org), domain),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.orgEmailDomains(orgValue(org)) });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+/** Pending invitations to the org; acceptance happens at the invited account's sign-in. */
+export function useOrgInvitations(
+  org: OrgRef,
+): UseQueryReturnType<Page<OrganizationInvitation>, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.orgInvitations(orgValue(org))),
+    queryFn: () => api.listOrgInvitations(orgValue(org)),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateOrgInvitation(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<OrganizationInvitation, Error, CreateOrgInvitationRequest>({
+    mutationFn: (body) => api.createOrgInvitation(orgValue(org), body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgInvitations(orgValue(org)) });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+export function useRevokeOrgInvitation(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: (invitationId) => api.revokeOrgInvitation(orgValue(org), invitationId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgInvitations(orgValue(org)) });
       invalidateAudit(client, orgValue(org));
     },
   });

@@ -29,7 +29,13 @@ import { Plus, RefreshCw } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 
 import { describeError } from "@/api/contract";
-import type { Member, OrganizationEmailDomain, OrgRole, OrgRoleDetail } from "@/api/types";
+import type {
+  Member,
+  OrganizationEmailDomain,
+  OrganizationInvitation,
+  OrgRole,
+  OrgRoleDetail,
+} from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
@@ -37,11 +43,14 @@ import {
   useAddMember,
   useAddOrgEmailDomain,
   useAssignOrgRole,
+  useCreateOrgInvitation,
   useMembers,
   useMemberRoles,
   useOrgEmailDomains,
+  useOrgInvitations,
   useOrgRoles,
   useRemoveOrgEmailDomain,
+  useRevokeOrgInvitation,
   useUnassignOrgRole,
 } from "@/queries";
 import { useUiStore } from "@/stores/ui";
@@ -65,6 +74,27 @@ const removeEmailDomain = useRemoveOrgEmailDomain(org);
 
 const domains = computed(() => domainsQuery.data.value?.items ?? []);
 
+/**
+ * Invitations.
+ *
+ * An invitation admits one address at its next sign-in, with the role it carries. It is not an
+ * email — the server sends none — so the page says plainly that the address is what matters, and
+ * the list is only the invitations that are still live.
+ */
+const invitationsQuery = useOrgInvitations(org);
+const createInvitation = useCreateOrgInvitation(org);
+const revokeInvitation = useRevokeOrgInvitation(org);
+
+const invitations = computed(() => invitationsQuery.data.value?.items ?? []);
+const invitationEmail = ref("");
+const invitationRole = ref<OrgRole>("member");
+const invitationDays = ref("7");
+const invitationError = ref<string | null>(null);
+
+const revokeInvitationOpen = ref(false);
+const revokeInvitationTarget = ref<OrganizationInvitation | null>(null);
+const revokeInvitationError = ref<string | null>(null);
+
 const open = ref(false);
 const accountId = ref("");
 const role = ref<OrgRole>("member");
@@ -82,6 +112,12 @@ const stats = computed(() => {
   if (domainsQuery.data.value) {
     const count = domains.value.length;
     items.push(count === 1 ? t("members.domainsCountOne") : t("members.domainsCount", { count }));
+  }
+  if (invitationsQuery.data.value) {
+    const count = invitations.value.length;
+    items.push(
+      count === 1 ? t("members.invitationsCountOne") : t("members.invitationsCount", { count }),
+    );
   }
   return items;
 });
@@ -278,6 +314,65 @@ function formatDate(at: string): string {
   const parsed = new Date(at);
   return Number.isNaN(parsed.getTime()) ? at : parsed.toISOString().slice(0, 10);
 }
+
+/** The same address rule the server applies before an invitation is written (§6.2). */
+function invitationEmailLooksValid(raw: string): boolean {
+  const email = raw.trim().toLowerCase();
+  return /^[^@\s]+@[^@\s]+$/.test(email);
+}
+
+watch(invitationEmail, () => (invitationError.value = null));
+
+async function inviteByEmail(): Promise<void> {
+  const email = invitationEmail.value.trim().toLowerCase();
+  if (!invitationEmailLooksValid(email)) {
+    invitationError.value = t("members.invalidEmail");
+    return;
+  }
+  invitationError.value = null;
+  try {
+    const created = await createInvitation.mutateAsync({
+      email,
+      role: invitationRole.value,
+      expires_in_days: Number(invitationDays.value),
+    });
+    invitationEmail.value = "";
+    toast({
+      title: t("members.invitationCreated"),
+      description: t("members.invitationCreatedDescription", {
+        email: created.email,
+        role: roleLabel[created.role],
+        org: org.value,
+      }),
+      variant: "success",
+    });
+  } catch (error) {
+    invitationError.value = describeError(error).title;
+  }
+}
+
+function openRevokeInvitation(entry: OrganizationInvitation): void {
+  revokeInvitationTarget.value = entry;
+  revokeInvitationError.value = null;
+  revokeInvitationOpen.value = true;
+}
+
+async function confirmRevokeInvitation(): Promise<void> {
+  const target = revokeInvitationTarget.value;
+  if (!target) return;
+  revokeInvitationError.value = null;
+  try {
+    await revokeInvitation.mutateAsync(target.id);
+    revokeInvitationOpen.value = false;
+    toast({
+      title: t("members.invitationRevoked"),
+      description: t("members.invitationRevokedDescription", { email: target.email, org: org.value }),
+      variant: "success",
+    });
+  } catch (error) {
+    revokeInvitationError.value = describeError(error).title;
+  }
+}
 </script>
 
 <template>
@@ -345,6 +440,99 @@ function formatDate(at: string): string {
         </TableBody>
       </Table>
     </QueryBoundary>
+
+    <Card>
+      <CardHeader>
+        <CardTitle>{{ t('members.invitations') }}</CardTitle>
+        <CardDescription>{{ t('members.invitationsHint', { org }) }}</CardDescription>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-2.5">
+        <p v-if="invitationsQuery.isPending.value" class="text-[12px] text-ink-faint">
+          {{ t('common.loading') }}
+        </p>
+
+        <p v-else-if="invitationsQuery.error.value" class="flex items-center gap-2 text-[12.5px] text-deny">
+          {{ describeError(invitationsQuery.error.value).title }}
+          <Button variant="link" size="xs" @click="invitationsQuery.refetch()">
+            {{ t('common.retry') }}
+          </Button>
+        </p>
+
+        <div v-else-if="invitations.length > 0" class="divide-y divide-rule rounded-md border border-rule">
+          <div
+            v-for="entry in invitations"
+            :key="entry.id"
+            class="flex items-center gap-3 px-3 py-2"
+          >
+            <span class="min-w-0 flex-1 truncate text-[12.5px] text-ink">{{ entry.email }}</span>
+            <Badge :variant="entry.role === 'owner' ? 'brand' : entry.role === 'admin' ? 'info' : 'muted'">
+              {{ roleLabel[entry.role] }}
+            </Badge>
+            <span
+              class="mono-data shrink-0 text-[11px] text-ink-faint"
+              :title="t('members.invitationExpires', { date: formatDate(entry.expires_at) })"
+            >
+              {{ formatDate(entry.expires_at) }}
+            </span>
+            <Button
+              variant="secondary"
+              size="xs"
+              :disabled="revokeInvitation.isPending.value"
+              @click="openRevokeInvitation(entry)"
+            >
+              {{ t('members.invitationRevoke') }}
+            </Button>
+          </div>
+        </div>
+
+        <div v-else class="rounded-md border border-dashed border-rule px-3 py-3">
+          <p class="text-[12.5px] font-medium text-ink">{{ t('members.invitationsEmpty') }}</p>
+          <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+            {{ t('members.invitationsEmptyHint') }}
+          </p>
+        </div>
+
+        <form class="flex flex-wrap items-end gap-2 pt-1" @submit.prevent="inviteByEmail">
+          <div class="flex min-w-[220px] flex-1 flex-col gap-1.5">
+            <Label for="org-invitation-email">{{ t('members.invitationEmail') }}</Label>
+            <Input
+              id="org-invitation-email"
+              v-model="invitationEmail"
+              :invalid="invitationEmail.length > 0 && !invitationEmailLooksValid(invitationEmail)"
+              :placeholder="t('members.invitationPlaceholder')"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <div class="flex w-[120px] flex-col gap-1.5">
+            <Label for="org-invitation-role">{{ t('members.role') }}</Label>
+            <NativeSelect id="org-invitation-role" v-model="invitationRole">
+              <option value="member">{{ roleLabel.member }}</option>
+              <option value="admin">{{ roleLabel.admin }}</option>
+              <option value="owner">{{ roleLabel.owner }}</option>
+            </NativeSelect>
+          </div>
+          <div class="flex w-[120px] flex-col gap-1.5">
+            <Label for="org-invitation-days">{{ t('members.invitationDays') }}</Label>
+            <NativeSelect id="org-invitation-days" v-model="invitationDays">
+              <option value="1">{{ t('members.invitationDaysOne') }}</option>
+              <option value="7">{{ t('members.invitationDaysSeven') }}</option>
+              <option value="30">{{ t('members.invitationDaysThirty') }}</option>
+            </NativeSelect>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            type="submit"
+            :disabled="createInvitation.isPending.value || !invitationEmailLooksValid(invitationEmail)"
+          >
+            {{ createInvitation.isPending.value ? t('common.saving') : t('members.invitationInvite') }}
+          </Button>
+        </form>
+        <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('members.invitationHint') }}</p>
+        <p v-if="invitationError" class="text-[12.5px] text-deny">{{ invitationError }}</p>
+      </CardContent>
+    </Card>
 
     <Card>
       <CardHeader>
@@ -518,6 +706,35 @@ function formatDate(at: string): string {
 
         <DialogFooter>
           <Button variant="ghost" type="button" @click="rolesDialogOpen = false">{{ t('common.close') }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="revokeInvitationOpen">
+      <DialogContent class="max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>
+            {{ t('members.invitationRevokeTitle', { email: revokeInvitationTarget?.email ?? '' }) }}
+          </DialogTitle>
+          <DialogDescription>
+            {{ t('members.invitationRevokeDescription', { email: revokeInvitationTarget?.email ?? '', org }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <p v-if="revokeInvitationError" class="text-[12.5px] text-deny">{{ revokeInvitationError }}</p>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="revokeInvitationOpen = false">
+            {{ t('common.cancel') }}
+          </Button>
+          <Button
+            variant="danger"
+            type="button"
+            :disabled="revokeInvitation.isPending.value"
+            @click="confirmRevokeInvitation"
+          >
+            {{ revokeInvitation.isPending.value ? t('common.saving') : t('members.invitationRevoke') }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

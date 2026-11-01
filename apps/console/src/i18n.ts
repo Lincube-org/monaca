@@ -427,6 +427,33 @@ export const messages = {
       "Future sign-ins from {domain} no longer join {org}. Members it already admitted keep their membership.",
     domainRemoved: "Domain removed",
     domainRemovedDescription: "{domain} no longer admits its accounts to {org}.",
+    invitations: "Invitations",
+    invitationsHint:
+      "An invitation admits one address to {org} at its next sign-in, with the role it carries. No email is sent: share the address with the person you are inviting.",
+    invitationsEmpty: "No pending invitations",
+    invitationsEmptyHint:
+      "Invite an address to have its account join this organization at sign-in, without an administrator adding it first.",
+    invitationsCount: "{count} pending invitations",
+    invitationsCountOne: "1 pending invitation",
+    invitationEmail: "Email",
+    invitationPlaceholder: "teammate@example.com",
+    invitationDays: "Expires in",
+    invitationDaysOne: "1 day",
+    invitationDaysSeven: "7 days",
+    invitationDaysThirty: "30 days",
+    invitationInvite: "Invite",
+    invalidEmail: "Enter an email address such as teammate@example.com.",
+    invitationHint:
+      "The address is matched case-insensitively against an account's primary email. Revoking an invitation stops the join immediately.",
+    invitationExpires: "Expires on {date}",
+    invitationCreated: "Invitation created",
+    invitationCreatedDescription: "{email} joins {org} as {role} at its next sign-in.",
+    invitationRevoke: "Revoke",
+    invitationRevokeTitle: "Revoke the invitation for {email}?",
+    invitationRevokeDescription:
+      "The address no longer joins {org} automatically. An account that already accepted keeps its membership.",
+    invitationRevoked: "Invitation revoked",
+    invitationRevokedDescription: "{email} no longer joins {org} automatically.",
   },
   roles: {
     title: "Organization roles",
