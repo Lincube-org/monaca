@@ -21,7 +21,7 @@ function respond(body: unknown, status = 200): void {
     new Response(JSON.stringify(body), {
       status,
       headers: { "content-type": "application/json" },
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
 }
 
 describe("findSsoConnector", () => {
@@ -33,7 +33,7 @@ describe("findSsoConnector", () => {
         JSON.stringify({ items: [{ connector_id: "okta", display_name: "Acme Okta" }] }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     expect(await findSsoConnector("demo", "User@Acme.Example")).toEqual({
       connector_id: "okta",
@@ -46,7 +46,7 @@ describe("findSsoConnector", () => {
   test("does not call the server for something that is not an address", async () => {
     globalThis.fetch = (async () => {
       throw new Error("must not be called");
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     expect(await findSsoConnector("demo", "just-a-username")).toBe(null);
   });
 
@@ -59,7 +59,7 @@ describe("findSsoConnector", () => {
 
     globalThis.fetch = (async () => {
       throw new Error("offline");
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     expect(await findSsoConnector("demo", "user@demo.localhost")).toBe(null);
   });
 });
