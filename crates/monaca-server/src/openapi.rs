@@ -55,6 +55,7 @@ pub const M0_ACTIONS: &[&str] = &[
     "role.created",
     "role.deleted",
     "session.logout",
+    "sign_in_experience.updated",
 ];
 
 /// The `subject.type` values §8.1 allows.
@@ -188,7 +189,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 26);
+        assert_eq!(M0_ACTIONS.len(), 27);
         for action in [
             "account.created",
             "org.member.added",
@@ -216,6 +217,7 @@ mod tests {
             "role.created",
             "role.deleted",
             "session.logout",
+            "sign_in_experience.updated",
         ] {
             assert!(
                 M0_ACTIONS.contains(&action),

@@ -41,6 +41,26 @@ pub async fn discovery(
     Ok(Json(DiscoveryDocument::new(tenant.issuer).to_json()))
 }
 
+/// `GET /t/{tenant}/sign-in-experience` — the hosted switches the page applies before rendering.
+///
+/// Public like the connector list: the sign-in page must know which forms to offer before anyone
+/// is signed in, and these switches disclose nothing about accounts.
+pub async fn sign_in_experience(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let tenant = state.tenant(&tenant).await?;
+    if !tenant.is_active() {
+        return Err(ApiError::problem(kinds::NOT_FOUND, "tenant is not active"));
+    }
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    Ok(Json(json!({
+        "sign_up_enabled": experience.sign_up_enabled,
+        "password_sign_in_enabled": experience.password_sign_in_enabled,
+        "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+    })))
+}
+
 /// `GET /t/{tenant}/.well-known/jwks.json`.
 pub async fn jwks(
     State(state): State<Arc<AppState>>,
@@ -365,6 +385,17 @@ pub async fn sign_in(
         .await
         .map_err(ApiError::Interaction)?;
     let tenant = state.tenant(&interaction.tenant).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .password_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::PASSWORD_SIGN_IN_DISABLED,
+            "password sign-in is disabled for this tenant",
+        ));
+    }
     let org_slug = interaction.organization.clone();
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
     let org_ctx = org.ctx(&tenant);
@@ -872,6 +903,17 @@ pub async fn sign_up(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .sign_up_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::SIGN_UP_DISABLED,
+            "self-service sign-up is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     if state
         .store
@@ -895,6 +937,17 @@ pub async fn sign_up_verify(
     Json(body): Json<SignUpVerifyBody>,
 ) -> Result<Response, ApiError> {
     let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .sign_up_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::SIGN_UP_DISABLED,
+            "self-service sign-up is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     check_password(&body.password)?;
     // A second registration for the same address is a conflict even with a valid code, because
@@ -1000,6 +1053,17 @@ pub async fn sign_in_code(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .email_code_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::EMAIL_CODE_SIGN_IN_DISABLED,
+            "email code sign-in is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     request_verification(&state, &tenant, PURPOSE_SIGN_IN, &email).await
 }
@@ -1012,6 +1076,17 @@ pub async fn sign_in_code_verify(
     Json(body): Json<CodeVerifyBody>,
 ) -> Result<Response, ApiError> {
     let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .email_code_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::EMAIL_CODE_SIGN_IN_DISABLED,
+            "email code sign-in is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     take_verification_code(&state, &tenant, PURPOSE_SIGN_IN, &email, &body.code).await?;
 
@@ -1041,6 +1116,17 @@ pub async fn sign_in_link(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .email_code_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::EMAIL_CODE_SIGN_IN_DISABLED,
+            "email code sign-in is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     let now = state.now();
     if let Some(row) = state
@@ -1120,6 +1206,17 @@ pub async fn sign_in_link_verify(
     // The token is checked before the interaction: a replay must answer 401 like any other dead
     // link, not disclose that the interaction was already consumed.
     let tenant = state.tenant(&tenant_slug).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .email_code_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::EMAIL_CODE_SIGN_IN_DISABLED,
+            "email code sign-in is disabled for this tenant",
+        ));
+    }
     let invalid = || {
         ApiError::problem(
             kinds::INVALID_VERIFICATION_CODE,
@@ -1185,6 +1282,17 @@ pub async fn password_forgot(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .password_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::PASSWORD_SIGN_IN_DISABLED,
+            "password sign-in is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     request_verification(&state, &tenant, PURPOSE_PASSWORD_RESET, &email).await
 }
@@ -1197,6 +1305,17 @@ pub async fn password_reset(
     Json(body): Json<PasswordResetBody>,
 ) -> Result<Response, ApiError> {
     let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .password_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::PASSWORD_SIGN_IN_DISABLED,
+            "password sign-in is disabled for this tenant",
+        ));
+    }
     let email = normalise_email(&body.email)?;
     check_password(&body.password)?;
     take_verification_code(&state, &tenant, PURPOSE_PASSWORD_RESET, &email, &body.code).await?;

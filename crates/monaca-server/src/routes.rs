@@ -159,6 +159,10 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             get(crate::social::list_public_connectors),
         )
         .route(
+            "/t/{tenant}/sign-in-experience",
+            get(crate::protocol::sign_in_experience),
+        )
+        .route(
             "/t/{tenant}/connectors/{connector}/authorize",
             get(crate::social::connector_authorize),
         )
@@ -320,6 +324,11 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/clients/{client}/secret",
             post(crate::clients::rotate_client_secret),
+        )
+        .route(
+            "/v1/sign-in-experience",
+            get(crate::management::get_sign_in_experience)
+                .patch(crate::management::update_sign_in_experience),
         )
         .route(
             "/v1/roles",

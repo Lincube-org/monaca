@@ -42,6 +42,19 @@ impl AccountRow {
     }
 }
 
+/// The tenant's hosted sign-in switches (§6.1 sign-in experience).
+#[derive(Debug, Clone, FromRow)]
+pub struct SignInExperienceRow {
+    /// Whether self-service registration is offered.
+    pub sign_up_enabled: bool,
+    /// Whether the password form is offered.
+    pub password_sign_in_enabled: bool,
+    /// Whether emailed sign-in codes and links are offered.
+    pub email_code_sign_in_enabled: bool,
+    /// When the switches last changed.
+    pub updated_at: OffsetDateTime,
+}
+
 /// A social (OAuth2) connector in `tenant.social_connectors` (§6.1).
 #[derive(Debug, Clone, FromRow)]
 pub struct SocialConnectorRow {
@@ -605,6 +618,48 @@ impl Store {
                 .execute(&pool)
                 .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// The tenant's hosted sign-in switches. The migration seeds the row, so this never creates
+    /// one; a missing row is a provisioning bug and surfaces as a database error.
+    pub async fn sign_in_experience(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<SignInExperienceRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SignInExperienceRow>(
+            "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
+                    updated_at
+             FROM tenant.sign_in_experience WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Change only the switches the caller named; the others keep their value.
+    pub async fn update_sign_in_experience(
+        &self,
+        tenant: &TenantRow,
+        sign_up_enabled: Option<bool>,
+        password_sign_in_enabled: Option<bool>,
+        email_code_sign_in_enabled: Option<bool>,
+    ) -> Result<SignInExperienceRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SignInExperienceRow>(
+            "UPDATE tenant.sign_in_experience
+             SET sign_up_enabled = COALESCE($1, sign_up_enabled),
+                 password_sign_in_enabled = COALESCE($2, password_sign_in_enabled),
+                 email_code_sign_in_enabled = COALESCE($3, email_code_sign_in_enabled),
+                 updated_at = now()
+             WHERE singleton
+             RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
+                       updated_at",
+        )
+        .bind(sign_up_enabled)
+        .bind(password_sign_in_enabled)
+        .bind(email_code_sign_in_enabled)
+        .fetch_one(&pool)
+        .await?)
     }
 
     /// An account and its password PHC string, by email (case-insensitive).

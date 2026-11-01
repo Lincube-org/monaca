@@ -13,7 +13,10 @@ use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::hash_password;
 use monaca_oidc::{is_absolute_http_url, valid_scope};
-use monaca_store::{AccountRow, AgentKeyRow, AgentRow, GrantRow, RoleRow, SessionRow, TenantRow};
+use monaca_store::{
+    AccountRow, AgentKeyRow, AgentRow, GrantRow, RoleRow, SessionRow, SignInExperienceRow,
+    TenantRow,
+};
 use monaca_types::{
     AccountId, AgentId, AgentKeyId, EventId, GrantId, RoleId, SessionId, TenantId, TypedId,
 };
@@ -413,6 +416,106 @@ pub async fn update_account(
         .ok_or_else(|| ApiError::not_found("account"))?;
     let roles = state.store.account_roles(&tenant, account_id).await?;
     Ok(Json(account_json(&updated, &roles)))
+}
+
+/// The body of `PATCH /v1/sign-in-experience`; absent fields keep their value.
+#[derive(Debug, Deserialize)]
+pub struct UpdateSignInExperienceBody {
+    /// Whether self-service registration is offered.
+    pub sign_up_enabled: Option<bool>,
+    /// Whether the password form is offered.
+    pub password_sign_in_enabled: Option<bool>,
+    /// Whether emailed codes and links are offered.
+    pub email_code_sign_in_enabled: Option<bool>,
+}
+
+/// `GET /v1/sign-in-experience` — the tenant's hosted sign-in switches (§6.2).
+pub async fn get_sign_in_experience(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    Ok(Json(sign_in_experience_json(&experience)))
+}
+
+/// `PATCH /v1/sign-in-experience` — switch hosted sign-in methods on or off (§6.2).
+///
+/// At least one first-factor method — the password form or emailed codes — must stay enabled:
+/// a tenant with neither has no way to sign in at all, which is a misconfiguration rather than a
+/// choice. The resulting state is checked before the write, so a rejected patch changes nothing.
+pub async fn update_sign_in_experience(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateSignInExperienceBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    if body.sign_up_enabled.is_none()
+        && body.password_sign_in_enabled.is_none()
+        && body.email_code_sign_in_enabled.is_none()
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "at least one switch must be present",
+        ));
+    }
+
+    let current = state.store.sign_in_experience(&tenant).await?;
+    let password = body
+        .password_sign_in_enabled
+        .unwrap_or(current.password_sign_in_enabled);
+    let email_code = body
+        .email_code_sign_in_enabled
+        .unwrap_or(current.email_code_sign_in_enabled);
+    if !password && !email_code {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "password sign-in or email code sign-in must stay enabled",
+        ));
+    }
+
+    let experience = state
+        .store
+        .update_sign_in_experience(
+            &tenant,
+            body.sign_up_enabled,
+            body.password_sign_in_enabled,
+            body.email_code_sign_in_enabled,
+        )
+        .await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "sign_in_experience.updated".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: None,
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "sign_up_enabled": experience.sign_up_enabled,
+            "password_sign_in_enabled": experience.password_sign_in_enabled,
+            "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append sign_in_experience.updated audit event");
+    }
+
+    Ok(Json(sign_in_experience_json(&experience)))
+}
+
+fn sign_in_experience_json(experience: &SignInExperienceRow) -> Value {
+    json!({
+        "sign_up_enabled": experience.sign_up_enabled,
+        "password_sign_in_enabled": experience.password_sign_in_enabled,
+        "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+        "updated_at": ts(experience.updated_at),
+    })
 }
 
 /// The body of `POST /v1/roles`.

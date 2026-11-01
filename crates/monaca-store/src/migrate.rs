@@ -104,6 +104,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "RBAC roles and account assignments (M1)",
         include_str!("../migrations/tenant_13.sql"),
     ),
+    (
+        14,
+        "hosted sign-in switches: sign-up, password and email code (M1)",
+        include_str!("../migrations/tenant_14.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

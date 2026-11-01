@@ -46,6 +46,16 @@ export interface InteractionDetails {
   expires_at: string;
 }
 
+/** The tenant's hosted switches, read before the page decides which forms to offer (§6.1). */
+export interface SignInExperience {
+  /** Whether self-service registration is offered. */
+  sign_up_enabled: boolean;
+  /** Whether the password form is offered. */
+  password_sign_in_enabled: boolean;
+  /** Whether emailed codes and links are offered. */
+  email_code_sign_in_enabled: boolean;
+}
+
 /**
  * The sign-in result is a union because authentication can pause twice: a third-party client (or
  * `prompt=consent`) waits for `submitConsent`, and an account with an authenticator app waits for
@@ -171,6 +181,11 @@ const base = (tenant: string, iid: string): string =>
 
 export function getInteraction(tenant: string, iid: string): Promise<InteractionDetails> {
   return call<InteractionDetails>(base(tenant, iid));
+}
+
+/** The tenant's public sign-in switches — public because the page reads them before sign-in. */
+export function getSignInExperience(tenant: string): Promise<SignInExperience> {
+  return call<SignInExperience>(`/t/${encodeURIComponent(tenant)}/sign-in-experience`);
 }
 
 /**

@@ -234,6 +234,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "issued session cookie is 401 and the refresh token is 400 invalid_grant — and {state:active} " +
       "restores sign-in; an invalid state is 400 and an unknown account is 404",
   },
+  {
+    step: "24",
+    title: "sign-in experience",
+    assertion:
+      "GET /t/demo/sign-in-experience is public and starts with every switch on; " +
+      "PATCH /v1/sign-in-experience {sign_up_enabled:false,password_sign_in_enabled:false} answers 200 " +
+      "and the public read follows; sign-up is 403 MONACA_SIGN_UP_DISABLED, the password is 403 " +
+      "MONACA_PASSWORD_SIGN_IN_DISABLED, and email codes still work; disabling email codes refuses " +
+      "them and keeps the password; disabling both is 400, an empty patch is 400, and re-enabling " +
+      "restores every method",
+  },
 ];
 
 interface StepResult {
@@ -4643,6 +4654,223 @@ async function userManagementFlow(
   };
 }
 
+/**
+ * Step 24 — hosted sign-in switches (§6.1/§6.2).
+ *
+ * The tenant turns sign-up, password sign-in and emailed codes on or off; the public read is what
+ * the auth-ui applies, and the protocol endpoints enforce the same values.
+ */
+async function signInExperienceFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "24",
+    title: "sign-in experience",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction id for the bootstrap admin. */
+  const begin = async (tag: string): Promise<string | undefined> => {
+    const verifier = `x-${tag}-${runId}-${"y".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    const response = await call(url, { redirect: "manual" });
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return encodeURIComponent(interaction);
+  };
+
+  const passwordSignIn = (interaction: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/interaction/${interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        identifier: BOOTSTRAP_ADMIN.email,
+        password: BOOTSTRAP_ADMIN.password,
+      }),
+    });
+
+  const requestCode = (interaction: string, address: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/interaction/${interaction}/sign-in/code`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: address }),
+    });
+
+  const patch = (body: Record<string, unknown>): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+  const publicRead = async (): Promise<
+    { sign_up_enabled?: unknown; password_sign_in_enabled?: unknown; email_code_sign_in_enabled?: unknown } | undefined
+  > => {
+    const response = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    return response.status === 200
+      ? (response.body as {
+          sign_up_enabled?: unknown;
+          password_sign_in_enabled?: unknown;
+          email_code_sign_in_enabled?: unknown;
+        })
+      : undefined;
+  };
+
+  try {
+    const initial = await publicRead();
+    checks.push([
+      "the public switches start with every method on",
+      initial !== undefined &&
+        initial.sign_up_enabled === true &&
+        initial.password_sign_in_enabled === true &&
+        initial.email_code_sign_in_enabled === true,
+    ]);
+
+    // --- sign-up and password off; email codes stay the way in -----------------------------------
+    const disabled = await patch({ sign_up_enabled: false, password_sign_in_enabled: false });
+    checks.push([
+      "PATCH disables sign-up and the password",
+      disabled.status === 200 &&
+        (disabled.body as { sign_up_enabled?: unknown })?.sign_up_enabled === false &&
+        (disabled.body as { password_sign_in_enabled?: unknown })?.password_sign_in_enabled === false &&
+        (disabled.body as { email_code_sign_in_enabled?: unknown })?.email_code_sign_in_enabled === true,
+    ]);
+
+    const afterDisable = await publicRead();
+    checks.push([
+      "the public read follows the patch",
+      afterDisable?.sign_up_enabled === false &&
+        afterDisable?.password_sign_in_enabled === false &&
+        afterDisable?.email_code_sign_in_enabled === true,
+    ]);
+
+    const signUpInteraction = await begin("signup");
+    if (signUpInteraction === undefined) return fail("");
+    const signUp = await call(`${base}/t/${TENANT}/interaction/${signUpInteraction}/sign-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `disabled-${runId}@demo.localhost` }),
+    });
+    checks.push([
+      "sign-up is refused while disabled",
+      signUp.status === 403 &&
+        (signUp.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_SIGN_UP_DISABLED",
+    ]);
+
+    const passwordInteraction = await begin("password");
+    if (passwordInteraction === undefined) return fail("");
+    const password = await passwordSignIn(passwordInteraction);
+    checks.push([
+      "the password is refused while disabled",
+      password.status === 403 &&
+        (password.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_PASSWORD_SIGN_IN_DISABLED",
+    ]);
+
+    const codeInteraction = await begin("code");
+    if (codeInteraction === undefined) return fail("");
+    const code = await requestCode(codeInteraction, `codes-${runId}@demo.localhost`);
+    checks.push([
+      "email codes still work while the password is disabled",
+      code.status === 200 &&
+        (code.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    // --- the other direction: codes off, password back on ----------------------------------------
+    const swapped = await patch({ password_sign_in_enabled: true, email_code_sign_in_enabled: false });
+    checks.push([
+      "email codes can be disabled while the password stays on",
+      swapped.status === 200 &&
+        (swapped.body as { sign_up_enabled?: unknown })?.sign_up_enabled === false &&
+        (swapped.body as { password_sign_in_enabled?: unknown })?.password_sign_in_enabled === true &&
+        (swapped.body as { email_code_sign_in_enabled?: unknown })?.email_code_sign_in_enabled === false,
+    ]);
+
+    const refusedInteraction = await begin("codes-off");
+    if (refusedInteraction === undefined) return fail("");
+    const refusedCode = await requestCode(refusedInteraction, `codes-off-${runId}@demo.localhost`);
+    checks.push([
+      "email codes are refused while disabled",
+      refusedCode.status === 403 &&
+        (refusedCode.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_EMAIL_CODE_SIGN_IN_DISABLED",
+    ]);
+
+    const passwordAgainInteraction = await begin("password-on");
+    if (passwordAgainInteraction === undefined) return fail("");
+    const passwordAgain = await passwordSignIn(passwordAgainInteraction);
+    checks.push([
+      "the password works again",
+      passwordAgain.status === 200 && typeof (passwordAgain.body as { redirect_to?: unknown })?.redirect_to === "string",
+    ]);
+
+    // --- invalid patches change nothing ---------------------------------------------------------
+    const bothOff = await patch({ password_sign_in_enabled: false, email_code_sign_in_enabled: false });
+    checks.push(["turning both first factors off is 400", bothOff.status === 400]);
+
+    const empty = await patch({});
+    checks.push(["an empty patch is 400", empty.status === 400]);
+
+    const restored = await patch({
+      sign_up_enabled: true,
+      password_sign_in_enabled: true,
+      email_code_sign_in_enabled: true,
+    });
+    checks.push([
+      "every method can be restored",
+      restored.status === 200 &&
+        (restored.body as { sign_up_enabled?: unknown })?.sign_up_enabled === true &&
+        (restored.body as { password_sign_in_enabled?: unknown })?.password_sign_in_enabled === true &&
+        (restored.body as { email_code_sign_in_enabled?: unknown })?.email_code_sign_in_enabled === true,
+    ]);
+
+    const finalRead = await publicRead();
+    checks.push([
+      "the public read is all on again",
+      finalRead?.sign_up_enabled === true &&
+        finalRead?.password_sign_in_enabled === true &&
+        finalRead?.email_code_sign_in_enabled === true,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "24",
+    title: "sign-in experience",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: public on → disable sign-up/password → 403s → codes still on → swap → password on → 400s → restore → public on`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -4895,6 +5123,7 @@ async function main(): Promise<number> {
   push(await loginHintFlow(base, adminToken, parsed.consoleSecret));
   push(await clientFlow(base, adminToken));
   push(await userManagementFlow(base, adminToken, parsed.consoleSecret));
+  push(await signInExperienceFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

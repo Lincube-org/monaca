@@ -17,6 +17,7 @@ import { computed, nextTick, onMounted, ref } from "vue";
 import {
   InteractionError,
   getInteraction,
+  getSignInExperience,
   submitSignIn,
   verifyMfa,
   getPasskeySignInOptions,
@@ -34,6 +35,7 @@ import {
   requestPasswordReset,
   resetPassword,
   type InteractionDetails,
+  type SignInExperience,
   type SignInResult,
 } from "@/api/interaction";
 import { PasskeyError, getPasskeyAssertion, passkeysSupported } from "@/api/webauthn";
@@ -159,6 +161,15 @@ const username = ref("");
 
 /** Provider buttons; the tenant's public list is fetched once and never blocks the page. */
 const socialConnectors = ref<SocialConnector[]>([]);
+
+/**
+ * The tenant's hosted switches. `null` means "everything is offered": a failed read must not lock
+ * a signing-in visitor out, so the flags default to true until the request answers.
+ */
+const experience = ref<SignInExperience | null>(null);
+const passwordAllowed = computed(() => experience.value?.password_sign_in_enabled ?? true);
+const emailCodeAllowed = computed(() => experience.value?.email_code_sign_in_enabled ?? true);
+const signUpAllowed = computed(() => experience.value?.sign_up_enabled ?? true);
 
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
@@ -354,6 +365,16 @@ onMounted(async () => {
       mfaRequired.value = true;
       mfaFactors.value = details.value.mfa_factors;
       rememberDevice.value = false;
+    }
+    // The switches decide which forms the page offers. A failed read keeps every method so a
+    // transient error cannot keep a visitor from signing in.
+    try {
+      experience.value = await getSignInExperience(tenantFromUrl.value);
+      if (!experience.value.password_sign_in_enabled && experience.value.email_code_sign_in_enabled) {
+        mode.value = "code";
+      }
+    } catch {
+      experience.value = null;
     }
     socialConnectors.value = await listSocialConnectors(tenantFromUrl.value);
   } catch (error) {
@@ -1113,7 +1134,7 @@ async function cancel(): Promise<void> {
             </div>
 
             <!-- A passkey replaces the typed secret; hidden when the browser cannot run a ceremony. -->
-            <div v-if="mode === 'password' && passkeyAvailable" class="flex flex-col gap-2">
+            <div v-if="!awaitingCode && (mode === 'password' || mode === 'code') && passkeyAvailable" class="flex flex-col gap-2">
               <div class="flex items-center gap-2 text-[11px] text-ink-faint">
                 <span class="h-px flex-1 bg-rule" aria-hidden="true" />
                 {{ t("passkey.or") }}
@@ -1142,7 +1163,10 @@ async function cancel(): Promise<void> {
             </div>
 
             <!-- Provider accounts: a full-page navigation to the provider and back to this interaction. -->
-            <div v-if="mode === 'password' && socialConnectors.length > 0" class="flex flex-col gap-2">
+            <div
+              v-if="!awaitingCode && (mode === 'password' || mode === 'code') && socialConnectors.length > 0"
+              class="flex flex-col gap-2"
+            >
               <div class="flex items-center gap-2 text-[11px] text-ink-faint">
                 <span class="h-px flex-1 bg-rule" aria-hidden="true" />
                 {{ t("signIn.or") }}
@@ -1167,7 +1191,7 @@ async function cancel(): Promise<void> {
               class="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11.5px]"
             >
               <button
-                v-if="mode !== 'password'"
+                v-if="mode !== 'password' && passwordAllowed"
                 type="button"
                 class="font-medium text-brand-strong hover:underline"
                 :disabled="submitting"
@@ -1176,7 +1200,7 @@ async function cancel(): Promise<void> {
                 {{ t("modes.password") }}
               </button>
               <button
-                v-if="mode !== 'code'"
+                v-if="mode !== 'code' && emailCodeAllowed"
                 type="button"
                 class="font-medium text-brand-strong hover:underline"
                 :disabled="submitting"
@@ -1185,7 +1209,7 @@ async function cancel(): Promise<void> {
                 {{ t("modes.code") }}
               </button>
               <button
-                v-if="mode !== 'signup'"
+                v-if="mode !== 'signup' && signUpAllowed"
                 type="button"
                 class="font-medium text-brand-strong hover:underline"
                 :disabled="submitting"
@@ -1194,7 +1218,7 @@ async function cancel(): Promise<void> {
                 {{ t("modes.signUp") }}
               </button>
               <button
-                v-if="mode !== 'reset'"
+                v-if="mode !== 'reset' && passwordAllowed"
                 type="button"
                 class="font-medium text-brand-strong hover:underline"
                 :disabled="submitting"

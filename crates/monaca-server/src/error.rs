@@ -35,6 +35,27 @@ pub mod kinds {
         "Insufficient scope",
         403,
     );
+    /// Self-service registration is switched off for this tenant.
+    pub const SIGN_UP_DISABLED: ProblemKind = ProblemKind::new(
+        "sign_up_disabled",
+        "MONACA_SIGN_UP_DISABLED",
+        "Sign-up disabled",
+        403,
+    );
+    /// The password form is switched off for this tenant.
+    pub const PASSWORD_SIGN_IN_DISABLED: ProblemKind = ProblemKind::new(
+        "password_sign_in_disabled",
+        "MONACA_PASSWORD_SIGN_IN_DISABLED",
+        "Password sign-in disabled",
+        403,
+    );
+    /// Emailed codes and links are switched off for this tenant.
+    pub const EMAIL_CODE_SIGN_IN_DISABLED: ProblemKind = ProblemKind::new(
+        "email_code_sign_in_disabled",
+        "MONACA_EMAIL_CODE_SIGN_IN_DISABLED",
+        "Email code sign-in disabled",
+        403,
+    );
     /// The resource does not exist, or is outside the caller's tenant.
     pub const NOT_FOUND: ProblemKind =
         ProblemKind::new("not_found", "MONACA_NOT_FOUND", "Not found", 404);
