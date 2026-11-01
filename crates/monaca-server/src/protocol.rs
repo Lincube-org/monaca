@@ -19,8 +19,7 @@ use monaca_oidc::{
 };
 use monaca_store::{AccountRow, OrgRow, PasskeyRow, TenantRow, topics};
 use monaca_types::{
-    AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, OrgInvitationId,
-    TypedId,
+    AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, OrgInvitationId, TypedId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -662,8 +661,7 @@ async fn complete_sign_in(
             "jit": invitation.is_none(),
         });
         if let Some((id, _)) = &invitation {
-            payload["invitation"] =
-                json!(OrgInvitationId::from_uuid(*id).to_typed_string());
+            payload["invitation"] = json!(OrgInvitationId::from_uuid(*id).to_typed_string());
         }
         let event = AuditEvent {
             id: EventId::new(),
