@@ -12,6 +12,7 @@ import {
   Checkbox,
   Input,
   Label,
+  NativeSelect,
   Separator,
   toast,
 } from "@monaca/ui";
@@ -50,16 +51,27 @@ const update = useUpdateSignInExperience();
 const signUp = ref(false);
 const password = ref(true);
 const emailCode = ref(true);
+const mfaEnabled = ref(true);
+const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const formError = ref<string | null>(null);
 
 /** The last server values the form was synchronised with; the save diffs against it. */
 const baseline = ref<SignInExperience | null>(null);
 
-function sameSwitches(value: SignInExperience, a: boolean, b: boolean, c: boolean): boolean {
+function sameSwitches(
+  value: SignInExperience,
+  a: boolean,
+  b: boolean,
+  c: boolean,
+  mfa: boolean,
+  policy: "user_controlled" | "mandatory",
+): boolean {
   return (
     value.sign_up_enabled === a &&
     value.password_sign_in_enabled === b &&
-    value.email_code_sign_in_enabled === c
+    value.email_code_sign_in_enabled === c &&
+    value.mfa_enabled === mfa &&
+    value.mfa_policy === policy
   );
 }
 
@@ -68,6 +80,8 @@ function adopt(value: SignInExperience): void {
   signUp.value = value.sign_up_enabled;
   password.value = value.password_sign_in_enabled;
   emailCode.value = value.email_code_sign_in_enabled;
+  mfaEnabled.value = value.mfa_enabled;
+  mfaPolicy.value = value.mfa_policy;
 }
 
 /**
@@ -81,8 +95,8 @@ watch(
   (next, previous) => {
     if (!next) return;
     const base = previous ?? null;
-    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value);
-    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value);
+    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value);
+    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value);
     if (matchesNext || !matchesBase) adopt(next);
   },
   { immediate: true },
@@ -91,7 +105,7 @@ watch(
 const dirty = computed(() => {
   const base = baseline.value;
   if (!base) return false;
-  return !sameSwitches(base, signUp.value, password.value, emailCode.value);
+  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value);
 });
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
@@ -118,6 +132,21 @@ function setSwitch(field: "signUp" | "password" | "emailCode", value: boolean | 
   formError.value = null;
 }
 
+/**
+ * Turning MFA off makes the mandatory policy impossible, so the policy follows the switch instead
+ * of leaving the form in a state the server would reject.
+ */
+function setMfa(value: boolean | "indeterminate"): void {
+  mfaEnabled.value = value === true;
+  if (!mfaEnabled.value) mfaPolicy.value = "user_controlled";
+  formError.value = null;
+}
+
+function setMfaPolicy(value: string): void {
+  mfaPolicy.value = value === "mandatory" ? "mandatory" : "user_controlled";
+  formError.value = null;
+}
+
 function discard(): void {
   const current = experience.data.value;
   if (current) adopt(current);
@@ -136,6 +165,8 @@ async function save(): Promise<void> {
   if (signUp.value !== base.sign_up_enabled) body.sign_up_enabled = signUp.value;
   if (password.value !== base.password_sign_in_enabled) body.password_sign_in_enabled = password.value;
   if (emailCode.value !== base.email_code_sign_in_enabled) body.email_code_sign_in_enabled = emailCode.value;
+  if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
+  if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
   if (Object.keys(body).length === 0) return;
 
   formError.value = null;
@@ -264,6 +295,47 @@ function formatStamp(at: string): string {
                 <TriangleAlert />
                 <AlertDescription>{{ t('signInExperience.invalidMethods') }}</AlertDescription>
               </Alert>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{{ t('signInExperience.mfa') }}</CardTitle>
+              <CardDescription>{{ t('signInExperience.mfaHint') }}</CardDescription>
+            </CardHeader>
+            <CardContent class="flex flex-col gap-3">
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="mfa-enabled"
+                  :model-value="mfaEnabled"
+                  :disabled="update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => setMfa(value)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="mfa-enabled">{{ t('signInExperience.mfaField') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.mfaFieldHint') }}
+                  </p>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="mfa-policy">{{ t('signInExperience.mfaPolicy') }}</Label>
+                <NativeSelect
+                  id="mfa-policy"
+                  :model-value="mfaPolicy"
+                  :disabled="!mfaEnabled || update.isPending.value"
+                  @update:model-value="(value: string) => setMfaPolicy(value)"
+                >
+                  <option value="user_controlled">{{ t('signInExperience.mfaPolicyUser') }}</option>
+                  <option value="mandatory">{{ t('signInExperience.mfaPolicyMandatory') }}</option>
+                </NativeSelect>
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.mfaPolicyHint') }}
+                </p>
+              </div>
             </CardContent>
           </Card>
         </div>

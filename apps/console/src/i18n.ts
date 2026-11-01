@@ -541,6 +541,17 @@ export const messages = {
     emailCodeField: "Email code sign-in",
     emailCodeFieldHint: "Mails a one-time code or link. It still works while password sign-in is off.",
     invalidMethods: "Keep password sign-in or email code sign-in enabled.",
+    mfa: "Multi-factor authentication",
+    mfaHint:
+      "Whether enrolled authenticators and passkeys are demanded, and whether every account must set one up before it can sign in.",
+    mfaField: "Use second factors",
+    mfaFieldHint:
+      "When off, an enrolled authenticator is not demanded either. Turning it off returns the policy to user-controlled.",
+    mfaPolicy: "Policy",
+    mfaPolicyUser: "User-controlled",
+    mfaPolicyMandatory: "Mandatory",
+    mfaPolicyHint:
+      "User-controlled challenges accounts that enrolled a factor. Mandatory also pauses a first-time sign-in on a setup step.",
     save: "Save changes",
     saving: "Saving",
     discard: "Discard",

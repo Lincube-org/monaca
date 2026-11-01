@@ -1139,9 +1139,17 @@ class MockStore {
     if (
       body.sign_up_enabled === undefined &&
       body.password_sign_in_enabled === undefined &&
-      body.email_code_sign_in_enabled === undefined
+      body.email_code_sign_in_enabled === undefined &&
+      body.mfa_enabled === undefined &&
+      body.mfa_policy === undefined
     ) {
       throw new ApiError("at least one switch must be present", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (body.mfa_policy !== undefined && !["user_controlled", "mandatory"].includes(body.mfa_policy)) {
+      throw new ApiError("mfa_policy must be user_controlled or mandatory", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
@@ -1156,11 +1164,21 @@ class MockStore {
         code: "MONACA_INVALID_REQUEST",
       });
     }
+    const mfaEnabled = body.mfa_enabled ?? this.experience.mfa_enabled;
+    const mfaPolicy = body.mfa_policy ?? this.experience.mfa_policy;
+    if (!mfaEnabled && mfaPolicy === "mandatory") {
+      throw new ApiError("mfa_policy cannot be mandatory while MFA is disabled", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
 
     const updated: SignInExperience = {
       sign_up_enabled: body.sign_up_enabled ?? this.experience.sign_up_enabled,
       password_sign_in_enabled: password,
       email_code_sign_in_enabled: emailCode,
+      mfa_enabled: mfaEnabled,
+      mfa_policy: mfaPolicy,
       updated_at: new Date().toISOString(),
     };
     this.experience = updated;
@@ -1175,6 +1193,8 @@ class MockStore {
         sign_up_enabled: updated.sign_up_enabled,
         password_sign_in_enabled: updated.password_sign_in_enabled,
         email_code_sign_in_enabled: updated.email_code_sign_in_enabled,
+        mfa_enabled: updated.mfa_enabled,
+        mfa_policy: updated.mfa_policy,
       },
     });
     return { ...updated };

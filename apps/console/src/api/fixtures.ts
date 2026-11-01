@@ -447,6 +447,8 @@ export function seedSignInExperience(): SignInExperience {
     sign_up_enabled: true,
     password_sign_in_enabled: true,
     email_code_sign_in_enabled: true,
+    mfa_enabled: true,
+    mfa_policy: "user_controlled",
     updated_at: at(900 * 60),
   };
 }

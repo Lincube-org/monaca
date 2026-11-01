@@ -41,6 +41,8 @@ export interface InteractionDetails {
   signed_in: boolean;
   /** Whether the primary factor passed and the account still owes an authenticator code. */
   mfa_required: boolean;
+  /** Whether the tenant's mandatory policy requires setting up an authenticator before finishing. */
+  mfa_enrollment_required: boolean;
   /** Which factors the second-factor step accepts: `totp`, `backup_code` and/or `passkey`. */
   mfa_factors: string[];
   expires_at: string;
@@ -54,6 +56,10 @@ export interface SignInExperience {
   password_sign_in_enabled: boolean;
   /** Whether emailed codes and links are offered. */
   email_code_sign_in_enabled: boolean;
+  /** Whether second factors are used at all. */
+  mfa_enabled: boolean;
+  /** `user_controlled` | `mandatory`. */
+  mfa_policy: "user_controlled" | "mandatory";
 }
 
 /**
@@ -64,7 +70,8 @@ export interface SignInExperience {
 export type SignInResult =
   | { redirect_to: string }
   | { consent_required: true }
-  | { mfa_required: true; factors: string[] };
+  | { mfa_required: true; factors: string[] }
+  | { mfa_enrollment_required: true; factors: string[] };
 
 /**
  * The answer to every code-request endpoint. It is deliberately the same whether or not an account
@@ -290,6 +297,30 @@ export function verifyMfa(
   return call<SignInResult>(`${base(tenant, iid)}/mfa/verify`, {
     method: "POST",
     body: JSON.stringify({ code, factor, remember_device: rememberDevice }),
+  });
+}
+
+/** The setup data a mandatory policy's enrollment step shows. */
+export interface MfaEnrollment {
+  secret: string;
+  otpauth_url: string;
+  expires_in: number;
+}
+
+/** Start the enrollment a mandatory policy requires for this interaction. */
+export function startMfaEnrollment(tenant: string, iid: string): Promise<MfaEnrollment> {
+  return call<MfaEnrollment>(`${base(tenant, iid)}/mfa/enroll`, { method: "POST" });
+}
+
+/** Prove the freshly scanned authenticator and finish the sign-in. */
+export function verifyMfaEnrollment(
+  tenant: string,
+  iid: string,
+  code: string,
+): Promise<SignInResult> {
+  return call<SignInResult>(`${base(tenant, iid)}/mfa/enroll/verify`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
   });
 }
 

@@ -72,6 +72,22 @@ export const messages = {
     usePasskey: "Use a passkey instead",
     rememberDevice: "Trust this browser for 30 days",
   },
+  /** The mandatory-policy setup step: the account must enroll an authenticator before signing in. */
+  mfaEnroll: {
+    title: "Set up two-step verification",
+    note: "Your organization requires a second factor. Add this account to an authenticator app, then enter the code it shows.",
+    loading: "Preparing the setup",
+    secret: "Setup key",
+    secretHint:
+      "Type this key into your authenticator app if scanning the link is not possible. It is shown only once.",
+    open: "Open in an authenticator app",
+    code: "Six-digit code",
+    codePlaceholder: "123456",
+    codeHint: "The app shows a new code every 30 seconds.",
+    verify: "Verify and continue",
+    verifying: "Checking the code",
+    failed: "The setup could not be started. Reload the page to try again.",
+  },
   /** Passkeys, the passwordless factor: a device-bound credential instead of a typed secret. */
   passkey: {
     signIn: "Sign in with a passkey",

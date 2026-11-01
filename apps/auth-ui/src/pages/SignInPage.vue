@@ -35,7 +35,10 @@ import {
   verifySignInCode,
   requestPasswordReset,
   resetPassword,
+  startMfaEnrollment,
+  verifyMfaEnrollment,
   type InteractionDetails,
+  type MfaEnrollment,
   type SignInExperience,
   type SignInResult,
 } from "@/api/interaction";
@@ -107,6 +110,22 @@ const passkeyError = ref<PasskeyError | null>(null);
 /** The second-factor answer by passkey, kept apart so it does not overwrite the code form's state. */
 const mfaPasskeyBusy = ref(false);
 const mfaPasskeyError = ref<PasskeyError | InteractionError | null>(null);
+
+/**
+ * Mandatory-policy enrollment.
+ *
+ * The tenant requires a second factor and this account has none, so the page walks it through
+ * scanning an authenticator. The secret is held only for this interaction; proving it finishes the
+ * sign-in, and the next visit is challenged normally.
+ */
+const mfaEnrollmentRequired = ref(false);
+const enrollment = ref<MfaEnrollment | null>(null);
+const enrollmentLoading = ref(false);
+const enrollmentCode = ref("");
+const enrollmentSubmitting = ref(false);
+const enrollmentError = ref<MessageKey | null>(null);
+const enrollmentServerError = ref<InteractionError | null>(null);
+const enrollmentInput = ref<InstanceType<typeof Input> | null>(null);
 
 /** Only an account that registered a passkey is offered it, and not while a backup code is in use. */
 const mfaPasskeyAvailable = computed(
@@ -200,6 +219,7 @@ const awaitingCode = computed(() => mode.value !== "password" && stage.value ===
 
 const pageTitle = computed<MessageKey>(() => {
   if (consentRequired.value) return "consent.title";
+  if (mfaEnrollmentRequired.value) return "mfaEnroll.title";
   if (mfaRequired.value) return "mfa.title";
   switch (mode.value) {
     case "code":
@@ -216,6 +236,7 @@ const pageTitle = computed<MessageKey>(() => {
 /** The line under the title: what this flow will do. */
 const modeNote = computed<MessageKey>(() => {
   if (consentRequired.value) return "consent.request";
+  if (mfaEnrollmentRequired.value) return "mfaEnroll.note";
   if (mfaRequired.value) {
     if (useBackupCode.value) return "mfa.backupNote";
     return details.value ? "mfa.note" : "mfa.noteFallback";
@@ -316,6 +337,28 @@ const mfaErrorMessage = computed<MessageKey>(() => {
   }
 });
 
+/** The enrollment step reuses the second-factor vocabulary: the same six digits, the same failures. */
+const enrollmentErrorMessage = computed<MessageKey>(() => {
+  const error = enrollmentServerError.value;
+  if (!error) return "errors.generic";
+  switch (error.code) {
+    case "MONACA_INVALID_VERIFICATION_CODE":
+      return "errors.mfaInvalidCode";
+    case "MONACA_TOO_MANY_ATTEMPTS":
+      return "errors.mfaTooManyAttempts";
+    case "MONACA_INTERACTION_EXPIRED":
+      return "errors.interactionExpired";
+    case "MONACA_INTERACTION_CONSUMED":
+      return "errors.interactionConsumed";
+    case "MONACA_INTERACTION_NOT_FOUND":
+      return "errors.interactionNotFound";
+    case "MONACA_UNREACHABLE":
+      return "errors.network";
+    default:
+      return "errors.generic";
+  }
+});
+
 const submitErrorMessage = computed<MessageKey>(() => {
   const error = submitError.value;
   if (!error) return "errors.generic";
@@ -380,6 +423,10 @@ onMounted(async () => {
       mfaFactors.value = details.value.mfa_factors;
       rememberDevice.value = false;
     }
+    // A reload during a mandatory enrollment resumes the setup step instead of the password form.
+    if (details.value.mfa_enrollment_required) {
+      void beginEnrollment();
+    }
     // The switches decide which forms the page offers. A failed read keeps every method so a
     // transient error cannot keep a visitor from signing in.
     try {
@@ -401,6 +448,7 @@ onMounted(async () => {
     await nextTick();
     if (!loadError.value) {
       if (mfaRequired.value) mfaInput.value?.$el?.focus?.();
+      else if (mfaEnrollmentRequired.value) enrollmentInput.value?.$el?.focus?.();
       // With a prefilled identifier the password is the only thing left to type.
       else if (details.value?.login_hint && mode.value === "password") passwordInput.value?.$el?.focus?.();
       else emailInput.value?.$el?.focus?.();
@@ -537,7 +585,65 @@ function handleResult(result: SignInResult): void {
     void nextTick(() => mfaInput.value?.$el?.focus?.());
     return;
   }
+  if ("mfa_enrollment_required" in result) {
+    // The primary factor passed; the tenant requires a second factor this account does not have.
+    mfaRequired.value = false;
+    password.value = "";
+    void beginEnrollment();
+    return;
+  }
   navigateTo(result.redirect_to);
+}
+
+/** Fetch the setup data for the enrollment step. */
+async function beginEnrollment(): Promise<void> {
+  if (!tenantFromUrl.value || !interactionId.value) return;
+  mfaEnrollmentRequired.value = true;
+  enrollmentLoading.value = true;
+  enrollmentServerError.value = null;
+  try {
+    enrollment.value = await startMfaEnrollment(tenantFromUrl.value, interactionId.value);
+    await nextTick();
+    enrollmentInput.value?.$el?.focus?.();
+  } catch (error) {
+    enrollmentServerError.value = error instanceof InteractionError ? error : null;
+    if (!(error instanceof InteractionError)) {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+  } finally {
+    enrollmentLoading.value = false;
+  }
+}
+
+/** Prove the freshly scanned authenticator and finish the flow. */
+async function submitEnrollment(): Promise<void> {
+  enrollmentError.value = null;
+  enrollmentServerError.value = null;
+  const submitted = enrollmentCode.value.trim();
+  if (!/^[0-9]{6}$/.test(submitted)) {
+    enrollmentError.value = "errors.mfaCodeRequired";
+    return;
+  }
+  if (!tenantFromUrl.value || !interactionId.value) return;
+
+  enrollmentSubmitting.value = true;
+  try {
+    handleResult(
+      await verifyMfaEnrollment(tenantFromUrl.value, interactionId.value, submitted),
+    );
+  } catch (error) {
+    enrollmentServerError.value = error instanceof InteractionError ? error : null;
+    if (!(error instanceof InteractionError)) {
+      loadError.value = error instanceof Error ? error : new Error(String(error));
+    }
+    if (error instanceof InteractionError && error.code === "MONACA_INVALID_VERIFICATION_CODE") {
+      enrollmentCode.value = "";
+    }
+    await nextTick();
+    enrollmentInput.value?.$el?.focus?.();
+  } finally {
+    enrollmentSubmitting.value = false;
+  }
 }
 
 /** The form's one submit handler: it names the step the current mode is on. */
@@ -1035,6 +1141,114 @@ async function cancel(): Promise<void> {
                 {{ t(mfaPasskeyErrorMessage) }}
               </p>
             </div>
+          </form>
+
+          <!-- Mandatory enrollment: the tenant requires a factor this account does not have yet. -->
+          <form
+            v-else-if="mfaEnrollmentRequired"
+            class="flex flex-col gap-4"
+            @submit.prevent="submitEnrollment"
+          >
+            <p
+              v-if="enrollmentLoading"
+              class="flex items-center gap-2 text-[12.5px] leading-snug text-ink-muted"
+              aria-busy="true"
+            >
+              <Loader2 class="animate-spin" />
+              {{ t("mfaEnroll.loading") }}
+            </p>
+
+            <template v-else-if="enrollment">
+              <!-- The secret is shown once: the authenticator app now owns it, this page forgets it. -->
+              <div class="flex flex-col gap-1.5">
+                <Label for="signin-enrollment-secret">{{ t("mfaEnroll.secret") }}</Label>
+                <code
+                  id="signin-enrollment-secret"
+                  class="mono-data break-all rounded-md border border-rule bg-surface-muted px-2.5 py-1.5 text-[12px] leading-relaxed text-ink"
+                >{{ enrollment.secret }}</code>
+                <p class="text-[11.5px] leading-snug text-ink-faint">{{ t("mfaEnroll.secretHint") }}</p>
+                <a
+                  :href="enrollment.otpauth_url"
+                  class="self-start text-[11.5px] font-medium text-brand-strong hover:underline"
+                >
+                  {{ t("mfaEnroll.open") }}
+                </a>
+              </div>
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="signin-enrollment-code">{{ t("mfaEnroll.code") }}</Label>
+                <Input
+                  id="signin-enrollment-code"
+                  ref="enrollmentInput"
+                  v-model="enrollmentCode"
+                  type="text"
+                  name="code"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  maxlength="6"
+                  pattern="[0-9]{6}"
+                  spellcheck="false"
+                  :placeholder="t('mfaEnroll.codePlaceholder')"
+                  :invalid="enrollmentError !== null || enrollmentServerError !== null"
+                  aria-describedby="signin-enrollment-hint"
+                />
+                <p id="signin-enrollment-hint" class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t("mfaEnroll.codeHint") }}
+                </p>
+              </div>
+
+              <p
+                v-if="enrollmentError || enrollmentServerError"
+                id="signin-error"
+                role="alert"
+                class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+              >
+                <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                {{ t(enrollmentError ?? enrollmentErrorMessage) }}
+              </p>
+
+              <div class="flex flex-col gap-2">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  block
+                  :disabled="enrollmentSubmitting"
+                  :aria-busy="enrollmentSubmitting"
+                >
+                  <Loader2 v-if="enrollmentSubmitting" class="animate-spin" />
+                  <ShieldCheck v-else />
+                  {{ enrollmentSubmitting ? t("mfaEnroll.verifying") : t("mfaEnroll.verify") }}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  block
+                  :disabled="cancelling || enrollmentSubmitting"
+                  @click="cancel"
+                >
+                  <ArrowLeft />
+                  {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
+                </Button>
+              </div>
+            </template>
+
+            <!-- The setup could not be fetched; reloading is the only way to restart it. -->
+            <template v-else>
+              <p role="alert" class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny">
+                <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                {{ enrollmentServerError ? t(enrollmentErrorMessage) : t("mfaEnroll.failed") }}
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                block
+                :disabled="cancelling"
+                @click="cancel"
+              >
+                <ArrowLeft />
+                {{ cancelling ? t("signIn.cancelling") : t("signIn.cancel") }}
+              </Button>
+            </template>
           </form>
 
           <form v-else class="flex flex-col gap-4" @submit.prevent="submit">

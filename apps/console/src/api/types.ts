@@ -226,14 +226,17 @@ export interface Connector {
 /**
  * The tenant's hosted sign-in switches (§6.2).
  *
- * The public page reads the same three booleans from `/t/{tenant}/sign-in-experience`; `updated_at`
+ * The public page reads the same booleans from `/t/{tenant}/sign-in-experience`; `updated_at`
  * is only on the management read. The server refuses a state where both password sign-in and email
- * codes are off, because that would leave no way to sign in at all.
+ * codes are off, because that would leave no way to sign in at all, and a mandatory MFA policy with
+ * MFA disabled, because that would demand an enrollment no page offers.
  */
 export interface SignInExperience {
   sign_up_enabled: boolean;
   password_sign_in_enabled: boolean;
   email_code_sign_in_enabled: boolean;
+  mfa_enabled: boolean;
+  mfa_policy: "user_controlled" | "mandatory";
   updated_at: string;
 }
 
@@ -406,6 +409,8 @@ export interface UpdateSignInExperienceRequest {
   sign_up_enabled?: boolean;
   password_sign_in_enabled?: boolean;
   email_code_sign_in_enabled?: boolean;
+  mfa_enabled?: boolean;
+  mfa_policy?: "user_controlled" | "mandatory";
 }
 
 export interface CreateConnectorRequest {

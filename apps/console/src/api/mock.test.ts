@@ -1068,6 +1068,8 @@ describe("sign-in experience", () => {
     expect(experience.sign_up_enabled).toBe(true);
     expect(experience.password_sign_in_enabled).toBe(true);
     expect(experience.email_code_sign_in_enabled).toBe(true);
+    expect(experience.mfa_enabled).toBe(true);
+    expect(experience.mfa_policy).toBe("user_controlled");
     expect(Number.isNaN(Date.parse(experience.updated_at))).toBe(false);
   });
 
@@ -1087,6 +1089,8 @@ describe("sign-in experience", () => {
       sign_up_enabled: false,
       password_sign_in_enabled: true,
       email_code_sign_in_enabled: true,
+      mfa_enabled: true,
+      mfa_policy: "user_controlled",
     });
 
     await mockApi.updateSignInExperience({ sign_up_enabled: true });
@@ -1118,6 +1122,33 @@ describe("sign-in experience", () => {
     const snapshot = await mockApi.getSignInExperience();
     snapshot.sign_up_enabled = false;
     expect((await mockApi.getSignInExperience()).sign_up_enabled).toBe(true);
+  });
+
+  it("sets the MFA policy and refuses a mandatory policy with MFA off", async () => {
+    const mandatory = await mockApi.updateSignInExperience({ mfa_policy: "mandatory" });
+    expect(mandatory.mfa_policy).toBe("mandatory");
+    expect(mandatory.mfa_enabled).toBe(true);
+
+    const impossible = await mockApi
+      .updateSignInExperience({ mfa_enabled: false, mfa_policy: "mandatory" })
+      .catch((error: unknown) => error);
+    expect(impossible).toBeInstanceOf(ApiError);
+    expect((impossible as ApiError).status).toBe(400);
+
+    const off = await mockApi.updateSignInExperience({
+      mfa_enabled: false,
+      mfa_policy: "user_controlled",
+    });
+    expect(off.mfa_enabled).toBe(false);
+    expect(off.mfa_policy).toBe("user_controlled");
+
+    await mockApi.updateSignInExperience({ mfa_enabled: true });
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({ mfa_enabled: true, mfa_policy: "user_controlled" });
   });
 
   it("keeps the chain verifiable after the writes", async () => {
