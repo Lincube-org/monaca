@@ -14,8 +14,8 @@ use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditS
 use monaca_crypto::hash_password;
 use monaca_oidc::{is_absolute_http_url, valid_scope};
 use monaca_store::{
-    AccountRow, AgentKeyRow, AgentRow, GrantRow, RoleRow, SessionRow, SignInExperienceRow,
-    TenantRow,
+    AccountRow, AgentKeyRow, AgentRow, BrandingRow, GrantRow, RoleRow, SessionRow,
+    SignInExperienceRow, TenantRow,
 };
 use monaca_types::{
     AccountId, AgentId, AgentKeyId, EventId, GrantId, PasskeyId, RoleId, SessionId, TenantId,
@@ -428,6 +428,34 @@ pub async fn update_account(
     Ok(Json(account_json(&updated, &roles)))
 }
 
+/// The optional hosted-page branding in `PATCH /v1/sign-in-experience` (§6.2).
+///
+/// Absent fields keep their value; an empty string clears one. That is the whole reason this is a
+/// nested object rather than five more top-level members: a cleared field has to be expressible.
+#[derive(Debug, Default, Deserialize)]
+pub struct BrandingPatch {
+    /// A name shown instead of the tenant slug.
+    pub display_name: Option<String>,
+    /// An absolute http(s) logo URL.
+    pub logo_url: Option<String>,
+    /// A `#rrggbb` primary colour.
+    pub primary_color: Option<String>,
+    /// Terms-of-service link.
+    pub terms_url: Option<String>,
+    /// Privacy-policy link.
+    pub privacy_url: Option<String>,
+}
+
+impl BrandingPatch {
+    fn is_empty(&self) -> bool {
+        self.display_name.is_none()
+            && self.logo_url.is_none()
+            && self.primary_color.is_none()
+            && self.terms_url.is_none()
+            && self.privacy_url.is_none()
+    }
+}
+
 /// The body of `PATCH /v1/sign-in-experience`; absent fields keep their value.
 #[derive(Debug, Deserialize)]
 pub struct UpdateSignInExperienceBody {
@@ -443,6 +471,8 @@ pub struct UpdateSignInExperienceBody {
     pub mfa_policy: Option<String>,
     /// The shortest password every entrance accepts, 8–64 characters.
     pub password_min_length: Option<i32>,
+    /// The hosted page's optional look.
+    pub branding: Option<BrandingPatch>,
 }
 
 /// `GET /v1/sign-in-experience` — the tenant's hosted sign-in switches (§6.2).
@@ -452,7 +482,8 @@ pub async fn get_sign_in_experience(
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
-    Ok(Json(sign_in_experience_json(&experience)))
+    let branding = state.store.branding(&tenant).await?;
+    Ok(Json(sign_in_experience_json(&experience, &branding)))
 }
 
 /// `PATCH /v1/sign-in-experience` — switch hosted sign-in methods on or off (§6.2).
@@ -472,6 +503,7 @@ pub async fn update_sign_in_experience(
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
         && body.password_min_length.is_none()
+        && body.branding.is_none()
     {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
@@ -493,6 +525,9 @@ pub async fn update_sign_in_experience(
             kinds::INVALID_REQUEST,
             "password_min_length must be between 8 and 64",
         ));
+    }
+    if let Some(branding) = &body.branding {
+        check_branding(branding)?;
     }
 
     let current = state.store.sign_in_experience(&tenant).await?;
@@ -534,6 +569,30 @@ pub async fn update_sign_in_experience(
             body.password_min_length,
         )
         .await?;
+    let branding = match &body.branding {
+        Some(patch) => {
+            let trimmed = |value: &Option<String>| {
+                value.as_deref().map(str::trim).map(str::to_owned)
+            };
+            let display_name = trimmed(&patch.display_name);
+            let logo_url = trimmed(&patch.logo_url);
+            let primary_color = trimmed(&patch.primary_color);
+            let terms_url = trimmed(&patch.terms_url);
+            let privacy_url = trimmed(&patch.privacy_url);
+            state
+                .store
+                .update_branding(
+                    &tenant,
+                    display_name.as_deref(),
+                    logo_url.as_deref(),
+                    primary_color.as_deref(),
+                    terms_url.as_deref(),
+                    privacy_url.as_deref(),
+                )
+                .await?
+        }
+        None => state.store.branding(&tenant).await?,
+    };
 
     let event = AuditEvent {
         id: EventId::new(),
@@ -554,16 +613,17 @@ pub async fn update_sign_in_experience(
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
             "password_min_length": experience.password_min_length,
+            "branding": branding_json(&branding),
         }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
         tracing::warn!(%err, "could not append sign_in_experience.updated audit event");
     }
 
-    Ok(Json(sign_in_experience_json(&experience)))
+    Ok(Json(sign_in_experience_json(&experience, &branding)))
 }
 
-fn sign_in_experience_json(experience: &SignInExperienceRow) -> Value {
+fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &BrandingRow) -> Value {
     json!({
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,
@@ -571,8 +631,71 @@ fn sign_in_experience_json(experience: &SignInExperienceRow) -> Value {
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
+        "branding": branding_json(branding),
         "updated_at": ts(experience.updated_at),
     })
+}
+
+/// The public shape of the branding object; `null` means "use the built-in look".
+pub(crate) fn branding_json(branding: &BrandingRow) -> Value {
+    json!({
+        "display_name": branding.display_name,
+        "logo_url": branding.logo_url,
+        "primary_color": branding.primary_color,
+        "terms_url": branding.terms_url,
+        "privacy_url": branding.privacy_url,
+    })
+}
+
+/// Validate a branding patch: non-empty values must be usable by the page.
+fn check_branding(branding: &BrandingPatch) -> Result<(), ApiError> {
+    if branding.is_empty() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "at least one branding field must be present",
+        ));
+    }
+    if let Some(name) = branding.display_name.as_deref()
+        && name.trim().chars().count() > 64
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "display_name must be at most 64 characters",
+        ));
+    }
+    for (label, value) in [
+        ("logo_url", branding.logo_url.as_deref()),
+        ("terms_url", branding.terms_url.as_deref()),
+        ("privacy_url", branding.privacy_url.as_deref()),
+    ] {
+        if let Some(url) = value
+            && !url.trim().is_empty()
+            && !is_absolute_http_url(url.trim())
+        {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                format!("{label} must be an absolute http(s) URL or empty"),
+            ));
+        }
+    }
+    if let Some(color) = branding.primary_color.as_deref() {
+        let color = color.trim();
+        if !color.is_empty() && !is_hex_color(color) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "primary_color must be `#rrggbb` or empty",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `#rrggbb`, either case. The page converts it to the CSS variables it needs.
+fn is_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The body of `POST /v1/roles`.

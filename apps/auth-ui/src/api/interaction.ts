@@ -48,6 +48,15 @@ export interface InteractionDetails {
   expires_at: string;
 }
 
+/** The optional hosted-page look; `null` means the built-in style (§6.2). */
+export interface Branding {
+  display_name: string | null;
+  logo_url: string | null;
+  primary_color: string | null;
+  terms_url: string | null;
+  privacy_url: string | null;
+}
+
 /** The tenant's hosted switches, read before the page decides which forms to offer (§6.1). */
 export interface SignInExperience {
   /** Whether self-service registration is offered. */
@@ -62,6 +71,8 @@ export interface SignInExperience {
   mfa_policy: "user_controlled" | "mandatory";
   /** The tenant's shortest accepted password, 8–64 characters. */
   password_min_length: number;
+  /** The optional hosted-page look. */
+  branding: Branding;
 }
 
 /**

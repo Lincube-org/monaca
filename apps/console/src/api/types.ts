@@ -223,6 +223,15 @@ export interface Connector {
   created_at: string;
 }
 
+/** The optional hosted-page look; `null` means the built-in style (§6.2). */
+export interface Branding {
+  display_name: string | null;
+  logo_url: string | null;
+  primary_color: string | null;
+  terms_url: string | null;
+  privacy_url: string | null;
+}
+
 /**
  * The tenant's hosted sign-in switches (§6.2).
  *
@@ -239,6 +248,7 @@ export interface SignInExperience {
   mfa_policy: "user_controlled" | "mandatory";
   /** The shortest password every entrance accepts, 8–64 characters. */
   password_min_length: number;
+  branding: Branding;
   updated_at: string;
 }
 
@@ -439,6 +449,15 @@ export interface UpdateApiResourceRequest {
   scopes?: string[];
 }
 
+/** A branding patch: absent fields keep their value, an empty string clears one. */
+export interface BrandingPatch {
+  display_name?: string;
+  logo_url?: string;
+  primary_color?: string;
+  terms_url?: string;
+  privacy_url?: string;
+}
+
 /**
  * Absent switches keep their value, so a page sends only what the user changed.
  *
@@ -451,6 +470,7 @@ export interface UpdateSignInExperienceRequest {
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
   password_min_length?: number;
+  branding?: BrandingPatch;
 }
 
 /** An absolute http(s) endpoint and a non-empty set of subscribable actions. */

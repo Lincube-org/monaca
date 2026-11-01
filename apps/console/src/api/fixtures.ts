@@ -450,6 +450,13 @@ export function seedSignInExperience(): SignInExperience {
     mfa_enabled: true,
     mfa_policy: "user_controlled",
     password_min_length: 8,
+    branding: {
+      display_name: null,
+      logo_url: null,
+      primary_color: null,
+      terms_url: null,
+      privacy_url: null,
+    },
     updated_at: at(900 * 60),
   };
 }

@@ -61,6 +61,23 @@ pub struct SignInExperienceRow {
     pub updated_at: OffsetDateTime,
 }
 
+/// A tenant's optional hosted-page branding (§6.1, §6.2).
+#[derive(Debug, Clone, FromRow)]
+pub struct BrandingRow {
+    /// A name shown instead of the tenant slug.
+    pub display_name: Option<String>,
+    /// An absolute http(s) logo URL.
+    pub logo_url: Option<String>,
+    /// A `#rrggbb` primary colour.
+    pub primary_color: Option<String>,
+    /// Terms-of-service link.
+    pub terms_url: Option<String>,
+    /// Privacy-policy link.
+    pub privacy_url: Option<String>,
+    /// When a branding field last changed.
+    pub updated_at: OffsetDateTime,
+}
+
 /// A social (OAuth2) connector in `tenant.social_connectors` (§6.1).
 #[derive(Debug, Clone, FromRow)]
 pub struct SocialConnectorRow {
@@ -823,6 +840,57 @@ impl Store {
         .bind(mfa_enabled)
         .bind(mfa_policy)
         .bind(password_min_length)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    // ------------------------------------------------------------- branding
+
+    /// The tenant's optional hosted-page branding. The migration seeds the row.
+    pub async fn branding(&self, tenant: &TenantRow) -> Result<BrandingRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, BrandingRow>(
+            "SELECT display_name, logo_url, primary_color, terms_url, privacy_url, updated_at
+             FROM tenant.branding WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Change only the fields the caller named; `None` keeps the current value and `Some("")`
+    /// clears it, so an administrator can remove a logo or a legal link without a second endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_branding(
+        &self,
+        tenant: &TenantRow,
+        display_name: Option<&str>,
+        logo_url: Option<&str>,
+        primary_color: Option<&str>,
+        terms_url: Option<&str>,
+        privacy_url: Option<&str>,
+    ) -> Result<BrandingRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, BrandingRow>(
+            "UPDATE tenant.branding
+             SET display_name = CASE WHEN $1 IS NULL THEN display_name
+                                     WHEN $1 = '' THEN NULL ELSE $1 END,
+                 logo_url = CASE WHEN $2 IS NULL THEN logo_url
+                                 WHEN $2 = '' THEN NULL ELSE $2 END,
+                 primary_color = CASE WHEN $3 IS NULL THEN primary_color
+                                      WHEN $3 = '' THEN NULL ELSE $3 END,
+                 terms_url = CASE WHEN $4 IS NULL THEN terms_url
+                                  WHEN $4 = '' THEN NULL ELSE $4 END,
+                 privacy_url = CASE WHEN $5 IS NULL THEN privacy_url
+                                    WHEN $5 = '' THEN NULL ELSE $5 END,
+                 updated_at = now()
+             WHERE singleton
+             RETURNING display_name, logo_url, primary_color, terms_url, privacy_url, updated_at",
+        )
+        .bind(display_name)
+        .bind(logo_url)
+        .bind(primary_color)
+        .bind(terms_url)
+        .bind(privacy_url)
         .fetch_one(&pool)
         .await?)
     }

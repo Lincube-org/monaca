@@ -33,8 +33,8 @@ use tokio::sync::Mutex;
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
-    AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, ClientRow, GrantRow,
-    OrgInvitationRow, OrgRoleRow, ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow,
+    AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, BrandingRow, ClientRow,
+    GrantRow, OrgInvitationRow, OrgRoleRow, ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow,
     SignInExperienceRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow,
     SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow,
     WebhookRow,

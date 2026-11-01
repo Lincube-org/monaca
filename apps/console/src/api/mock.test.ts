@@ -1071,6 +1071,13 @@ describe("sign-in experience", () => {
     expect(experience.mfa_enabled).toBe(true);
     expect(experience.mfa_policy).toBe("user_controlled");
     expect(experience.password_min_length).toBe(8);
+    expect(experience.branding).toEqual({
+      display_name: null,
+      logo_url: null,
+      primary_color: null,
+      terms_url: null,
+      privacy_url: null,
+    });
     expect(Number.isNaN(Date.parse(experience.updated_at))).toBe(false);
   });
 
@@ -1093,6 +1100,13 @@ describe("sign-in experience", () => {
       mfa_enabled: true,
       mfa_policy: "user_controlled",
       password_min_length: 8,
+      branding: {
+        display_name: null,
+        logo_url: null,
+        primary_color: null,
+        terms_url: null,
+        privacy_url: null,
+      },
     });
 
     await mockApi.updateSignInExperience({ sign_up_enabled: true });
@@ -1177,6 +1191,66 @@ describe("sign-in experience", () => {
     expect(audit.items[0]?.payload).toMatchObject({ password_min_length: 12 });
 
     await mockApi.updateSignInExperience({ password_min_length: 8 });
+  });
+
+  it("sets and clears branding fields and validates their shape", async () => {
+    const empty = await mockApi
+      .updateSignInExperience({ branding: {} })
+      .catch((error: unknown) => error);
+    expect(empty).toBeInstanceOf(ApiError);
+    expect((empty as ApiError).status).toBe(400);
+
+    for (const branding of [
+      { display_name: "x".repeat(65) },
+      { logo_url: "logo.png" },
+      { primary_color: "blue" },
+    ]) {
+      const failure = await mockApi
+        .updateSignInExperience({ branding })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    const branding = {
+      display_name: "Acme Identity",
+      logo_url: "https://cdn.example/logo.png",
+      primary_color: "#0f6cbd",
+      terms_url: "https://acme.example/terms",
+      privacy_url: "https://acme.example/privacy",
+    };
+    const written = await mockApi.updateSignInExperience({ branding });
+    expect(written.branding).toEqual(branding);
+
+    const cleared = await mockApi.updateSignInExperience({
+      branding: { logo_url: "" },
+    });
+    expect(cleared.branding.logo_url).toBeNull();
+    expect(cleared.branding.display_name).toBe(branding.display_name);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({ branding: cleared.branding });
+
+    await mockApi.updateSignInExperience({
+      branding: {
+        display_name: "",
+        logo_url: "",
+        primary_color: "",
+        terms_url: "",
+        privacy_url: "",
+      },
+    });
+    const reset = await mockApi.getSignInExperience();
+    expect(reset.branding).toEqual({
+      display_name: null,
+      logo_url: null,
+      primary_color: null,
+      terms_url: null,
+      privacy_url: null,
+    });
   });
 });
 

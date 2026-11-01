@@ -10,6 +10,8 @@ export const messages = {
   brand: {
     fallbackTenant: "monaca",
     poweredBy: "Monaca",
+    terms: "Terms of service",
+    privacy: "Privacy policy",
   },
   signIn: {
     title: "Sign in to continue",

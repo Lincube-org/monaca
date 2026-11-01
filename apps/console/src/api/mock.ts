@@ -40,6 +40,8 @@ import type {
   AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
+  Branding,
+  BrandingPatch,
   Client,
   ClientSecret,
   Connector,
@@ -120,6 +122,14 @@ class MockStore {
   private connectors: Connector[] = seedConnectors();
   private ssoConnectors: SsoConnector[] = seedSsoConnectors();
   private experience: SignInExperience = seedSignInExperience();
+  /** The optional hosted-page look; absent values fall back to the built-in style. */
+  private branding: Branding = {
+    display_name: null,
+    logo_url: null,
+    primary_color: null,
+    terms_url: null,
+    privacy_url: null,
+  };
   /**
    * Webhook subscriptions. The signing key is kept in memory only so a rotation can return a new
    * one — the real server seals it and never lists it, which the page honours by hiding it.
@@ -1144,7 +1154,10 @@ class MockStore {
   }
 
   getSignInExperience(): SignInExperience {
-    return { ...this.experience };
+    return {
+      ...this.experience,
+      branding: { ...this.experience.branding },
+    };
   }
 
   async updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience> {
@@ -1155,7 +1168,8 @@ class MockStore {
       body.email_code_sign_in_enabled === undefined &&
       body.mfa_enabled === undefined &&
       body.mfa_policy === undefined &&
-      body.password_min_length === undefined
+      body.password_min_length === undefined &&
+      (body.branding === undefined || brandingPatchIsEmpty(body.branding))
     ) {
       throw new ApiError("at least one switch must be present", {
         status: 400,
@@ -1177,6 +1191,7 @@ class MockStore {
         code: "MONACA_INVALID_REQUEST",
       });
     }
+    if (body.branding !== undefined) checkBrandingPatch(body.branding);
 
     const password = body.password_sign_in_enabled ?? this.experience.password_sign_in_enabled;
     const emailCode = body.email_code_sign_in_enabled ?? this.experience.email_code_sign_in_enabled;
@@ -1196,6 +1211,13 @@ class MockStore {
       });
     }
 
+    if (body.branding !== undefined) {
+      this.branding = {
+        ...this.branding,
+        ...normaliseBrandingPatch(body.branding),
+      };
+    }
+
     const updated: SignInExperience = {
       sign_up_enabled: body.sign_up_enabled ?? this.experience.sign_up_enabled,
       password_sign_in_enabled: password,
@@ -1204,6 +1226,7 @@ class MockStore {
       mfa_policy: mfaPolicy,
       password_min_length:
         body.password_min_length ?? this.experience.password_min_length,
+      branding: { ...this.branding },
       updated_at: new Date().toISOString(),
     };
     this.experience = updated;
@@ -1221,9 +1244,10 @@ class MockStore {
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
         password_min_length: updated.password_min_length,
+        branding: { ...updated.branding },
       },
     });
-    return { ...updated };
+    return { ...updated, branding: { ...updated.branding } };
   }
 
   listWebhooks(): Page<Webhook> {
@@ -2089,6 +2113,59 @@ function checkWebhookEvents(raw: string[]): string[] {
 function newWebhookSecret(): string {
   const half = () => crypto.randomUUID().replaceAll("-", "");
   return `whsec_${half()}${half()}`;
+}
+
+/** An empty branding object says nothing, which the server treats as an empty patch. */
+function brandingPatchIsEmpty(patch: BrandingPatch): boolean {
+  return Object.values(patch).every((value) => value === undefined);
+}
+
+/** Non-empty values must be usable by the hosted page; an empty string clears a field. */
+function checkBrandingPatch(patch: BrandingPatch): void {
+  if (patch.display_name !== undefined && patch.display_name.trim().length > 64) {
+    throw new ApiError("display_name must be at most 64 characters", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+  for (const [field, value] of [
+    ["logo_url", patch.logo_url],
+    ["terms_url", patch.terms_url],
+    ["privacy_url", patch.privacy_url],
+  ] as const) {
+    if (value !== undefined && value.trim() !== "" && !/^https?:\/\/[^\s]+$/.test(value.trim())) {
+      throw new ApiError(`${field} must be an absolute http(s) URL or empty`, {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+  }
+  if (
+    patch.primary_color !== undefined &&
+    patch.primary_color.trim() !== "" &&
+    !/^#[0-9a-fA-F]{6}$/.test(patch.primary_color.trim())
+  ) {
+    throw new ApiError("primary_color must be `#rrggbb` or empty", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+}
+
+/** Trim what was sent; an empty string becomes `null`, the stored form of "unset". */
+function normaliseBrandingPatch(patch: BrandingPatch): Partial<Branding> {
+  const out: Partial<Branding> = {};
+  for (const key of [
+    "display_name",
+    "logo_url",
+    "primary_color",
+    "terms_url",
+    "privacy_url",
+  ] as const) {
+    const value = patch[key];
+    if (value !== undefined) out[key] = value.trim() === "" ? null : value.trim();
+  }
+  return out;
 }
 
 function cloneAccountSecurity(security: AccountSecurity): AccountSecurity {

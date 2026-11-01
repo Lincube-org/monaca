@@ -548,6 +548,18 @@ export const messages = {
     passwordMinLengthHint:
       "Between 8 and 64 characters. Applies to sign-up, reset, the account centre and administrator-created accounts.",
     invalidPasswordMinLength: "The minimum length must be between 8 and 64.",
+    branding: "Branding",
+    brandingHint: "How the hosted sign-in page identifies this tenant.",
+    brandName: "Display name",
+    brandColor: "Primary colour",
+    brandLogo: "Logo URL",
+    brandTerms: "Terms of service URL",
+    brandPrivacy: "Privacy policy URL",
+    brandingFieldsHint:
+      "Empty fields keep the built-in look. URLs must be absolute http(s); the colour is `#rrggbb`.",
+    invalidBrandingName: "The display name must be at most 64 characters.",
+    invalidBrandingUrl: "A logo or legal link must be an absolute http(s) URL.",
+    invalidBrandingColor: "The primary colour must be `#rrggbb`.",
     mfa: "Multi-factor authentication",
     mfaHint:
       "Whether enrolled authenticators and passkeys are demanded, and whether every account must set one up before it can sign in.",

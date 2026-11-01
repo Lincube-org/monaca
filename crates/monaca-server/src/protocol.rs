@@ -56,6 +56,7 @@ pub async fn sign_in_experience(
         return Err(ApiError::problem(kinds::NOT_FOUND, "tenant is not active"));
     }
     let experience = state.store.sign_in_experience(&tenant).await?;
+    let branding = state.store.branding(&tenant).await?;
     Ok(Json(json!({
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,
@@ -63,6 +64,7 @@ pub async fn sign_in_experience(
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
+        "branding": crate::management::branding_json(&branding),
     })))
 }
 

@@ -355,6 +355,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "an administrator's create and a self-service sign-up with a 9-character password are both 400 " +
       "MONACA_WEAK_PASSWORD, while a password at the new minimum completes; restoring 8 succeeds",
   },
+  {
+    step: "36",
+    title: "branding",
+    assertion:
+      "PATCH /v1/sign-in-experience with a branding object (display name, logo, #rrggbb colour, terms and privacy links) " +
+      "is 200 and the public read echoes it; a relative URL and a non-hex colour are 400; an empty string clears a field; " +
+      "clearing every field restores the built-in look",
+  },
 ];
 
 interface StepResult {
@@ -7443,6 +7451,130 @@ async function passwordPolicyFlow(
   }
 }
 
+/**
+ * Step 36: a tenant can brand the hosted page, and the public read carries the same values.
+ *
+ * An empty string is the documented way to clear a field, so the flow exercises both directions
+ * rather than only writing values the UI happens to offer.
+ */
+async function brandingFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const branding = {
+    display_name: "Acme Identity",
+    logo_url: "https://cdn.example/logo.png",
+    primary_color: "#0f6cbd",
+    terms_url: "https://acme.example/terms",
+    privacy_url: "https://acme.example/privacy",
+  };
+
+  const current = (body: unknown): Record<string, unknown> =>
+    (body as { branding?: Record<string, unknown> } | undefined)?.branding ?? {};
+
+  try {
+    const longName = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { display_name: "x".repeat(65) } }),
+    });
+    checks.push(["a display name over 64 characters is 400", longName.status === 400]);
+
+    const relativeLogo = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { logo_url: "logo.png" } }),
+    });
+    checks.push(["a relative logo URL is 400", relativeLogo.status === 400]);
+
+    const badColor = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { primary_color: "blue" } }),
+    });
+    checks.push(["a non-hex colour is 400", badColor.status === 400]);
+
+    const written = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding }),
+    });
+    checks.push([
+      "PATCH writes the five branding fields",
+      written.status === 200 &&
+        Object.entries(branding).every(([key, value]) => current(written.body)[key] === value),
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read echoes the branding",
+      publicRead.status === 200 &&
+        Object.entries(branding).every(([key, value]) => current(publicRead.body)[key] === value),
+    ]);
+
+    const cleared = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { logo_url: "" } }),
+    });
+    checks.push([
+      "an empty string clears only the named field",
+      cleared.status === 200 &&
+        current(cleared.body).logo_url === null &&
+        current(cleared.body).display_name === branding.display_name,
+    ]);
+
+    const reset = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        branding: {
+          display_name: "",
+          logo_url: "",
+          primary_color: "",
+          terms_url: "",
+          privacy_url: "",
+        },
+      }),
+    });
+    checks.push([
+      "clearing every field restores the built-in look",
+      reset.status === 200 &&
+        Object.values(current(reset.body)).every((value) => value === null),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        branding: {
+          display_name: "",
+          logo_url: "",
+          primary_color: "",
+          terms_url: "",
+          privacy_url: "",
+        },
+      }),
+    }).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "36",
+    title: "branding",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: 400s → write five fields → public echo → clear one → clear all`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -7707,6 +7839,7 @@ async function main(): Promise<number> {
   push(await mandatoryMfaFlow(base, adminToken, parsed.consoleSecret));
   push(await webhookFlow(base, adminToken));
   push(await passwordPolicyFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
+  push(await brandingFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

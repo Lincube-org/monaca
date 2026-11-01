@@ -51,6 +51,7 @@ import {
 import { findSsoConnector, ssoSignInUrl, type SsoConnector } from "@/api/sso";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
+import { brandStyle } from "@/lib/branding";
 
 /**
  * Hosted sign-in.
@@ -211,8 +212,25 @@ const emailInput = ref<InstanceType<typeof Input> | null>(null);
 const codeInput = ref<InstanceType<typeof Input> | null>(null);
 
 const brandName = computed(
-  () => details.value?.client.name || details.value?.tenant || tenantFromUrl.value || t("brand.fallbackTenant"),
+  () =>
+    experience.value?.branding.display_name ||
+    details.value?.client.name ||
+    details.value?.tenant ||
+    tenantFromUrl.value ||
+    t("brand.fallbackTenant"),
 );
+/** The tenant's logo, or `null` so the built-in mark shows. */
+const brandLogo = computed(() => experience.value?.branding.logo_url ?? null);
+/** The brand variables the tenant colour implies; empty when unset. */
+const brandStyleVars = computed(() => brandStyle(experience.value?.branding.primary_color));
+/** Legal links, shown under the card only when the tenant configured one. */
+const brandLinks = computed<{ href: string; label: MessageKey }[]>(() => {
+  const branding = experience.value?.branding;
+  const links: { href: string; label: MessageKey }[] = [];
+  if (branding?.terms_url) links.push({ href: branding.terms_url, label: "brand.terms" });
+  if (branding?.privacy_url) links.push({ href: branding.privacy_url, label: "brand.privacy" });
+  return links;
+});
 const organization = computed(() => details.value?.organization ?? null);
 const scopes = computed(() => details.value?.scopes ?? []);
 
@@ -943,11 +961,18 @@ async function cancel(): Promise<void> {
 </script>
 
 <template>
-  <div class="flex min-h-screen flex-col items-center justify-center bg-paper px-4 py-10">
+  <div class="flex min-h-screen flex-col items-center justify-center bg-paper px-4 py-10" :style="brandStyleVars">
     <div class="w-full max-w-[400px]">
       <!-- Brand: tenant name when the interaction resolved, the product name otherwise. -->
       <div class="mb-5 flex items-center justify-center gap-2">
+        <img
+          v-if="brandLogo"
+          :src="brandLogo"
+          alt=""
+          class="size-7 rounded-[6px] object-contain"
+        />
         <span
+          v-else
           class="grid size-7 place-items-center rounded-[6px] bg-brand text-[13px] font-semibold text-brand-on"
           aria-hidden="true"
         >
@@ -1573,6 +1598,22 @@ async function cancel(): Promise<void> {
       <p class="mt-4 text-center text-[11.5px] text-ink-faint">
         {{ details?.client.client_id ? `${details.client.client_id} · ` : "" }}{{ t("brand.poweredBy") }}
       </p>
+
+      <div
+        v-if="brandLinks.length > 0"
+        class="mt-2 flex items-center justify-center gap-3 text-[11.5px]"
+      >
+        <a
+          v-for="link in brandLinks"
+          :key="link.href"
+          :href="link.href"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-ink-faint underline-offset-2 hover:text-ink-muted hover:underline"
+        >
+          {{ t(link.label) }}
+        </a>
+      </div>
     </div>
   </div>
 </template>

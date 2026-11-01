@@ -21,7 +21,7 @@ import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
 import { describeError } from "@/api/contract";
-import type { SignInExperience, UpdateSignInExperienceRequest } from "@/api/types";
+import type { Branding, SignInExperience, UpdateSignInExperienceRequest } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
@@ -54,10 +54,38 @@ const emailCode = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const passwordMinLength = ref(8);
+/** Branding is edited as five strings; empty means "use the built-in look". */
+const brandName = ref("");
+const logoUrl = ref("");
+const primaryColor = ref("");
+const termsUrl = ref("");
+const privacyUrl = ref("");
 const formError = ref<string | null>(null);
 
 /** The last server values the form was synchronised with; the save diffs against it. */
 const baseline = ref<SignInExperience | null>(null);
+
+function sameBranding(a: Branding, b: Branding): boolean {
+  return (
+    a.display_name === b.display_name &&
+    a.logo_url === b.logo_url &&
+    a.primary_color === b.primary_color &&
+    a.terms_url === b.terms_url &&
+    a.privacy_url === b.privacy_url
+  );
+}
+
+/** The branding the form would write, in the stored shape (`null` for an empty field). */
+function brandingValues(): Branding {
+  const value = (raw: string) => raw.trim() === "" ? null : raw.trim();
+  return {
+    display_name: value(brandName.value),
+    logo_url: value(logoUrl.value),
+    primary_color: value(primaryColor.value),
+    terms_url: value(termsUrl.value),
+    privacy_url: value(privacyUrl.value),
+  };
+}
 
 function sameSwitches(
   value: SignInExperience,
@@ -67,6 +95,7 @@ function sameSwitches(
   mfa: boolean,
   policy: "user_controlled" | "mandatory",
   minLength: number,
+  branding: Branding,
 ): boolean {
   return (
     value.sign_up_enabled === a &&
@@ -74,7 +103,8 @@ function sameSwitches(
     value.email_code_sign_in_enabled === c &&
     value.mfa_enabled === mfa &&
     value.mfa_policy === policy &&
-    value.password_min_length === minLength
+    value.password_min_length === minLength &&
+    sameBranding(value.branding, branding)
   );
 }
 
@@ -86,6 +116,11 @@ function adopt(value: SignInExperience): void {
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
   passwordMinLength.value = value.password_min_length;
+  brandName.value = value.branding.display_name ?? "";
+  logoUrl.value = value.branding.logo_url ?? "";
+  primaryColor.value = value.branding.primary_color ?? "";
+  termsUrl.value = value.branding.terms_url ?? "";
+  privacyUrl.value = value.branding.privacy_url ?? "";
 }
 
 /**
@@ -99,8 +134,8 @@ watch(
   (next, previous) => {
     if (!next) return;
     const base = previous ?? null;
-    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value);
-    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value);
+    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, brandingValues());
+    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, brandingValues());
     if (matchesNext || !matchesBase) adopt(next);
   },
   { immediate: true },
@@ -109,8 +144,10 @@ watch(
 const dirty = computed(() => {
   const base = baseline.value;
   if (!base) return false;
-  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value);
+  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, brandingValues());
 });
+
+watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl], () => (formError.value = null));
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
 
@@ -174,6 +211,22 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidPasswordMinLength");
     return;
   }
+  if (brandName.value.trim().length > 64) {
+    formError.value = t("signInExperience.invalidBrandingName");
+    return;
+  }
+  if (
+    [logoUrl.value, termsUrl.value, privacyUrl.value].some(
+      (url) => url.trim() !== "" && !/^https?:\/\/[^\s]+$/.test(url.trim()),
+    )
+  ) {
+    formError.value = t("signInExperience.invalidBrandingUrl");
+    return;
+  }
+  if (primaryColor.value.trim() !== "" && !/^#[0-9a-fA-F]{6}$/.test(primaryColor.value.trim())) {
+    formError.value = t("signInExperience.invalidBrandingColor");
+    return;
+  }
 
   const body: UpdateSignInExperienceRequest = {};
   if (signUp.value !== base.sign_up_enabled) body.sign_up_enabled = signUp.value;
@@ -182,6 +235,15 @@ async function save(): Promise<void> {
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
   if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
+  if (!sameBranding(base.branding, brandingValues())) {
+    body.branding = {
+      display_name: brandName.value.trim(),
+      logo_url: logoUrl.value.trim(),
+      primary_color: primaryColor.value.trim(),
+      terms_url: termsUrl.value.trim(),
+      privacy_url: privacyUrl.value.trim(),
+    };
+  }
   if (Object.keys(body).length === 0) return;
 
   formError.value = null;
@@ -265,6 +327,95 @@ function formatStamp(at: string): string {
                   </p>
                 </div>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{{ t('signInExperience.branding') }}</CardTitle>
+              <CardDescription>{{ t('signInExperience.brandingHint') }}</CardDescription>
+            </CardHeader>
+            <CardContent class="flex flex-col gap-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-display-name">{{ t('signInExperience.brandName') }}</Label>
+                  <Input
+                    id="brand-display-name"
+                    v-model="brandName"
+                    :invalid="brandName.trim().length > 64"
+                    :disabled="update.isPending.value"
+                    :placeholder="ui.tenant"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-primary-color">{{ t('signInExperience.brandColor') }}</Label>
+                  <div class="flex items-center gap-2">
+                    <Input
+                      id="brand-primary-color"
+                      v-model="primaryColor"
+                      :invalid="primaryColor.trim() !== '' && !/^#[0-9a-fA-F]{6}$/.test(primaryColor.trim())"
+                      :disabled="update.isPending.value"
+                      placeholder="#0f6cbd"
+                      autocomplete="off"
+                      spellcheck="false"
+                      class="mono-data"
+                    />
+                    <span
+                      v-if="/^#[0-9a-fA-F]{6}$/.test(primaryColor.trim())"
+                      class="size-7 shrink-0 rounded-md border border-rule"
+                      :style="{ backgroundColor: primaryColor.trim() }"
+                      aria-hidden="true"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="brand-logo">{{ t('signInExperience.brandLogo') }}</Label>
+                <Input
+                  id="brand-logo"
+                  v-model="logoUrl"
+                  :invalid="logoUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(logoUrl.trim())"
+                  :disabled="update.isPending.value"
+                  placeholder="https://cdn.example/logo.png"
+                  autocomplete="off"
+                  spellcheck="false"
+                  class="mono-data text-[12.5px]"
+                />
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-terms">{{ t('signInExperience.brandTerms') }}</Label>
+                  <Input
+                    id="brand-terms"
+                    v-model="termsUrl"
+                    :invalid="termsUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(termsUrl.trim())"
+                    :disabled="update.isPending.value"
+                    placeholder="https://example.com/terms"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-privacy">{{ t('signInExperience.brandPrivacy') }}</Label>
+                  <Input
+                    id="brand-privacy"
+                    v-model="privacyUrl"
+                    :invalid="privacyUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(privacyUrl.trim())"
+                    :disabled="update.isPending.value"
+                    placeholder="https://example.com/privacy"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                </div>
+              </div>
+              <p class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t('signInExperience.brandingFieldsHint') }}
+              </p>
             </CardContent>
           </Card>
 

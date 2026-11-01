@@ -144,6 +144,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "tenant password policy: the minimum accepted password length (M1)",
         include_str!("../migrations/tenant_21.sql"),
     ),
+    (
+        22,
+        "tenant branding: display name, logo, primary colour and legal links (M1)",
+        include_str!("../migrations/tenant_22.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every
