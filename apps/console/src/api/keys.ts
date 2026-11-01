@@ -30,6 +30,9 @@ export const queryKeys = {
 
   signInExperience: () => ["sign-in-experience"] as const,
 
+  webhooks: () => ["webhooks"] as const,
+  webhookDeliveries: (webhookId: string) => ["webhooks", webhookId, "deliveries"] as const,
+
   members: (org: string) => ["members", org] as const,
 
   orgEmailDomains: (org: string) => ["org-email-domains", org] as const,

@@ -23,7 +23,9 @@ import type {
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
+  CreateWebhookRequest,
   CreatedClient,
+  CreatedWebhook,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
@@ -46,6 +48,10 @@ import type {
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
+  UpdateWebhookRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookSecret,
 } from "./types";
 
 /**
@@ -141,6 +147,18 @@ export interface MonacaApi {
    */
   getSignInExperience(): Promise<SignInExperience>;
   updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience>;
+
+  /**
+   * Outbound webhook subscriptions, tenant-level like the sign-in switches: one endpoint may
+   * receive the events of the whole tenant. The signing key is returned once on creation and
+   * again on rotation — a list never echoes it.
+   */
+  listWebhooks(): Promise<Page<Webhook>>;
+  createWebhook(body: CreateWebhookRequest): Promise<CreatedWebhook>;
+  updateWebhook(webhookId: string, body: UpdateWebhookRequest): Promise<Webhook>;
+  rotateWebhookSecret(webhookId: string): Promise<WebhookSecret>;
+  deleteWebhook(webhookId: string): Promise<void>;
+  listWebhookDeliveries(webhookId: string): Promise<Page<WebhookDelivery>>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;

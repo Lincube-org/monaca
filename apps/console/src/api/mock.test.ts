@@ -1157,6 +1157,87 @@ describe("sign-in experience", () => {
   });
 });
 
+describe("webhooks", () => {
+  it("registers a subscription, validates it, and never lists the signing key", async () => {
+    const relative = await mockApi
+      .createWebhook({ url: "/hook", events: ["account.created"] })
+      .catch((error: unknown) => error);
+    expect(relative).toBeInstanceOf(ApiError);
+    expect((relative as ApiError).status).toBe(400);
+
+    const unknown = await mockApi
+      .createWebhook({ url: "https://receiver.example/hook", events: ["account.no_such_action"] })
+      .catch((error: unknown) => error);
+    expect(unknown).toBeInstanceOf(ApiError);
+    expect((unknown as ApiError).status).toBe(400);
+
+    const created = await mockApi.createWebhook({
+      url: "https://receiver.example/hook",
+      events: ["account.created", "account.created"],
+    });
+    expect(created.id).toMatch(/^whk_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+    expect(created.secret).toMatch(/^whsec_[0-9a-f]{64}$/);
+    expect(created.events).toEqual(["account.created"]);
+    expect(created.enabled).toBe(true);
+
+    const list = await mockApi.listWebhooks();
+    const row = list.items.find((item) => item.id === created.id);
+    expect(row).toBeDefined();
+    expect(row as object).not.toHaveProperty("secret");
+
+    const audit = await mockApi.listAudit(ORG, { action: "webhook.created", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ webhook_id: created.id });
+
+    await mockApi.deleteWebhook(created.id);
+  });
+
+  it("records deliveries for matching events, pauses them, and rotates the key", async () => {
+    const created = await mockApi.createWebhook({
+      url: `https://receiver.example/${Date.now().toString(36)}`,
+      events: ["account.created"],
+    });
+
+    const account = await mockApi.createAccount({
+      email: `hooked-${Date.now().toString(36)}@demo.localhost`,
+      display_name: "Hooked",
+      password: "pw-hooked-123",
+    });
+    expect(account.id).toMatch(/^acc_/);
+
+    const delivered = await mockApi.listWebhookDeliveries(created.id);
+    const first = delivered.items[0];
+    expect(first?.event).toBe("account.created");
+    expect(first?.success).toBe(true);
+    expect(first?.status_code).toBe(200);
+    expect(first?.attempts).toBe(1);
+    expect(first?.id).toMatch(/^dlv_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+
+    const paused = await mockApi.updateWebhook(created.id, { enabled: false });
+    expect(paused.enabled).toBe(false);
+    await mockApi.createAccount({
+      email: `paused-${Date.now().toString(36)}@demo.localhost`,
+      display_name: "Paused",
+      password: "pw-paused-123",
+    });
+    expect((await mockApi.listWebhookDeliveries(created.id)).items).toHaveLength(1);
+
+    const rotated = await mockApi.rotateWebhookSecret(created.id);
+    expect(rotated.id).toBe(created.id);
+    expect(rotated.secret).toMatch(/^whsec_[0-9a-f]{64}$/);
+    expect(rotated.secret).not.toBe(created.secret);
+
+    const audit = await mockApi.listAudit(ORG, { action: "webhook.updated", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ webhook_id: created.id, enabled: false });
+
+    await mockApi.deleteWebhook(created.id);
+    const second = await mockApi
+      .deleteWebhook(created.id)
+      .catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+  });
+});
+
 describe("users", () => {
   async function freshEmail(prefix: string): Promise<string> {
     return `${prefix}-${Math.random().toString(36).slice(2, 8)}@example.com`;

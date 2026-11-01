@@ -1,5 +1,5 @@
 import { newId } from "@/lib/typed-id";
-import { jwkThumbprintHex, publicEcJwk } from "@monaca/ui";
+import { jwkThumbprintHex, isKnownWebhookEvent, publicEcJwk } from "@monaca/ui";
 
 import { ApiError, type MonacaApi } from "./contract";
 import {
@@ -54,7 +54,9 @@ import type {
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
+  CreateWebhookRequest,
   CreatedClient,
+  CreatedWebhook,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
@@ -76,6 +78,10 @@ import type {
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
+  UpdateWebhookRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookSecret,
 } from "./types";
 
 /**
@@ -114,6 +120,13 @@ class MockStore {
   private connectors: Connector[] = seedConnectors();
   private ssoConnectors: SsoConnector[] = seedSsoConnectors();
   private experience: SignInExperience = seedSignInExperience();
+  /**
+   * Webhook subscriptions. The signing key is kept in memory only so a rotation can return a new
+   * one — the real server seals it and never lists it, which the page honours by hiding it.
+   */
+  private webhooks: (Webhook & { secret: string })[] = [];
+  /** Delivery rows carry their subscription privately; the API shape does not. */
+  private webhookDeliveries: (WebhookDelivery & { webhook_id: string })[] = [];
   private members: Member[] = seedMembers(this.accounts);
   private emailDomains: SeededEmailDomain[] = seedEmailDomains();
   private invitations: SeededOrgInvitation[] = seedOrgInvitations();
@@ -1200,6 +1213,156 @@ class MockStore {
     return { ...updated };
   }
 
+  listWebhooks(): Page<Webhook> {
+    return {
+      items: this.webhooks.map(({ secret: _secret, ...row }) => ({
+        ...row,
+        events: [...row.events],
+      })),
+      next: null,
+    };
+  }
+
+  async createWebhook(body: CreateWebhookRequest): Promise<CreatedWebhook> {
+    const url = checkWebhookUrl(body.url);
+    const events = checkWebhookEvents(body.events);
+    const now = new Date().toISOString();
+    const row = {
+      id: newId("whk"),
+      url,
+      events,
+      enabled: true,
+      secret: newWebhookSecret(),
+      created_at: now,
+      updated_at: now,
+    };
+    this.webhooks = [...this.webhooks, row];
+
+    await this.append({
+      action: "webhook.created",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { webhook_id: row.id, url: row.url, events: row.events },
+    });
+    return { ...row, events: [...row.events] };
+  }
+
+  async updateWebhook(webhookId: string, body: UpdateWebhookRequest): Promise<Webhook> {
+    parseWebhookId(webhookId);
+    if (body.url === undefined && body.events === undefined && body.enabled === undefined) {
+      throw new ApiError("at least one field must be present", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const index = this.webhooks.findIndex((row) => row.id === webhookId);
+    if (index === -1) {
+      throw new ApiError("webhook not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const current = this.webhooks[index]!;
+    const url = body.url === undefined ? current.url : checkWebhookUrl(body.url);
+    const events = body.events === undefined ? current.events : checkWebhookEvents(body.events);
+    const updated = {
+      ...current,
+      url,
+      events,
+      enabled: body.enabled ?? current.enabled,
+      updated_at: new Date().toISOString(),
+    };
+    this.webhooks = this.webhooks.map((row, at) => (at === index ? updated : row));
+
+    await this.append({
+      action: "webhook.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: {
+        webhook_id: updated.id,
+        url: updated.url,
+        events: updated.events,
+        enabled: updated.enabled,
+      },
+    });
+    const { secret: _secret, ...row } = updated;
+    return { ...row, events: [...row.events] };
+  }
+
+  async rotateWebhookSecret(webhookId: string): Promise<WebhookSecret> {
+    parseWebhookId(webhookId);
+    const index = this.webhooks.findIndex((row) => row.id === webhookId);
+    if (index === -1) {
+      throw new ApiError("webhook not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const secret = newWebhookSecret();
+    this.webhooks = this.webhooks.map((row, at) =>
+      at === index ? { ...row, secret, updated_at: new Date().toISOString() } : row,
+    );
+
+    await this.append({
+      action: "webhook.secret_rotated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { webhook_id: webhookId },
+    });
+    return { id: webhookId, secret };
+  }
+
+  async deleteWebhook(webhookId: string): Promise<void> {
+    parseWebhookId(webhookId);
+    if (!this.webhooks.some((row) => row.id === webhookId)) {
+      throw new ApiError("webhook not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    this.webhooks = this.webhooks.filter((row) => row.id !== webhookId);
+    this.webhookDeliveries = this.webhookDeliveries.filter((row) => row.webhook_id !== webhookId);
+
+    await this.append({
+      action: "webhook.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { webhook_id: webhookId },
+    });
+  }
+
+  listWebhookDeliveries(webhookId: string): Page<WebhookDelivery> {
+    parseWebhookId(webhookId);
+    if (!this.webhooks.some((row) => row.id === webhookId)) {
+      throw new ApiError("webhook not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const items = this.webhookDeliveries
+      .filter((row) => row.webhook_id === webhookId)
+      .slice()
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      .map(({ webhook_id: _hook, ...row }) => ({ ...row }));
+    return { items, next: null };
+  }
+
+  /**
+   * The mock never makes an outbound HTTP call, so it records what the server's dispatcher would:
+   * one delivery for each enabled subscription that names the appended action.
+   */
+  private recordWebhookDeliveries(action: string): void {
+    for (const hook of this.webhooks) {
+      if (!hook.enabled || !hook.events.includes(action)) continue;
+      this.webhookDeliveries.push({
+        id: newId("dlv"),
+        webhook_id: hook.id,
+        event: action,
+        status_code: 200,
+        success: true,
+        attempts: 1,
+        error: null,
+        created_at: new Date().toISOString(),
+      });
+    }
+  }
+
   listMembers(): Page<Member> {
     return { items: [...this.members], next: null };
   }
@@ -1827,6 +1990,7 @@ class MockStore {
       jti: null,
       payload: seed.payload,
     });
+    this.recordWebhookDeliveries(seed.action);
   }
 }
 
@@ -1865,6 +2029,53 @@ function cloneSsoConnector(connector: SsoConnector): SsoConnector {
     scopes: [...connector.scopes],
     email_domains: [...connector.email_domains],
   };
+}
+
+/** The server's `WebhookId::parse`: a typed `whk_…` id, nothing else. */
+function parseWebhookId(webhookId: string): void {
+  if (!/^whk_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(webhookId)) {
+    throw new ApiError("not a webhook id", { status: 400, code: "MONACA_INVALID_REQUEST" });
+  }
+}
+
+/** An absolute http(s) endpoint — the same rule `is_absolute_http_url` enforces server-side. */
+function checkWebhookUrl(raw: string): string {
+  const url = raw.trim();
+  if (!/^https?:\/\/[^\s]+$/.test(url)) {
+    throw new ApiError("url must be an absolute http(s) URL", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+  return url;
+}
+
+/** Trim, de-duplicate, and refuse anything outside §6.2's catalog. */
+function checkWebhookEvents(raw: string[]): string[] {
+  const events: string[] = [];
+  for (const value of raw) {
+    const event = value.trim();
+    if (!isKnownWebhookEvent(event)) {
+      throw new ApiError(`\`${event}\` is not a subscribable event`, {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (!events.includes(event)) events.push(event);
+  }
+  if (events.length === 0) {
+    throw new ApiError("events must name at least one audit action", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+  return events;
+}
+
+/** `whsec_` plus 64 hex characters — the shape the real server generates. */
+function newWebhookSecret(): string {
+  const half = () => crypto.randomUUID().replaceAll("-", "");
+  return `whsec_${half()}${half()}`;
 }
 
 function cloneAccountSecurity(security: AccountSecurity): AccountSecurity {
@@ -2132,6 +2343,30 @@ export const mockApi: MonacaApi = {
   async updateSignInExperience(body) {
     await delay();
     return store.updateSignInExperience(body);
+  },
+  async listWebhooks() {
+    await delay();
+    return store.listWebhooks();
+  },
+  async createWebhook(body) {
+    await delay();
+    return store.createWebhook(body);
+  },
+  async updateWebhook(webhookId, body) {
+    await delay();
+    return store.updateWebhook(webhookId, body);
+  },
+  async rotateWebhookSecret(webhookId) {
+    await delay();
+    return store.rotateWebhookSecret(webhookId);
+  },
+  async deleteWebhook(webhookId) {
+    await delay();
+    return store.deleteWebhook(webhookId);
+  },
+  async listWebhookDeliveries(webhookId) {
+    await delay();
+    return store.listWebhookDeliveries(webhookId);
   },
   async listMembers() {
     await delay();

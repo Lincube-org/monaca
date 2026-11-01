@@ -126,6 +126,56 @@ export function isKnownAction(action: string): boolean {
   return (M0_ACTIONS as readonly string[]).includes(action);
 }
 
+/**
+ * The actions a tenant webhook may subscribe to (§6.2), kept in the same order as
+ * `WEBHOOK_EVENTS` in `monaca-server`.
+ *
+ * It is a subset of [`M0_ACTIONS`]: actions written straight into an org schema inside a business
+ * transaction are not delivered by the tenant audit helpers yet, so the console must not offer
+ * them.
+ */
+export const WEBHOOK_EVENTS = [
+  "account.created",
+  "account.deleted",
+  "account.suspended",
+  "account.reactivated",
+  "account.security_changed",
+  "client.created",
+  "client.updated",
+  "client.secret_rotated",
+  "client.deleted",
+  "connector.created",
+  "connector.deleted",
+  "sso_connector.created",
+  "sso_connector.deleted",
+  "interaction.sign_in.succeeded",
+  "interaction.sign_in.failed",
+  "org.created",
+  "org.archived",
+  "org.reactivated",
+  "org.domain.added",
+  "org.domain.removed",
+  "org.invitation.created",
+  "org.invitation.revoked",
+  "resource.created",
+  "resource.updated",
+  "resource.deleted",
+  "role.created",
+  "role.deleted",
+  "session.logout",
+  "session.revoked",
+  "session.revoked_all",
+  "sign_in_experience.updated",
+  "webhook.created",
+  "webhook.updated",
+  "webhook.deleted",
+  "webhook.secret_rotated",
+] as const;
+
+export function isKnownWebhookEvent(action: string): boolean {
+  return (WEBHOOK_EVENTS as readonly string[]).includes(action);
+}
+
 export function truncateHash(hash: string, head = 12): string {
   return hash.length > head ? `${hash.slice(0, head)}…` : hash;
 }

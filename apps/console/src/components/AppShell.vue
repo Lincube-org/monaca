@@ -38,6 +38,7 @@ import {
   Sun,
   UserRound,
   Users,
+  Webhook,
 } from "lucide-vue-next";
 import { computed, onMounted, type Component } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
@@ -81,6 +82,7 @@ const navItems: { name: string; label: string; icon: Component }[] = [
   { name: "sign-in-experience", label: t("nav.signInExperience"), icon: LogIn },
   { name: "connectors", label: t("nav.connectors"), icon: Plug },
   { name: "sso-connectors", label: t("nav.sso"), icon: Network },
+  { name: "webhooks", label: t("nav.webhooks"), icon: Webhook },
   { name: "agents", label: t("nav.agents"), icon: Bot },
   { name: "grants", label: t("nav.grants"), icon: KeyRound },
   { name: "audit", label: t("nav.audit"), icon: ScrollText },

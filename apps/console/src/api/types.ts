@@ -243,6 +243,43 @@ export interface SignInExperience {
 /** A create response for a confidential client carries the new secret exactly once. */
 export type CreatedClient = Client & { client_secret?: string };
 
+/**
+ * A tenant webhook subscription (§6.2).
+ *
+ * The signing key is deliberately absent: it is returned once on creation and once on rotation,
+ * never by a list.
+ */
+export interface Webhook {
+  /** `whk_…`. */
+  id: string;
+  url: string;
+  events: string[];
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A creation response carries the signing key the receiver must verify with. */
+export type CreatedWebhook = Webhook & { secret: string };
+
+/** The answer to a rotation; the previous key stops verifying at once. */
+export interface WebhookSecret {
+  id: string;
+  secret: string;
+}
+
+/** The outcome of one delivery, after the last attempt (§6.2). */
+export interface WebhookDelivery {
+  /** `dlv_…`. */
+  id: string;
+  event: string;
+  status_code: number | null;
+  success: boolean;
+  attempts: number;
+  error: string | null;
+  created_at: string;
+}
+
 /** The answer to a rotation; the previous secret stops authenticating at once. */
 export interface ClientSecret {
   client_id: string;
@@ -411,6 +448,18 @@ export interface UpdateSignInExperienceRequest {
   email_code_sign_in_enabled?: boolean;
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
+}
+
+/** An absolute http(s) endpoint and a non-empty set of subscribable actions. */
+export interface CreateWebhookRequest {
+  url: string;
+  events: string[];
+}
+
+export interface UpdateWebhookRequest {
+  url?: string;
+  events?: string[];
+  enabled?: boolean;
 }
 
 export interface CreateConnectorRequest {

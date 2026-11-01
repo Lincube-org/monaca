@@ -78,6 +78,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Enterprise SSO" },
   },
   {
+    path: "/webhooks",
+    name: "webhooks",
+    component: () => import("@/pages/WebhooksPage.vue"),
+    meta: { title: "Webhooks" },
+  },
+  {
     path: "/agents",
     name: "agents",
     component: () => import("@/pages/AgentsPage.vue"),

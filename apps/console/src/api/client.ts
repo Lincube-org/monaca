@@ -24,7 +24,9 @@ import type {
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
+  CreateWebhookRequest,
   CreatedClient,
+  CreatedWebhook,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
@@ -47,6 +49,10 @@ import type {
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
+  UpdateWebhookRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookSecret,
 } from "./types";
 
 /**
@@ -290,6 +296,40 @@ export const httpApi: MonacaApi = {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+  },
+
+  listWebhooks(): Promise<Page<Webhook>> {
+    return request<Page<Webhook>>("/webhooks");
+  },
+
+  createWebhook(body: CreateWebhookRequest): Promise<CreatedWebhook> {
+    return request<CreatedWebhook>("/webhooks", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  updateWebhook(webhookId: string, body: UpdateWebhookRequest): Promise<Webhook> {
+    return request<Webhook>(`/webhooks/${encodeURIComponent(webhookId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  rotateWebhookSecret(webhookId: string): Promise<WebhookSecret> {
+    return request<WebhookSecret>(`/webhooks/${encodeURIComponent(webhookId)}/secret`, {
+      method: "POST",
+    });
+  },
+
+  deleteWebhook(webhookId: string): Promise<void> {
+    return request<void>(`/webhooks/${encodeURIComponent(webhookId)}`, { method: "DELETE" });
+  },
+
+  listWebhookDeliveries(webhookId: string): Promise<Page<WebhookDelivery>> {
+    return request<Page<WebhookDelivery>>(
+      `/webhooks/${encodeURIComponent(webhookId)}/deliveries`,
+    );
   },
 
   listMembers(org: string): Promise<Page<Member>> {

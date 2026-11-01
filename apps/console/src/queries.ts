@@ -28,7 +28,9 @@ import type {
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
   CreateTenantRoleRequest,
+  CreateWebhookRequest,
   CreatedClient,
+  CreatedWebhook,
   Grant,
   ListAuditQuery,
   Member,
@@ -49,6 +51,10 @@ import type {
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
+  UpdateWebhookRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookSecret,
 } from "@/api/types";
 
 /**
@@ -542,6 +548,76 @@ export function useUpdateSignInExperience() {
       client.setQueryData(queryKeys.signInExperience(), updated);
       invalidateTenantAudit(client);
     },
+  });
+}
+
+/**
+ * Webhook subscriptions are tenant configuration, like the sign-in switches.
+ *
+ * A mutation refetches the list because every write changes a row the page renders; the delivery
+ * query is keyed by the hook so opening one subscriber's history never evicts another's.
+ */
+export function useWebhooks(): UseQueryReturnType<Page<Webhook>, Error> {
+  return useQuery({
+    queryKey: queryKeys.webhooks(),
+    queryFn: () => api.listWebhooks(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateWebhook() {
+  const client = useQueryClient();
+  return useMutation<CreatedWebhook, Error, CreateWebhookRequest>({
+    mutationFn: (body) => api.createWebhook(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.webhooks() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUpdateWebhook() {
+  const client = useQueryClient();
+  return useMutation<Webhook, Error, { webhookId: string; body: UpdateWebhookRequest }>({
+    mutationFn: ({ webhookId, body }) => api.updateWebhook(webhookId, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.webhooks() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useRotateWebhookSecret() {
+  const client = useQueryClient();
+  return useMutation<WebhookSecret, Error, { webhookId: string }>({
+    mutationFn: ({ webhookId }) => api.rotateWebhookSecret(webhookId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.webhooks() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteWebhook() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { webhookId: string }>({
+    mutationFn: ({ webhookId }) => api.deleteWebhook(webhookId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.webhooks() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+/** The recent outcomes of one subscription; disabled until the page names a hook. */
+export function useWebhookDeliveries(
+  webhookId: MaybeRefOrGetter<string | null>,
+): UseQueryReturnType<Page<WebhookDelivery>, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.webhookDeliveries(toValue(webhookId) ?? "none")),
+    queryFn: () => api.listWebhookDeliveries(toValue(webhookId) ?? ""),
+    enabled: computed(() => toValue(webhookId) !== null),
+    staleTime: STALE.fast,
   });
 }
 
