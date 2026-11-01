@@ -139,6 +139,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "outbound webhook subscriptions and their delivery log (M1)",
         include_str!("../migrations/tenant_20.sql"),
     ),
+    (
+        21,
+        "tenant password policy: the minimum accepted password length (M1)",
+        include_str!("../migrations/tenant_21.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

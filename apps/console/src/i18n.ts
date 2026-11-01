@@ -542,6 +542,12 @@ export const messages = {
     emailCodeField: "Email code sign-in",
     emailCodeFieldHint: "Mails a one-time code or link. It still works while password sign-in is off.",
     invalidMethods: "Keep password sign-in or email code sign-in enabled.",
+    passwordPolicy: "Password policy",
+    passwordPolicyHint: "The shortest password accepted wherever a password is set.",
+    passwordMinLength: "Minimum length",
+    passwordMinLengthHint:
+      "Between 8 and 64 characters. Applies to sign-up, reset, the account centre and administrator-created accounts.",
+    invalidPasswordMinLength: "The minimum length must be between 8 and 64.",
     mfa: "Multi-factor authentication",
     mfaHint:
       "Whether enrolled authenticators and passkeys are demanded, and whether every account must set one up before it can sign in.",

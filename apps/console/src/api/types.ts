@@ -237,6 +237,8 @@ export interface SignInExperience {
   email_code_sign_in_enabled: boolean;
   mfa_enabled: boolean;
   mfa_policy: "user_controlled" | "mandatory";
+  /** The shortest password every entrance accepts, 8–64 characters. */
+  password_min_length: number;
   updated_at: string;
 }
 
@@ -448,6 +450,7 @@ export interface UpdateSignInExperienceRequest {
   email_code_sign_in_enabled?: boolean;
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
+  password_min_length?: number;
 }
 
 /** An absolute http(s) endpoint and a non-empty set of subscribable actions. */

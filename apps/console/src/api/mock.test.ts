@@ -1070,6 +1070,7 @@ describe("sign-in experience", () => {
     expect(experience.email_code_sign_in_enabled).toBe(true);
     expect(experience.mfa_enabled).toBe(true);
     expect(experience.mfa_policy).toBe("user_controlled");
+    expect(experience.password_min_length).toBe(8);
     expect(Number.isNaN(Date.parse(experience.updated_at))).toBe(false);
   });
 
@@ -1091,6 +1092,7 @@ describe("sign-in experience", () => {
       email_code_sign_in_enabled: true,
       mfa_enabled: true,
       mfa_policy: "user_controlled",
+      password_min_length: 8,
     });
 
     await mockApi.updateSignInExperience({ sign_up_enabled: true });
@@ -1154,6 +1156,27 @@ describe("sign-in experience", () => {
   it("keeps the chain verifiable after the writes", async () => {
     const report = await mockApi.verifyAudit(ORG);
     expect(report.valid).toBe(true);
+  });
+
+  it("sets the minimum password length and refuses values outside 8–64", async () => {
+    for (const value of [7, 65]) {
+      const failure = await mockApi
+        .updateSignInExperience({ password_min_length: value })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    const raised = await mockApi.updateSignInExperience({ password_min_length: 12 });
+    expect(raised.password_min_length).toBe(12);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({ password_min_length: 12 });
+
+    await mockApi.updateSignInExperience({ password_min_length: 8 });
   });
 });
 

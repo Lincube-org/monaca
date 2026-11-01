@@ -454,7 +454,8 @@ pub async fn change_password(
             "the current password is incorrect",
         ));
     }
-    check_password(&body.new_password)?;
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    check_password(&body.new_password, experience.password_min_length)?;
 
     let phc = hash_password(body.new_password.clone(), state.argon)
         .await

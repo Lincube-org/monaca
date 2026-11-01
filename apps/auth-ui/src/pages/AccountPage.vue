@@ -36,6 +36,7 @@ import {
   type TrustedDevice,
 } from "@/api/account";
 import { PasskeyError, createPasskey, passkeysSupported } from "@/api/webauthn";
+import { getSignInExperience } from "@/api/interaction";
 import {
   listSocialConnectors,
   socialLinkUrl,
@@ -104,6 +105,8 @@ const passwordBusy = ref(false);
 const passwordFieldError = ref<MessageKey | null>(null);
 const passwordSubmitError = ref<string | null>(null);
 const passwordNotice = ref<MessageKey | null>(null);
+/** The tenant's minimum, read from the public switches; the server enforces the same value. */
+const passwordMinLength = ref(8);
 
 const sessions = ref<AccountSession[] | null>(null);
 const sessionsBusy = ref(false);
@@ -218,6 +221,11 @@ async function load(): Promise<void> {
       window.history.replaceState(null, "", window.location.pathname);
     }
     socialConnectors.value = await listSocialConnectors(tenant.value);
+    try {
+      passwordMinLength.value = (await getSignInExperience(tenant.value)).password_min_length;
+    } catch {
+      // A failed read must not block the page; the server still enforces the real minimum.
+    }
     await loadSessions();
     await loadPasskeys();
     await loadTrustedDevices();
@@ -446,7 +454,7 @@ async function submitPassword(): Promise<void> {
     passwordFieldError.value = "errors.newPasswordRequired";
     return;
   }
-  if ([...newPassword.value].length < 8) {
+  if ([...newPassword.value].length < passwordMinLength.value) {
     passwordFieldError.value = "errors.weakPassword";
     return;
   }
@@ -977,7 +985,7 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
                 autocomplete="new-password"
                 :invalid="passwordFieldError === 'errors.newPasswordRequired' || passwordFieldError === 'errors.weakPassword'"
               />
-              <span class="text-[11.5px] text-ink-faint">{{ t("account.passwordHint") }}</span>
+              <span class="text-[11.5px] text-ink-faint">{{ t("account.passwordHint", { min: passwordMinLength }) }}</span>
             </div>
             <p
               v-if="passwordFieldError || passwordSubmitError"

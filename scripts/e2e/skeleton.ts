@@ -347,6 +347,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "creating an account posts a signed event the receiver verifies and the delivery log records; " +
       "enabled=false pauses deliveries, rotating the key changes the signature, and DELETE is 204",
   },
+  {
+    step: "35",
+    title: "password policy",
+    assertion:
+      "PATCH /v1/sign-in-experience {password_min_length:12} is 200 and the public read follows (7 and 65 are 400); " +
+      "an administrator's create and a self-service sign-up with a 9-character password are both 400 " +
+      "MONACA_WEAK_PASSWORD, while a password at the new minimum completes; restoring 8 succeeds",
+  },
 ];
 
 interface StepResult {
@@ -7224,6 +7232,217 @@ async function webhookFlow(base: string, adminToken: string): Promise<StepResult
   }
 }
 
+/**
+ * Step 35: the tenant's minimum password length is enforced wherever a password is set.
+ *
+ * The administrator path and the self-service path share `check_password` server-side, so both are
+ * exercised here: one proves the management API did not bypass the policy, the other proves the
+ * hosted sign-up does not either.
+ */
+async function passwordPolicyFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const email = `policy-${runId}@demo.localhost`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const begin = async (): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `p-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-policy-${runId}`,
+        nonce: `n-policy-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  try {
+    const tooShort = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_min_length: 7 }),
+    });
+    checks.push(["a minimum below 8 is 400", tooShort.status === 400]);
+
+    const tooLong = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_min_length: 65 }),
+    });
+    checks.push(["a minimum above 64 is 400", tooLong.status === 400]);
+
+    const raised = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_min_length: 12 }),
+    });
+    checks.push([
+      "PATCH raises the minimum to 12",
+      raised.status === 200 &&
+        (raised.body as { password_min_length?: unknown })?.password_min_length === 12,
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read carries the minimum",
+      publicRead.status === 200 &&
+        (publicRead.body as { password_min_length?: unknown })?.password_min_length === 12,
+    ]);
+
+    const weakAdmin = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        email: `policy-admin-weak-${runId}@demo.localhost`,
+        display_name: "Weak",
+        password: "short7c",
+      }),
+    });
+    checks.push(["an administrator cannot create a weak password", weakAdmin.status === 400]);
+
+    const strongAdmin = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        email: `policy-admin-ok-${runId}@demo.localhost`,
+        display_name: "Strong",
+        password: `pw-${runId}-admin-ok`,
+      }),
+    });
+    checks.push(["an administrator's password at the minimum succeeds", strongAdmin.status === 201]);
+
+    const interaction = await begin();
+    if (interaction === undefined) return failPolicy("authorize did not open an interaction");
+    const requested = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-up`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      },
+    );
+    checks.push([
+      "sign-up requests a code",
+      requested.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+    const mail = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "sign_up" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const code = (mail.body as { payload?: { code?: unknown } } | undefined)?.payload?.code;
+    if (mail.status !== 200 || typeof code !== "string") {
+      return failPolicy(`internal/mail → ${mail.status} ${text(mail.body)}`);
+    }
+    checks.push(["the dev outbox carries the sign-up code", true]);
+
+    const weakSignUp = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-up/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, code, password: "short7c" }),
+      },
+    );
+    checks.push(["self-service sign-up refuses a weak password", weakSignUp.status === 400]);
+
+    const strongSignUp = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-up/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, code, password: `pw-${runId}-signup` }),
+      },
+    );
+    const redirectTo = (strongSignUp.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "a password at the minimum completes sign-up",
+      strongSignUp.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (strongSignUp.status === 200 && typeof redirectTo === "string") {
+      const token = await tokenCall(
+        base,
+        {
+          grant_type: "authorization_code",
+          code: new URL(redirectTo).searchParams.get("code") ?? "",
+          redirect_uri: redirectUri,
+          client_id: "monaca-console",
+          code_verifier: interaction.verifier,
+        },
+        basic,
+      );
+      checks.push(["the sign-up token exchange succeeds", token.status === 200]);
+    } else {
+      checks.push(["the sign-up token exchange succeeds", false]);
+    }
+
+    const restored = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_min_length: 8 }),
+    });
+    checks.push([
+      "the minimum is restored to 8",
+      restored.status === 200 &&
+        (restored.body as { password_min_length?: unknown })?.password_min_length === 8,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_min_length: 8 }),
+    }).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "35",
+    title: "password policy",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: range 400s → raise 12 → public read → admin weak 400 → admin ok → sign-up weak 400 → sign-up ok → token → restore`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+
+  function failPolicy(why: string): StepResult {
+    return {
+      step: "35",
+      title: "password policy",
+      status: "fail",
+      ms: Math.round(performance.now() - t),
+      detail: why,
+    };
+  }
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -7487,6 +7706,7 @@ async function main(): Promise<number> {
   push(await accountSecurityFlow(base, adminToken));
   push(await mandatoryMfaFlow(base, adminToken, parsed.consoleSecret));
   push(await webhookFlow(base, adminToken));
+  push(await passwordPolicyFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

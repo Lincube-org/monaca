@@ -285,6 +285,8 @@ pub async fn create_account(
             "email must be an address",
         ));
     }
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    crate::protocol::check_password(&body.password, experience.password_min_length)?;
     let phc = hash_password(body.password.clone(), state.argon)
         .await
         .map_err(ApiError::internal)?;
@@ -439,6 +441,8 @@ pub struct UpdateSignInExperienceBody {
     pub mfa_enabled: Option<bool>,
     /// `user_controlled` | `mandatory`.
     pub mfa_policy: Option<String>,
+    /// The shortest password every entrance accepts, 8–64 characters.
+    pub password_min_length: Option<i32>,
 }
 
 /// `GET /v1/sign-in-experience` — the tenant's hosted sign-in switches (§6.2).
@@ -467,6 +471,7 @@ pub async fn update_sign_in_experience(
         && body.email_code_sign_in_enabled.is_none()
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
+        && body.password_min_length.is_none()
     {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
@@ -479,6 +484,14 @@ pub async fn update_sign_in_experience(
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "mfa_policy must be user_controlled or mandatory",
+        ));
+    }
+    if let Some(min_length) = body.password_min_length
+        && !(8..=64).contains(&min_length)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "password_min_length must be between 8 and 64",
         ));
     }
 
@@ -518,6 +531,7 @@ pub async fn update_sign_in_experience(
             body.email_code_sign_in_enabled,
             body.mfa_enabled,
             body.mfa_policy.as_deref(),
+            body.password_min_length,
         )
         .await?;
 
@@ -539,6 +553,7 @@ pub async fn update_sign_in_experience(
             "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
+            "password_min_length": experience.password_min_length,
         }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
@@ -555,6 +570,7 @@ fn sign_in_experience_json(experience: &SignInExperienceRow) -> Value {
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
+        "password_min_length": experience.password_min_length,
         "updated_at": ts(experience.updated_at),
     })
 }

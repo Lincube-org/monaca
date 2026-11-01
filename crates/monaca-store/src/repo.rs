@@ -55,6 +55,8 @@ pub struct SignInExperienceRow {
     pub mfa_enabled: bool,
     /// `user_controlled` (an enrolled factor is challenged) | `mandatory` (everyone must enroll).
     pub mfa_policy: String,
+    /// The shortest password every entrance accepts, in characters.
+    pub password_min_length: i32,
     /// When the switches last changed.
     pub updated_at: OffsetDateTime,
 }
@@ -782,7 +784,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                    mfa_enabled, mfa_policy, updated_at
+                    mfa_enabled, mfa_policy, password_min_length, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
         .fetch_one(&pool)
@@ -799,6 +801,7 @@ impl Store {
         email_code_sign_in_enabled: Option<bool>,
         mfa_enabled: Option<bool>,
         mfa_policy: Option<&str>,
+        password_min_length: Option<i32>,
     ) -> Result<SignInExperienceRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
@@ -808,16 +811,18 @@ impl Store {
                  email_code_sign_in_enabled = COALESCE($3, email_code_sign_in_enabled),
                  mfa_enabled = COALESCE($4, mfa_enabled),
                  mfa_policy = COALESCE($5, mfa_policy),
+                 password_min_length = COALESCE($6, password_min_length),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                       mfa_enabled, mfa_policy, updated_at",
+                       mfa_enabled, mfa_policy, password_min_length, updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
         .bind(email_code_sign_in_enabled)
         .bind(mfa_enabled)
         .bind(mfa_policy)
+        .bind(password_min_length)
         .fetch_one(&pool)
         .await?)
     }

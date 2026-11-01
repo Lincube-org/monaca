@@ -1154,7 +1154,8 @@ class MockStore {
       body.password_sign_in_enabled === undefined &&
       body.email_code_sign_in_enabled === undefined &&
       body.mfa_enabled === undefined &&
-      body.mfa_policy === undefined
+      body.mfa_policy === undefined &&
+      body.password_min_length === undefined
     ) {
       throw new ApiError("at least one switch must be present", {
         status: 400,
@@ -1163,6 +1164,15 @@ class MockStore {
     }
     if (body.mfa_policy !== undefined && !["user_controlled", "mandatory"].includes(body.mfa_policy)) {
       throw new ApiError("mfa_policy must be user_controlled or mandatory", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (
+      body.password_min_length !== undefined &&
+      !(body.password_min_length >= 8 && body.password_min_length <= 64)
+    ) {
+      throw new ApiError("password_min_length must be between 8 and 64", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
@@ -1192,6 +1202,8 @@ class MockStore {
       email_code_sign_in_enabled: emailCode,
       mfa_enabled: mfaEnabled,
       mfa_policy: mfaPolicy,
+      password_min_length:
+        body.password_min_length ?? this.experience.password_min_length,
       updated_at: new Date().toISOString(),
     };
     this.experience = updated;
@@ -1208,6 +1220,7 @@ class MockStore {
         email_code_sign_in_enabled: updated.email_code_sign_in_enabled,
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
+        password_min_length: updated.password_min_length,
       },
     });
     return { ...updated };

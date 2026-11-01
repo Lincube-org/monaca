@@ -203,6 +203,8 @@ const experience = ref<SignInExperience | null>(null);
 const passwordAllowed = computed(() => experience.value?.password_sign_in_enabled ?? true);
 const emailCodeAllowed = computed(() => experience.value?.email_code_sign_in_enabled ?? true);
 const signUpAllowed = computed(() => experience.value?.sign_up_enabled ?? true);
+/** The tenant's policy, defaulting to the contract's minimum when the read failed. */
+const passwordMinLength = computed(() => experience.value?.password_min_length ?? 8);
 
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
@@ -858,7 +860,7 @@ async function verifyCode(): Promise<void> {
     fieldError.value = "errors.codeRequired";
     return;
   }
-  if ((mode.value === "signup" || mode.value === "reset") && newPassword.value.length < 8) {
+  if ((mode.value === "signup" || mode.value === "reset") && [...newPassword.value].length < passwordMinLength.value) {
     fieldError.value = "errors.weakPassword";
     return;
   }
@@ -1380,7 +1382,7 @@ async function cancel(): Promise<void> {
                   <Eye v-else class="size-3.5" aria-hidden="true" />
                 </button>
               </div>
-              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t(newPasswordHint) }}</p>
+              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t(newPasswordHint, { min: passwordMinLength }) }}</p>
             </div>
 
             <div v-if="awaitingCode && mode === 'signup'" class="flex flex-col gap-1.5">

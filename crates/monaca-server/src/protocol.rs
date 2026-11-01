@@ -62,6 +62,7 @@ pub async fn sign_in_experience(
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
+        "password_min_length": experience.password_min_length,
     })))
 }
 
@@ -886,12 +887,13 @@ pub(crate) fn normalise_email(email: &str) -> Result<String, ApiError> {
     Ok(normalised)
 }
 
-/// Reject a password shorter than the contract's minimum.
-pub(crate) fn check_password(password: &str) -> Result<(), ApiError> {
-    if password.chars().count() < MIN_PASSWORD_LEN {
+/// Reject a password shorter than the tenant's policy.
+pub(crate) fn check_password(password: &str, min_length: i32) -> Result<(), ApiError> {
+    let minimum = min_length.max(MIN_PASSWORD_LEN as i32) as usize;
+    if password.chars().count() < minimum {
         return Err(ApiError::problem(
             kinds::WEAK_PASSWORD,
-            format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+            format!("password must be at least {minimum} characters"),
         ));
     }
     Ok(())
@@ -1090,19 +1092,15 @@ pub async fn sign_up_verify(
     Json(body): Json<SignUpVerifyBody>,
 ) -> Result<Response, ApiError> {
     let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .sign_up_enabled
-    {
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.sign_up_enabled {
         return Err(ApiError::problem(
             kinds::SIGN_UP_DISABLED,
             "self-service sign-up is disabled for this tenant",
         ));
     }
     let email = normalise_email(&body.email)?;
-    check_password(&body.password)?;
+    check_password(&body.password, experience.password_min_length)?;
     // A second registration for the same address is a conflict even with a valid code, because
     // the code proves the address, not the account's absence.
     if state
@@ -1458,19 +1456,15 @@ pub async fn password_reset(
     Json(body): Json<PasswordResetBody>,
 ) -> Result<Response, ApiError> {
     let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .password_sign_in_enabled
-    {
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.password_sign_in_enabled {
         return Err(ApiError::problem(
             kinds::PASSWORD_SIGN_IN_DISABLED,
             "password sign-in is disabled for this tenant",
         ));
     }
     let email = normalise_email(&body.email)?;
-    check_password(&body.password)?;
+    check_password(&body.password, experience.password_min_length)?;
     take_verification_code(&state, &tenant, PURPOSE_PASSWORD_RESET, &email, &body.code).await?;
 
     let Some((account, _)) = state.store.account_by_email(&tenant, &email).await? else {

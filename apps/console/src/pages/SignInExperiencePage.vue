@@ -53,6 +53,7 @@ const password = ref(true);
 const emailCode = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
+const passwordMinLength = ref(8);
 const formError = ref<string | null>(null);
 
 /** The last server values the form was synchronised with; the save diffs against it. */
@@ -65,13 +66,15 @@ function sameSwitches(
   c: boolean,
   mfa: boolean,
   policy: "user_controlled" | "mandatory",
+  minLength: number,
 ): boolean {
   return (
     value.sign_up_enabled === a &&
     value.password_sign_in_enabled === b &&
     value.email_code_sign_in_enabled === c &&
     value.mfa_enabled === mfa &&
-    value.mfa_policy === policy
+    value.mfa_policy === policy &&
+    value.password_min_length === minLength
   );
 }
 
@@ -82,6 +85,7 @@ function adopt(value: SignInExperience): void {
   emailCode.value = value.email_code_sign_in_enabled;
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
+  passwordMinLength.value = value.password_min_length;
 }
 
 /**
@@ -95,8 +99,8 @@ watch(
   (next, previous) => {
     if (!next) return;
     const base = previous ?? null;
-    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value);
-    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value);
+    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value);
+    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value);
     if (matchesNext || !matchesBase) adopt(next);
   },
   { immediate: true },
@@ -105,7 +109,7 @@ watch(
 const dirty = computed(() => {
   const base = baseline.value;
   if (!base) return false;
-  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value);
+  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value);
 });
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
@@ -147,6 +151,12 @@ function setMfaPolicy(value: string): void {
   formError.value = null;
 }
 
+function setPasswordMinLength(value: string | number): void {
+  const parsed = Number.parseInt(String(value), 10);
+  passwordMinLength.value = Number.isNaN(parsed) ? 0 : parsed;
+  formError.value = null;
+}
+
 function discard(): void {
   const current = experience.data.value;
   if (current) adopt(current);
@@ -160,6 +170,10 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidMethods");
     return;
   }
+  if (passwordMinLength.value < 8 || passwordMinLength.value > 64) {
+    formError.value = t("signInExperience.invalidPasswordMinLength");
+    return;
+  }
 
   const body: UpdateSignInExperienceRequest = {};
   if (signUp.value !== base.sign_up_enabled) body.sign_up_enabled = signUp.value;
@@ -167,6 +181,7 @@ async function save(): Promise<void> {
   if (emailCode.value !== base.email_code_sign_in_enabled) body.email_code_sign_in_enabled = emailCode.value;
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
+  if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
   if (Object.keys(body).length === 0) return;
 
   formError.value = null;
@@ -295,6 +310,33 @@ function formatStamp(at: string): string {
                 <TriangleAlert />
                 <AlertDescription>{{ t('signInExperience.invalidMethods') }}</AlertDescription>
               </Alert>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{{ t('signInExperience.passwordPolicy') }}</CardTitle>
+              <CardDescription>{{ t('signInExperience.passwordPolicyHint') }}</CardDescription>
+            </CardHeader>
+            <CardContent class="flex flex-col gap-1.5">
+              <Label for="password-min-length">{{ t('signInExperience.passwordMinLength') }}</Label>
+              <Input
+                id="password-min-length"
+                type="number"
+                min="8"
+                max="64"
+                :model-value="passwordMinLength"
+                :invalid="passwordMinLength < 8 || passwordMinLength > 64"
+                :disabled="update.isPending.value"
+                class="w-[120px]"
+                @update:model-value="(value: string | number) => setPasswordMinLength(value)"
+              />
+              <p class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t('signInExperience.passwordMinLengthHint') }}
+              </p>
+              <p v-if="passwordMinLength < 8 || passwordMinLength > 64" class="text-[11.5px] leading-snug text-deny">
+                {{ t('signInExperience.invalidPasswordMinLength') }}
+              </p>
             </CardContent>
           </Card>
 

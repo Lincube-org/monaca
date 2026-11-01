@@ -60,6 +60,8 @@ export interface SignInExperience {
   mfa_enabled: boolean;
   /** `user_controlled` | `mandatory`. */
   mfa_policy: "user_controlled" | "mandatory";
+  /** The tenant's shortest accepted password, 8–64 characters. */
+  password_min_length: number;
 }
 
 /**
