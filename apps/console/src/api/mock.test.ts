@@ -1663,7 +1663,22 @@ describe("users", () => {
     });
     expect(updated.display_name).toBe("After Name");
     expect(updated.username).toBe(username);
+    expect(updated.avatar_url).toBeNull();
     expect((await mockApi.getAccount(first.id)).username).toBe(username);
+
+    const styled = await mockApi.updateAccount(first.id, {
+      avatar_url: "  https://cdn.example/ada.png  ",
+    });
+    expect(styled.avatar_url).toBe("https://cdn.example/ada.png");
+    expect((await mockApi.getAccount(first.id)).avatar_url).toBe("https://cdn.example/ada.png");
+
+    const badAvatar = await mockApi
+      .updateAccount(first.id, { avatar_url: "ada.png" })
+      .catch((error: unknown) => error);
+    expect((badAvatar as ApiError).status).toBe(400);
+
+    const cleared = await mockApi.updateAccount(first.id, { avatar_url: "" });
+    expect(cleared.avatar_url).toBeNull();
 
     const taken = await mockApi
       .updateAccount(second.id, { username })
@@ -1673,7 +1688,13 @@ describe("users", () => {
     expect((taken as ApiError).status).toBe(409);
 
     const audit = await mockApi.listAudit(ORG, { action: "account.updated", limit: 200 });
-    const event = audit.items.find((item) => item.subject.id === first.id);
+    // The avatar edits below write further account.updated rows, so select the name/username one.
+    const event = audit.items.find(
+      (item) =>
+        item.subject.id === first.id &&
+        Array.isArray(item.payload["fields"]) &&
+        item.payload["fields"].includes("display_name"),
+    );
     expect(event?.payload).toMatchObject({
       fields: ["display_name", "username"],
       display_name: "After Name",

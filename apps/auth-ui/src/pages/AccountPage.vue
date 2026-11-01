@@ -63,6 +63,7 @@ const account = ref<AccountProfile | null>(null);
 
 const displayName = ref("");
 const username = ref("");
+const avatarUrl = ref("");
 const profileBusy = ref(false);
 const profileError = ref<MessageKey | null>(null);
 const profileSubmitError = ref<string | null>(null);
@@ -210,6 +211,7 @@ async function load(): Promise<void> {
     account.value = profile;
     displayName.value = profile.display_name;
     username.value = profile.username ?? "";
+    avatarUrl.value = profile.avatar_url ?? "";
     loadError.value = null;
     // The provider callback returns here with `?linked=` or `?social_error=`; read it once and
     // strip it so a reload does not repeat the notice.
@@ -350,16 +352,27 @@ async function saveProfile(): Promise<void> {
     profileError.value = "errors.usernameInvalid";
     return;
   }
+  // An empty avatar clears it; a non-empty one must be a single absolute http(s) URL.
+  const avatar = avatarUrl.value.trim();
+  if (
+    avatar !== "" &&
+    (!/^https?:\/\/[^\s]+$/.test(avatar) || [...avatar].length > 2048)
+  ) {
+    profileError.value = "errors.avatarInvalid";
+    return;
+  }
 
   profileBusy.value = true;
   try {
     const profile = await updateProfile(tenant.value, {
       displayName: name,
       ...(chosen === "" ? {} : { username: chosen }),
+      avatarUrl: avatar,
     });
     account.value = profile;
     displayName.value = profile.display_name;
     username.value = profile.username ?? "";
+    avatarUrl.value = profile.avatar_url ?? "";
     profileNotice.value = "account.profileSaved";
   } catch (error) {
     // 409 is the taken username; every other failure is shown as the server described it.
@@ -426,6 +439,7 @@ async function confirmEmail(): Promise<void> {
     account.value = profile;
     displayName.value = profile.display_name;
     username.value = profile.username ?? "";
+    avatarUrl.value = profile.avatar_url ?? "";
     emailPending.value = false;
     newEmail.value = "";
     emailCode.value = "";
@@ -795,6 +809,22 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
                 :invalid="profileError === 'errors.usernameInvalid'"
               />
               <span class="text-[11.5px] text-ink-faint">{{ t("account.usernameHint") }}</span>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="account-avatar">{{ t("account.avatarLabel") }}</Label>
+              <Input
+                id="account-avatar"
+                v-model="avatarUrl"
+                type="url"
+                name="avatar_url"
+                inputmode="url"
+                maxlength="2048"
+                spellcheck="false"
+                autocapitalize="none"
+                :placeholder="t('account.avatarPlaceholder')"
+                :invalid="profileError === 'errors.avatarInvalid'"
+              />
+              <span class="text-[11.5px] text-ink-faint">{{ t("account.avatarHint") }}</span>
             </div>
             <p
               v-if="profileError || profileSubmitError"

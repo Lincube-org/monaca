@@ -20,6 +20,8 @@ export interface Account {
   id: string;
   email: string;
   display_name: string;
+  /** An absolute http(s) avatar URL; applications read it as the `picture` claim. */
+  avatar_url: string | null;
   state: "active" | "disabled";
   created_at: string;
 }
@@ -544,6 +546,8 @@ export interface UpdateAccountRequest {
   state?: "active" | "disabled";
   display_name?: string;
   username?: string;
+  /** An absolute http(s) avatar URL; an empty string clears it. */
+  avatar_url?: string;
 }
 
 export interface CreateClientRequest {

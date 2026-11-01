@@ -184,6 +184,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "passkey sign-in switch (M1)",
         include_str!("../migrations/tenant_29.sql"),
     ),
+    (
+        30,
+        "account avatar URL (M1)",
+        include_str!("../migrations/tenant_30.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

@@ -125,6 +125,7 @@ const editOpen = ref(false);
 const editTarget = ref<AccountWithRoles | null>(null);
 const editName = ref("");
 const editUsername = ref("");
+const editAvatar = ref("");
 const editError = ref<string | null>(null);
 const editDetail = useAccount(computed(() => editTarget.value?.id ?? null));
 
@@ -134,6 +135,7 @@ watch(
     if (!detail || editTarget.value === null || detail.id !== editTarget.value.id) return;
     editName.value = detail.display_name;
     editUsername.value = detail.username ?? "";
+    editAvatar.value = detail.avatar_url ?? "";
   },
 );
 
@@ -141,6 +143,7 @@ function openEdit(account: AccountWithRoles): void {
   editTarget.value = account;
   editName.value = account.display_name;
   editUsername.value = "";
+  editAvatar.value = account.avatar_url ?? "";
   editError.value = null;
   editOpen.value = true;
 }
@@ -158,11 +161,19 @@ async function submitEdit(): Promise<void> {
     editError.value = t("users.invalidUsername");
     return;
   }
+  const avatar = editAvatar.value.trim();
+  if (
+    avatar !== "" &&
+    (!/^https?:\/\/[^\s]+$/.test(avatar) || [...avatar].length > 2048)
+  ) {
+    editError.value = t("users.invalidAvatar");
+    return;
+  }
   editError.value = null;
   try {
     const updated = await updateAccount.mutateAsync({
       accountId: target.id,
-      body: { display_name: name, username },
+      body: { display_name: name, username, avatar_url: avatar },
     });
     editOpen.value = false;
     toast({
@@ -675,6 +686,22 @@ function formatDateTime(at: string): string {
               spellcheck="false"
             />
             <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('users.usernameHint') }}</p>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <Label for="user-edit-avatar">{{ t('users.avatarField') }}</Label>
+            <Input
+              id="user-edit-avatar"
+              v-model="editAvatar"
+              type="url"
+              inputmode="url"
+              :invalid="editAvatar.trim() !== '' && (!/^https?:\/\/[^\s]+$/.test(editAvatar.trim()) || [...editAvatar.trim()].length > 2048)"
+              placeholder="https://cdn.example/ada.png"
+              autocomplete="off"
+              spellcheck="false"
+              class="mono-data text-[12.5px]"
+            />
+            <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('users.avatarHint') }}</p>
           </div>
 
           <p v-if="editError" class="text-[12.5px] text-deny">{{ editError }}</p>

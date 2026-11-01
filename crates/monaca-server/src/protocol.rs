@@ -2900,6 +2900,12 @@ async fn authorization_code_grant(
                 .iter()
                 .any(|scope| scope == "profile")
                 .then(|| account.display_name.clone()),
+            picture: row
+                .scope
+                .iter()
+                .any(|scope| scope == "profile")
+                .then(|| account.avatar_url.clone())
+                .flatten(),
             auth_time: Some(row.auth_time.unix_timestamp()),
             at_hash: Some(at_hash(&access_token)),
             roles: state
@@ -3097,6 +3103,11 @@ async fn refresh_grant(
                 .iter()
                 .any(|scope| scope == "profile")
                 .then(|| account.display_name.clone()),
+            picture: scope
+                .iter()
+                .any(|scope| scope == "profile")
+                .then(|| account.avatar_url.clone())
+                .flatten(),
             auth_time: Some(row.auth_time.unix_timestamp()),
             at_hash: Some(at_hash(&access_token)),
             roles: state

@@ -14,6 +14,8 @@ export interface AccountProfile {
   /** The second sign-in identifier, when the account set one. */
   username: string | null;
   display_name: string;
+  /** An absolute http(s) avatar URL; applications read it as the `picture` claim. */
+  avatar_url: string | null;
   /** False for a passwordless account; the page hides the change-password form then. */
   has_password: boolean;
   /** `backup_codes` is how many unused recovery codes remain; `passkeys` how many are registered. */
@@ -202,13 +204,14 @@ export function deletePasskey(tenant: string, passkeyId: string): Promise<void> 
  */
 export function updateProfile(
   tenant: string,
-  changes: { displayName?: string; username?: string },
+  changes: { displayName?: string; username?: string; avatarUrl?: string },
 ): Promise<AccountProfile> {
   return call<AccountProfile>(base(tenant), {
     method: "PATCH",
     body: JSON.stringify({
       ...(changes.displayName === undefined ? {} : { display_name: changes.displayName }),
       ...(changes.username === undefined ? {} : { username: changes.username }),
+      ...(changes.avatarUrl === undefined ? {} : { avatar_url: changes.avatarUrl }),
     }),
   });
 }

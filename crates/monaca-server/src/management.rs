@@ -360,6 +360,8 @@ pub struct UpdateAccountBody {
     pub display_name: Option<String>,
     /// The new username, a second sign-in identifier (§6.1).
     pub username: Option<String>,
+    /// An absolute http(s) avatar URL; an empty string clears it.
+    pub avatar_url: Option<String>,
 }
 
 /// `PATCH /v1/accounts/{id}` — suspend/reactivate or edit the profile (§6.2).
@@ -376,10 +378,14 @@ pub async fn update_account(
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let account_id = parse_account(&id)?;
-    if body.state.is_none() && body.display_name.is_none() && body.username.is_none() {
+    if body.state.is_none()
+        && body.display_name.is_none()
+        && body.username.is_none()
+        && body.avatar_url.is_none()
+    {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            "nothing to update; send `state`, `display_name` and/or `username`",
+            "nothing to update; send `state`, `display_name`, `username` and/or `avatar_url`",
         ));
     }
     let state_change = match body.state.as_deref() {
@@ -401,6 +407,11 @@ pub async fn update_account(
         .username
         .as_deref()
         .map(crate::protocol::check_username)
+        .transpose()?;
+    let avatar_url = body
+        .avatar_url
+        .as_deref()
+        .map(crate::account::check_avatar_url)
         .transpose()?;
 
     let account = state
@@ -479,6 +490,16 @@ pub async fn update_account(
         changed.push("username");
         profile_payload.insert("username".into(), json!(username));
     }
+    if let Some(avatar_url) = avatar_url
+        && account.avatar_url.as_deref() != avatar_url.as_deref()
+    {
+        state
+            .store
+            .update_avatar_url(&tenant, account_id, avatar_url.as_deref())
+            .await?;
+        changed.push("avatar_url");
+        profile_payload.insert("avatar_url".into(), json!(avatar_url));
+    }
     if !changed.is_empty() {
         let event = AuditEvent {
             id: EventId::new(),
@@ -497,6 +518,7 @@ pub async fn update_account(
                 "fields": changed,
                 "display_name": profile_payload.get("display_name"),
                 "username": profile_payload.get("username"),
+                "avatar_url": profile_payload.get("avatar_url"),
             }),
         };
         if let Err(err) = state.audit_tenant(&tenant, &event).await {
@@ -1962,6 +1984,7 @@ fn account_json(account: &AccountRow, roles: &[RoleRow]) -> Value {
         "id": account.account_id().to_typed_string(),
         "email": account.primary_email,
         "display_name": account.display_name,
+        "avatar_url": account.avatar_url,
         "state": account.state,
         "created_at": ts(account.created_at),
         "roles": roles

@@ -107,6 +107,11 @@ pub async fn userinfo(
             .iter()
             .any(|scope| scope == "profile")
             .then(|| account.display_name.clone()),
+        picture: scopes
+            .iter()
+            .any(|scope| scope == "profile")
+            .then(|| account.avatar_url.clone())
+            .flatten(),
         email: scopes
             .iter()
             .any(|scope| scope == "email")

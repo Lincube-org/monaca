@@ -377,6 +377,8 @@ pub struct IdTokenClaims {
     pub email: Option<String>,
     /// `name`, only for `scope` containing `profile`.
     pub name: Option<String>,
+    /// `picture`, only for `scope` containing `profile`.
+    pub picture: Option<String>,
     /// `auth_time`, the instant the user actually authenticated (OIDC Core §2).
     pub auth_time: Option<i64>,
     /// `at_hash`, the access token's left-half digest (OIDC Core §3.1.3.6).
@@ -409,6 +411,9 @@ impl IdTokenClaims {
         if let Some(name) = &self.name {
             value["name"] = Value::String(name.clone());
         }
+        if let Some(picture) = &self.picture {
+            value["picture"] = Value::String(picture.clone());
+        }
         if let Some(auth_time) = self.auth_time {
             value["auth_time"] = Value::from(auth_time);
         }
@@ -432,6 +437,8 @@ pub struct UserInfoClaims {
     pub sub: String,
     /// `name`, only for `scope` containing `profile`.
     pub name: Option<String>,
+    /// `picture`, only for `scope` containing `profile`.
+    pub picture: Option<String>,
     /// `email`, only for `scope` containing `email`.
     pub email: Option<String>,
     /// `email_verified`, alongside `email`.
@@ -444,6 +451,9 @@ impl UserInfoClaims {
         let mut value = json!({ "sub": self.sub });
         if let Some(name) = &self.name {
             value["name"] = Value::String(name.clone());
+        }
+        if let Some(picture) = &self.picture {
+            value["picture"] = Value::String(picture.clone());
         }
         if let Some(email) = &self.email {
             value["email"] = Value::String(email.clone());
@@ -636,6 +646,7 @@ mod tests {
             nonce: None,
             email: None,
             name: None,
+            picture: None,
             auth_time: Some(90),
             at_hash: Some(at_hash("access-token")),
             roles: vec!["admin".into()],
@@ -661,6 +672,7 @@ mod tests {
             nonce: None,
             email: None,
             name: None,
+            picture: None,
             auth_time: None,
             at_hash: None,
             roles: Vec::new(),
@@ -682,17 +694,20 @@ mod tests {
         let claims = UserInfoClaims {
             sub: "acc_x".into(),
             name: Some("Ada".into()),
+            picture: Some("https://cdn.example/ada.png".into()),
             email: Some("ada@example.test".into()),
             email_verified: Some(true),
         };
         let value = claims.to_json();
         assert_eq!(value["sub"], "acc_x");
         assert_eq!(value["name"], "Ada");
+        assert_eq!(value["picture"], "https://cdn.example/ada.png");
         assert_eq!(value["email_verified"], json!(true));
 
         let bare = UserInfoClaims {
             sub: "acc_x".into(),
             name: None,
+            picture: None,
             email: None,
             email_verified: None,
         };

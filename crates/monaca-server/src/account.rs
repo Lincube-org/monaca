@@ -38,6 +38,9 @@ pub(crate) const ISSUER: &str = "Monaca";
 /// The longest display name an account may set, in characters.
 const MAX_DISPLAY_NAME_LEN: usize = 80;
 
+/// The longest avatar URL an account may set, in characters.
+const MAX_AVATAR_URL_LEN: usize = 2048;
+
 /// How many passkeys one account may register. A person has a handful of devices; ten leaves room
 /// for a spare key without letting a script fill the table.
 const MAX_PASSKEYS: usize = 10;
@@ -128,6 +131,7 @@ async fn profile_json(
         "email": account.primary_email,
         "username": username,
         "display_name": account.display_name,
+        "avatar_url": account.avatar_url,
         "has_password": has_password,
         "mfa": {
             "totp": totp,
@@ -166,6 +170,8 @@ pub struct UpdateProfileBody {
     pub display_name: Option<String>,
     /// The new username, a second sign-in identifier (§6.1).
     pub username: Option<String>,
+    /// An absolute http(s) avatar URL; an empty string clears it.
+    pub avatar_url: Option<String>,
 }
 
 /// Reject a display name that is blank or too long, trimming the accepted one.
@@ -186,7 +192,29 @@ pub(crate) fn check_display_name(raw: &str) -> Result<String, ApiError> {
     Ok(name.to_owned())
 }
 
-/// `PATCH /t/{tenant}/account` — change the display name and/or the username.
+/// Reject an avatar that is not a single absolute `http(s)` URL; an empty string clears it.
+pub(crate) fn check_avatar_url(raw: &str) -> Result<Option<String>, ApiError> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let absolute = value.starts_with("http://") || value.starts_with("https://");
+    if !absolute || value.split_whitespace().count() != 1 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "avatar_url must be an absolute http(s) URL or empty",
+        ));
+    }
+    if value.chars().count() > MAX_AVATAR_URL_LEN {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("avatar_url must be at most {MAX_AVATAR_URL_LEN} characters"),
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+/// `PATCH /t/{tenant}/account` — change the display name, username and/or avatar.
 pub async fn update_account(
     State(state): State<Arc<AppState>>,
     Path(tenant): Path<String>,
@@ -200,10 +228,15 @@ pub async fn update_account(
         .map(check_display_name)
         .transpose()?;
     let username = body.username.as_deref().map(check_username).transpose()?;
-    if display_name.is_none() && username.is_none() {
+    let avatar_url = body
+        .avatar_url
+        .as_deref()
+        .map(check_avatar_url)
+        .transpose()?;
+    if display_name.is_none() && username.is_none() && avatar_url.is_none() {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            "nothing to update; send `display_name` and/or `username`",
+            "nothing to update; send `display_name`, `username` and/or `avatar_url`",
         ));
     }
 
@@ -211,6 +244,12 @@ pub async fn update_account(
         account = state
             .store
             .update_display_name(&tenant, account.account_id(), &display_name)
+            .await?;
+    }
+    if let Some(avatar_url) = avatar_url {
+        account = state
+            .store
+            .update_avatar_url(&tenant, account.account_id(), avatar_url.as_deref())
             .await?;
     }
     if let Some(username) = username {

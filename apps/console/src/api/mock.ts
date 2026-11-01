@@ -667,6 +667,7 @@ class MockStore {
       id: newId("acc"),
       email,
       display_name: body.display_name.trim(),
+      avatar_url: null,
       state: "active" as const,
       created_at: new Date().toISOString(),
     };
@@ -698,11 +699,19 @@ class MockStore {
 
   async updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountDetail> {
     parseAccountId(accountId);
-    if (body.state === undefined && body.display_name === undefined && body.username === undefined) {
-      throw new ApiError("nothing to update; send `state`, `display_name` and/or `username`", {
-        status: 400,
-        code: "MONACA_INVALID_REQUEST",
-      });
+    if (
+      body.state === undefined &&
+      body.display_name === undefined &&
+      body.username === undefined &&
+      body.avatar_url === undefined
+    ) {
+      throw new ApiError(
+        "nothing to update; send `state`, `display_name`, `username` and/or `avatar_url`",
+        {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        },
+      );
     }
     if (body.state !== undefined && body.state !== "active" && body.state !== "disabled") {
       throw new ApiError("state must be `active` or `disabled`", {
@@ -742,6 +751,20 @@ class MockStore {
         });
       }
     }
+    let avatarUrl: string | null | undefined;
+    if (body.avatar_url !== undefined) {
+      const trimmed = body.avatar_url.trim();
+      if (
+        trimmed !== "" &&
+        (!/^https?:\/\/[^\s]+$/.test(trimmed) || [...trimmed].length > 2048)
+      ) {
+        throw new ApiError("avatar_url must be an absolute http(s) URL or empty", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      avatarUrl = trimmed === "" ? null : trimmed;
+    }
 
     if (body.state !== undefined && account.state !== body.state) {
       if (body.state === "disabled") {
@@ -754,6 +777,7 @@ class MockStore {
       ...account,
       state: body.state ?? account.state,
       display_name: displayName ?? account.display_name,
+      avatar_url: avatarUrl === undefined ? account.avatar_url : avatarUrl,
     };
     this.accounts = [...this.accounts.slice(0, index), updated, ...this.accounts.slice(index + 1)];
 
@@ -777,6 +801,10 @@ class MockStore {
       this.accountUsernames.set(account.id, username);
       changed.push("username");
       profile["username"] = username;
+    }
+    if (avatarUrl !== undefined && avatarUrl !== account.avatar_url) {
+      changed.push("avatar_url");
+      profile["avatar_url"] = avatarUrl;
     }
     if (changed.length > 0) {
       await this.append({

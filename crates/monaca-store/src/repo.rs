@@ -27,6 +27,8 @@ pub struct AccountRow {
     pub primary_email: String,
     /// Display name.
     pub display_name: String,
+    /// An absolute http(s) avatar URL; absent keeps the built-in mark.
+    pub avatar_url: Option<String>,
     /// `active` | `disabled`.
     pub state: String,
     /// Whether the account may be granted `monaca:admin`.
@@ -697,7 +699,7 @@ impl Store {
         let row = sqlx::query_as::<_, AccountRow>(
             "INSERT INTO tenant.accounts (id, primary_email, display_name, state, is_tenant_admin)
              VALUES ($1,$2,$3,'active',$4)
-             RETURNING id, primary_email, display_name, state, is_tenant_admin, created_at",
+             RETURNING id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at",
         )
         .bind(account_id.uuid())
         .bind(email)
@@ -753,7 +755,7 @@ impl Store {
     ) -> Result<Option<AccountRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, AccountRow>(
-            "SELECT id, primary_email, display_name, state, is_tenant_admin, created_at
+            "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at
              FROM tenant.accounts WHERE id = $1",
         )
         .bind(account_id.uuid())
@@ -781,7 +783,7 @@ impl Store {
             )
         });
         Ok(sqlx::query_as::<_, AccountRow>(
-            "SELECT id, primary_email, display_name, state, is_tenant_admin, created_at
+            "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at
              FROM tenant.accounts
              WHERE $1::text IS NULL OR primary_email ILIKE $1 OR display_name ILIKE $1
              ORDER BY created_at DESC, id DESC
@@ -1138,7 +1140,7 @@ impl Store {
     ) -> Result<Option<(AccountRow, Option<String>)>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let account = sqlx::query_as::<_, AccountRow>(
-            "SELECT id, primary_email, display_name, state, is_tenant_admin, created_at
+            "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at
              FROM tenant.accounts WHERE lower(primary_email) = lower($1)",
         )
         .bind(email)
@@ -1176,7 +1178,8 @@ impl Store {
         }
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let account = sqlx::query_as::<_, AccountRow>(
-            "SELECT a.id, a.primary_email, a.display_name, a.state, a.is_tenant_admin, a.created_at
+            "SELECT a.id, a.primary_email, a.display_name, a.avatar_url, a.state,
+                    a.is_tenant_admin, a.created_at
              FROM tenant.accounts a
              JOIN tenant.account_identifiers i ON i.account_id = a.id
              WHERE i.kind = 'username' AND lower(i.value) = lower($1)
@@ -1285,7 +1288,7 @@ impl Store {
         let account = sqlx::query_as::<_, AccountRow>(
             "UPDATE tenant.accounts SET primary_email = $2, updated_at = now()
              WHERE id = $1
-             RETURNING id, primary_email, display_name, state, is_tenant_admin, created_at",
+             RETURNING id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at",
         )
         .bind(account_id.uuid())
         .bind(email)
@@ -1399,7 +1402,8 @@ impl Store {
     ) -> Result<Option<AccountRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, AccountRow>(
-            "SELECT a.id, a.primary_email, a.display_name, a.state, a.is_tenant_admin, a.created_at
+            "SELECT a.id, a.primary_email, a.display_name, a.avatar_url, a.state,
+                    a.is_tenant_admin, a.created_at
              FROM tenant.accounts a
              JOIN tenant.account_social_identities i ON i.account_id = a.id
              WHERE i.connector = $1 AND i.subject = $2
@@ -2025,10 +2029,29 @@ impl Store {
         Ok(sqlx::query_as::<_, AccountRow>(
             "UPDATE tenant.accounts SET display_name = $2, updated_at = now()
              WHERE id = $1
-             RETURNING id, primary_email, display_name, state, is_tenant_admin, created_at",
+             RETURNING id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at",
         )
         .bind(account_id.uuid())
         .bind(display_name)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Replace an account's avatar URL; `None` clears it, returning the row as it now stands.
+    pub async fn update_avatar_url(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        avatar_url: Option<&str>,
+    ) -> Result<AccountRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, AccountRow>(
+            "UPDATE tenant.accounts SET avatar_url = $2, updated_at = now()
+             WHERE id = $1
+             RETURNING id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at",
+        )
+        .bind(account_id.uuid())
+        .bind(avatar_url)
         .fetch_one(&pool)
         .await?)
     }

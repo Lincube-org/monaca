@@ -429,6 +429,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "interaction's POST …/sign-in/passkey/options is 403 MONACA_PASSKEY_SIGN_IN_DISABLED, while after switching " +
       "it back on the same endpoint returns discoverable-credential options with an empty allowCredentials",
   },
+  {
+    step: "45",
+    title: "account avatar",
+    assertion:
+      "PATCH /v1/accounts/{id} {avatar_url:…} is 200 and the directory carries it, while a relative URL is 400; " +
+      "the account centre's PATCH /t/{tenant}/account updates and clears it; an authorization code exchanged with " +
+      "the profile scope mints an id_token whose picture is the avatar",
+  },
 ];
 
 interface StepResult {
@@ -8744,6 +8752,231 @@ async function passkeySignInSwitchFlow(base: string, adminToken: string): Promis
   };
 }
 
+/**
+ * Step 45: an account's avatar is a profile field the account and an administrator can set, and
+ * the `profile` scope turns it into the standard `picture` claim.
+ *
+ * The id_token is minted at code exchange, so the avatar the account sets just before exchanging
+ * is the one the token must carry — that proves the claim reads current state rather than a
+ * snapshot taken during sign-in.
+ */
+async function accountAvatarFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const email = `avatar-${runId}@demo.localhost`;
+  const password = `pw-${runId}-avatar`;
+  const clientId = `e2e-avatar-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const firstAvatar = "https://cdn.example/avatar-one.png";
+  const secondAvatar = "https://cdn.example/avatar-two.png";
+
+  const avatar = (body: unknown): unknown =>
+    (body as { avatar_url?: unknown } | undefined)?.avatar_url;
+
+  let rowId: string | undefined;
+  let clientRowId: string | undefined;
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Avatar Owner", password }),
+    });
+    const accountId = (created.body as { id?: unknown } | undefined)?.id;
+    if (typeof accountId === "string") rowId = accountId;
+    checks.push(["POST /v1/accounts creates the account", created.status === 201]);
+    if (rowId === undefined) {
+      return {
+        step: "45",
+        title: "account avatar",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /v1/accounts → ${created.status} ${text(created.body)}`,
+      };
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: rowId, role: "member" }),
+    });
+
+    const written = await call(`${base}/v1/accounts/${rowId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ avatar_url: firstAvatar }),
+    });
+    checks.push([
+      "an administrator can set the avatar",
+      written.status === 200 && avatar(written.body) === firstAvatar,
+    ]);
+
+    const relative = await call(`${base}/v1/accounts/${rowId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ avatar_url: "avatar.png" }),
+    });
+    checks.push(["a relative avatar URL is 400", relative.status === 400]);
+
+    const directory = await call(`${base}/v1/accounts/${rowId}`, { headers });
+    checks.push([
+      "the directory read carries the avatar",
+      directory.status === 200 && avatar(directory.body) === firstAvatar,
+    ]);
+
+    const app = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Avatar",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid", "profile", "email"],
+      }),
+    });
+    const appRowId = (app.body as { id?: unknown } | undefined)?.id;
+    if (typeof appRowId === "string") clientRowId = appRowId;
+    checks.push(["the flow has a client to authorize", app.status === 201]);
+    if (clientRowId === undefined) {
+      return {
+        step: "45",
+        title: "account avatar",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /v1/clients → ${app.status} ${text(app.body)}`,
+      };
+    }
+
+    const verifier = `av-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-avatar-${runId}`,
+        nonce: `n-avatar-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(
+      authorize.headers.get("location") ?? "",
+      base,
+    ).searchParams.get("interaction");
+    checks.push(["authorize opens an interaction", authorize.status === 302 && interaction !== null]);
+    if (interaction === null) {
+      return {
+        step: "45",
+        title: "account avatar",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `authorize → ${authorize.status} ${text(authorize.body)}`,
+      };
+    }
+
+    const signedIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      },
+    );
+    const redirectTo = (signedIn.body as { redirect_to?: unknown } | undefined)?.redirect_to;
+    const sessionCookie = /monaca_session=([0-9a-f-]{36})/.exec(
+      signedIn.headers.get("set-cookie") ?? "",
+    )?.[1];
+    checks.push([
+      "a password sign-in issues the code and a session",
+      signedIn.status === 200 && typeof redirectTo === "string" && sessionCookie !== undefined,
+    ]);
+    if (typeof redirectTo !== "string" || sessionCookie === undefined) {
+      return {
+        step: "45",
+        title: "account avatar",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `sign-in → ${signedIn.status} ${text(signedIn.body)}`,
+      };
+    }
+
+    const cookie = { cookie: `monaca_session=${sessionCookie}` };
+    const ownRead = await call(`${base}/t/${TENANT}/account`, { headers: cookie });
+    checks.push([
+      "the account centre reads the administrator-set avatar",
+      ownRead.status === 200 && avatar(ownRead.body) === firstAvatar,
+    ]);
+
+    const ownPatch = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ avatar_url: secondAvatar }),
+    });
+    checks.push([
+      "the account can change its own avatar",
+      ownPatch.status === 200 && avatar(ownPatch.body) === secondAvatar,
+    ]);
+
+    const badOwnPatch = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ avatar_url: "not-a-url" }),
+    });
+    checks.push(["the account centre refuses a relative avatar URL", badOwnPatch.status === 400]);
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(
+      base,
+      { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: clientId, code_verifier: verifier },
+    );
+    const claims = jwtClaims((token.body as { id_token?: unknown } | undefined)?.id_token);
+    checks.push([
+      "the id_token carries the avatar as the picture claim",
+      token.status === 200 &&
+        claims?.picture === secondAvatar &&
+        claims?.name === "Avatar Owner" &&
+        claims?.aud === clientId,
+    ]);
+
+    const cleared = await call(`${base}/t/${TENANT}/account`, {
+      method: "PATCH",
+      headers: { ...cookie, "content-type": "application/json" },
+      body: JSON.stringify({ avatar_url: "" }),
+    });
+    checks.push([
+      "an empty string clears the avatar",
+      cleared.status === 200 && avatar(cleared.body) === null,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (clientRowId !== undefined) {
+      await call(`${base}/v1/clients/${clientRowId}`, { method: "DELETE", headers }).catch(() => undefined);
+    }
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "45",
+    title: "account avatar",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: admin set → 400 → directory → sign-in → account read/write → picture → cleared`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -9017,6 +9250,7 @@ async function main(): Promise<number> {
   push(await passwordWordListFlow(base, adminToken));
   push(await applicationCssFlow(base, adminToken));
   push(await passkeySignInSwitchFlow(base, adminToken));
+  push(await accountAvatarFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
