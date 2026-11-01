@@ -569,6 +569,8 @@ pub struct UpdateSignInExperienceBody {
     pub password_reject_user_info: Option<bool>,
     /// Whether a password may not repeat a character or follow a sequence four times.
     pub password_reject_repetition_and_sequence: Option<bool>,
+    /// Lowercased words a password may not contain, at most 100.
+    pub password_rejected_words: Option<Vec<String>>,
     /// How long a browser session stays signed in, 3600–7776000 seconds.
     pub session_ttl_secs: Option<i32>,
     /// How long a refresh token stays usable, 3600–31536000 seconds.
@@ -608,6 +610,7 @@ pub async fn update_sign_in_experience(
         && body.password_min_character_types.is_none()
         && body.password_reject_user_info.is_none()
         && body.password_reject_repetition_and_sequence.is_none()
+        && body.password_rejected_words.is_none()
         && body.session_ttl_secs.is_none()
         && body.refresh_token_ttl_secs.is_none()
         && body.branding.is_none()
@@ -641,6 +644,7 @@ pub async fn update_sign_in_experience(
             "password_min_character_types must be between 1 and 4",
         ));
     }
+    let rejected_words = normalise_rejected_words(body.password_rejected_words.as_deref())?;
     if let Some(branding) = &body.branding {
         check_branding(branding)?;
     }
@@ -701,6 +705,7 @@ pub async fn update_sign_in_experience(
             body.password_min_character_types,
             body.password_reject_user_info,
             body.password_reject_repetition_and_sequence,
+            rejected_words,
             body.session_ttl_secs,
             body.refresh_token_ttl_secs,
         )
@@ -755,6 +760,7 @@ pub async fn update_sign_in_experience(
             "password_reject_user_info": experience.password_reject_user_info,
             "password_reject_repetition_and_sequence":
                 experience.password_reject_repetition_and_sequence,
+            "password_rejected_words": experience.password_rejected_words,
             "session_ttl_secs": experience.session_ttl_secs,
             "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
             "branding": branding_json(&branding),
@@ -779,6 +785,7 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "password_reject_user_info": experience.password_reject_user_info,
         "password_reject_repetition_and_sequence":
             experience.password_reject_repetition_and_sequence,
+        "password_rejected_words": experience.password_rejected_words,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": branding_json(branding),
@@ -796,6 +803,33 @@ pub(crate) fn branding_json(branding: &BrandingRow) -> Value {
         "privacy_url": branding.privacy_url,
         "custom_css": branding.custom_css,
     })
+}
+
+/// Validate and normalise the rejected-word list: lowercase, de-duplicated and bounded.
+fn normalise_rejected_words(words: Option<&[String]>) -> Result<Option<Vec<String>>, ApiError> {
+    let Some(words) = words else {
+        return Ok(None);
+    };
+    if words.len() > 100 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "password_rejected_words must list at most 100 words",
+        ));
+    }
+    let mut normalised = Vec::with_capacity(words.len());
+    for word in words {
+        let word = word.trim().to_lowercase();
+        if word.chars().count() < 3 || word.chars().count() > 64 {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "each rejected word must be 3-64 characters",
+            ));
+        }
+        if !normalised.contains(&word) {
+            normalised.push(word);
+        }
+    }
+    Ok(Some(normalised))
 }
 
 /// Validate a branding patch: non-empty values must be usable by the page.

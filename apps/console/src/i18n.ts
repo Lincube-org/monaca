@@ -575,6 +575,10 @@ export const messages = {
     rejectRepetition: "Reject repeats and sequences",
     rejectRepetitionHint:
       "Refuses four identical characters in a row (aaaa) and four consecutive characters (abcd, 4321).",
+    rejectedWords: "Rejected words",
+    rejectedWordsHint:
+      "One word per line or separated by commas. A password containing any of them, case-insensitively, is refused. 3–64 characters each, at most 100 words.",
+    invalidRejectedWords: "Each rejected word must be 3–64 characters and the list at most 100 words.",
     sessions: "Sessions and tokens",
     sessionsHint:
       "How long a browser stays signed in and how long its refresh tokens can be redeemed. The deployment's own maximum still applies.",

@@ -405,6 +405,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "is 400 MONACA_WEAK_PASSWORD; with repetition on, four identical or four consecutive characters are 400; " +
       "clean passwords are 201 and the defaults are restored",
   },
+  {
+    step: "42",
+    title: "password word list",
+    assertion:
+      "PATCH /v1/sign-in-experience {password_rejected_words:[\"monaca\",\"QWERTY\"]} is 200, lowercased, and the " +
+      "public read follows; a word shorter than three characters and a list over 100 words are 400; a password " +
+      "containing a listed word is 400 MONACA_WEAK_PASSWORD while a clean one is 201; an empty list restores none",
+  },
 ];
 
 interface StepResult {
@@ -8328,6 +8336,98 @@ async function passwordRejectionsFlow(base: string, adminToken: string): Promise
   };
 }
 
+/**
+ * Step 42: the tenant can forbid a list of words in passwords.
+ *
+ * The list is normalised to lowercase and de-duplicated on write; the create path then proves the
+ * rule reached the shared `check_password`, and the public read proves the hosted page sees it.
+ */
+async function passwordWordListFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const words = (body: unknown) =>
+    (body as { password_rejected_words?: unknown } | undefined)?.password_rejected_words;
+
+  const setWords = (passwordRejectedWords: string[]): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_rejected_words: passwordRejectedWords }),
+    });
+
+  const create = (tag: string, password: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        email: `words-${tag}-${runId}@demo.localhost`,
+        display_name: "Word list",
+        password,
+      }),
+    });
+
+  try {
+    const written = await setWords(["monaca", "QWERTY"]);
+    checks.push([
+      "PATCH lowercases and stores the list",
+      written.status === 200 &&
+        JSON.stringify(words(written.body)) === JSON.stringify(["monaca", "qwerty"]),
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read carries the list",
+      publicRead.status === 200 &&
+        JSON.stringify(words(publicRead.body)) === JSON.stringify(["monaca", "qwerty"]),
+    ]);
+
+    const short = await setWords(["ab"]);
+    checks.push(["a word shorter than three characters is 400", short.status === 400]);
+
+    const tooMany = await setWords(
+      Array.from({ length: 101 }, (_, index) => `word-${index}`),
+    );
+    checks.push(["a list over 100 words is 400", tooMany.status === 400]);
+
+    const listed = await create("blocked", "monaca-9!Ab");
+    checks.push([
+      "a password containing a listed word is 400 MONACA_WEAK_PASSWORD",
+      listed.status === 400 &&
+        (listed.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_WEAK_PASSWORD",
+    ]);
+
+    const clean = await create("clean", "Pw-words-9!x");
+    checks.push(["a password without a listed word is 201", clean.status === 201]);
+
+    const cleared = await setWords([]);
+    checks.push([
+      "an empty list clears the rule",
+      cleared.status === 200 && JSON.stringify(words(cleared.body)) === "[]",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await setWords([]).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "42",
+    title: "password word list",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: write → public read → two 400s → listed word 400 → clean 201 → cleared`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -8598,6 +8698,7 @@ async function main(): Promise<number> {
   push(await passwordComplexityFlow(base, adminToken, parsed.internalSecret));
   push(await customCssFlow(base, adminToken));
   push(await passwordRejectionsFlow(base, adminToken));
+  push(await passwordWordListFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

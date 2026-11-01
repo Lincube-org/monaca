@@ -169,6 +169,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "tenant password rejection rules (M1)",
         include_str!("../migrations/tenant_26.sql"),
     ),
+    (
+        27,
+        "tenant password word list (M1)",
+        include_str!("../migrations/tenant_27.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

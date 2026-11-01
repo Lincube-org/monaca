@@ -68,6 +68,7 @@ pub async fn sign_in_experience(
         "password_reject_user_info": experience.password_reject_user_info,
         "password_reject_repetition_and_sequence":
             experience.password_reject_repetition_and_sequence,
+        "password_rejected_words": experience.password_rejected_words,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": crate::management::branding_json(&branding),
@@ -944,14 +945,24 @@ pub(crate) fn check_password(
             "password must not repeat a character or a sequence four times in a row",
         ));
     }
-    if experience.password_reject_user_info {
+    if experience.password_reject_user_info || !experience.password_rejected_words.is_empty() {
         let candidate = password.to_lowercase();
-        for identifier in identifiers {
-            let identifier = identifier.trim().to_lowercase();
-            if identifier.chars().count() >= 3 && candidate.contains(&identifier) {
+        if experience.password_reject_user_info {
+            for identifier in identifiers {
+                let identifier = identifier.trim().to_lowercase();
+                if identifier.chars().count() >= 3 && candidate.contains(&identifier) {
+                    return Err(ApiError::problem(
+                        kinds::WEAK_PASSWORD,
+                        "password must not contain the account's email or username",
+                    ));
+                }
+            }
+        }
+        for word in &experience.password_rejected_words {
+            if word.chars().count() >= 3 && candidate.contains(word) {
                 return Err(ApiError::problem(
                     kinds::WEAK_PASSWORD,
-                    "password must not contain the account's email or username",
+                    "password must not contain a rejected word",
                 ));
             }
         }

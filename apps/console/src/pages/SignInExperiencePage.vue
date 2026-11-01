@@ -58,6 +58,8 @@ const passwordMinLength = ref(8);
 const passwordMinTypes = ref(1);
 const rejectUserInfo = ref(true);
 const rejectRepetition = ref(true);
+/** The word list is edited as text, one word per line or comma-separated. */
+const rejectedWordsText = ref("");
 /** Session and refresh-token lifetimes are stored in seconds but edited in whole days. */
 const sessionDays = ref(30);
 const refreshDays = ref(30);
@@ -106,6 +108,22 @@ function storedDays(secs: number, maxDays: number): number {
   return Math.min(maxDays, Math.max(SESSION_MIN_DAYS, Math.round(secs / 86_400)));
 }
 
+/** The word list as the server stores it: trimmed, lowercased and de-duplicated. */
+function rejectedWordsValues(): string[] {
+  const words = rejectedWordsText.value
+    .split(/[\n,]+/)
+    .map((word) => word.trim().toLowerCase())
+    .filter((word) => word !== "");
+  return [...new Set(words)];
+}
+
+function sameWords(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return left.every((word, index) => word === right[index]);
+}
+
 /** Every value the form can change, so the comparison and the save read one object. */
 interface SwitchForm {
   signUp: boolean;
@@ -117,6 +135,7 @@ interface SwitchForm {
   passwordMinTypes: number;
   rejectUserInfo: boolean;
   rejectRepetition: boolean;
+  rejectedWords: string[];
   sessionDays: number;
   refreshDays: number;
   branding: Branding;
@@ -133,6 +152,7 @@ function formValues(): SwitchForm {
     passwordMinTypes: passwordMinTypes.value,
     rejectUserInfo: rejectUserInfo.value,
     rejectRepetition: rejectRepetition.value,
+    rejectedWords: rejectedWordsValues(),
     sessionDays: sessionDays.value,
     refreshDays: refreshDays.value,
     branding: brandingValues(),
@@ -150,6 +170,7 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.password_min_character_types === form.passwordMinTypes &&
     value.password_reject_user_info === form.rejectUserInfo &&
     value.password_reject_repetition_and_sequence === form.rejectRepetition &&
+    sameWords(value.password_rejected_words, form.rejectedWords) &&
     storedDays(value.session_ttl_secs, SESSION_MAX_DAYS) === form.sessionDays &&
     storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS) === form.refreshDays &&
     sameBranding(value.branding, form.branding)
@@ -167,6 +188,7 @@ function adopt(value: SignInExperience): void {
   passwordMinTypes.value = value.password_min_character_types;
   rejectUserInfo.value = value.password_reject_user_info;
   rejectRepetition.value = value.password_reject_repetition_and_sequence;
+  rejectedWordsText.value = value.password_rejected_words.join("\n");
   sessionDays.value = storedDays(value.session_ttl_secs, SESSION_MAX_DAYS);
   refreshDays.value = storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS);
   brandName.value = value.branding.display_name ?? "";
@@ -202,7 +224,14 @@ const dirty = computed(() => {
   return !sameSwitches(base, formValues());
 });
 
-watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl, customCss], () => (formError.value = null));
+watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl, customCss, rejectedWordsText], () => (formError.value = null));
+
+const rejectedWordsIssue = computed<"count" | "length" | null>(() => {
+  const words = rejectedWordsValues();
+  if (words.length > 100) return "count";
+  if (words.some((word) => [...word].length < 3 || [...word].length > 64)) return "length";
+  return null;
+});
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
 
@@ -290,6 +319,10 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidPasswordMinTypes");
     return;
   }
+  if (rejectedWordsIssue.value !== null) {
+    formError.value = t("signInExperience.invalidRejectedWords");
+    return;
+  }
   if (sessionDays.value < SESSION_MIN_DAYS || sessionDays.value > SESSION_MAX_DAYS) {
     formError.value = t("signInExperience.invalidSessionTtl");
     return;
@@ -334,6 +367,9 @@ async function save(): Promise<void> {
   }
   if (rejectRepetition.value !== base.password_reject_repetition_and_sequence) {
     body.password_reject_repetition_and_sequence = rejectRepetition.value;
+  }
+  if (!sameWords(base.password_rejected_words, rejectedWordsValues())) {
+    body.password_rejected_words = rejectedWordsValues();
   }
   if (storedDays(base.session_ttl_secs, SESSION_MAX_DAYS) !== sessionDays.value) {
     body.session_ttl_secs = sessionDays.value * 86_400;
@@ -671,6 +707,27 @@ function formatStamp(at: string): string {
                     {{ t('signInExperience.rejectRepetitionHint') }}
                   </p>
                 </div>
+              </div>
+
+              <Separator />
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="password-rejected-words">{{ t('signInExperience.rejectedWords') }}</Label>
+                <Textarea
+                  id="password-rejected-words"
+                  v-model="rejectedWordsText"
+                  rows="3"
+                  :invalid="rejectedWordsIssue !== null"
+                  :disabled="update.isPending.value"
+                  placeholder="monaca&#10;qwerty"
+                  spellcheck="false"
+                />
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.rejectedWordsHint') }}
+                </p>
+                <p v-if="rejectedWordsIssue !== null" class="text-[11.5px] leading-snug text-deny">
+                  {{ t('signInExperience.invalidRejectedWords') }}
+                </p>
               </div>
             </CardContent>
           </Card>

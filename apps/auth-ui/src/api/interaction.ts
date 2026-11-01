@@ -79,6 +79,8 @@ export interface SignInExperience {
   password_reject_user_info: boolean;
   /** Whether a password may not repeat a character or follow a sequence four times. */
   password_reject_repetition_and_sequence: boolean;
+  /** Lowercased words a password may not contain. */
+  password_rejected_words: string[];
   /** The optional hosted-page look. */
   branding: Branding;
 }

@@ -261,6 +261,8 @@ export interface SignInExperience {
   password_reject_user_info: boolean;
   /** Whether a password may not repeat a character or follow a sequence four times. */
   password_reject_repetition_and_sequence: boolean;
+  /** Lowercased words a password may not contain. */
+  password_rejected_words: string[];
   /** How long a browser session stays signed in, in seconds (3600–7776000). */
   session_ttl_secs: number;
   /** How long a refresh token stays usable, in seconds (3600–31536000). */
@@ -491,6 +493,7 @@ export interface UpdateSignInExperienceRequest {
   password_min_character_types?: number;
   password_reject_user_info?: boolean;
   password_reject_repetition_and_sequence?: boolean;
+  password_rejected_words?: string[];
   session_ttl_secs?: number;
   refresh_token_ttl_secs?: number;
   branding?: BrandingPatch;

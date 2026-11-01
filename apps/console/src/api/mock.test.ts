@@ -1074,6 +1074,7 @@ describe("sign-in experience", () => {
     expect(experience.password_min_character_types).toBe(1);
     expect(experience.password_reject_user_info).toBe(true);
     expect(experience.password_reject_repetition_and_sequence).toBe(false);
+    expect(experience.password_rejected_words).toEqual([]);
     expect(experience.session_ttl_secs).toBe(2_592_000);
     expect(experience.refresh_token_ttl_secs).toBe(2_592_000);
     expect(experience.branding).toEqual({
@@ -1109,6 +1110,7 @@ describe("sign-in experience", () => {
       password_min_character_types: 1,
       password_reject_user_info: true,
       password_reject_repetition_and_sequence: false,
+      password_rejected_words: [],
       session_ttl_secs: 2_592_000,
       refresh_token_ttl_secs: 2_592_000,
       branding: {
@@ -1247,6 +1249,37 @@ describe("sign-in experience", () => {
       password_reject_user_info: true,
       password_reject_repetition_and_sequence: false,
     });
+  });
+
+  it("normalises the rejected word list and validates its shape", async () => {
+    const short = await mockApi
+      .updateSignInExperience({ password_rejected_words: ["ab"] })
+      .catch((error: unknown) => error);
+    expect(short).toBeInstanceOf(ApiError);
+    expect((short as ApiError).status).toBe(400);
+
+    const tooMany = await mockApi
+      .updateSignInExperience({
+        password_rejected_words: Array.from({ length: 101 }, (_, index) => `word-${index}`),
+      })
+      .catch((error: unknown) => error);
+    expect(tooMany).toBeInstanceOf(ApiError);
+    expect((tooMany as ApiError).status).toBe(400);
+
+    const written = await mockApi.updateSignInExperience({
+      password_rejected_words: [" Monaca ", "QWERTY", "monaca"],
+    });
+    expect(written.password_rejected_words).toEqual(["monaca", "qwerty"]);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({
+      password_rejected_words: ["monaca", "qwerty"],
+    });
+
+    await mockApi.updateSignInExperience({ password_rejected_words: [] });
   });
 
   it("sets and clears branding fields and validates their shape", async () => {

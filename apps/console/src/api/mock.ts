@@ -1256,6 +1256,7 @@ class MockStore {
       body.password_min_character_types === undefined &&
       body.password_reject_user_info === undefined &&
       body.password_reject_repetition_and_sequence === undefined &&
+      body.password_rejected_words === undefined &&
       body.session_ttl_secs === undefined &&
       body.refresh_token_ttl_secs === undefined &&
       (body.branding === undefined || brandingPatchIsEmpty(body.branding))
@@ -1289,6 +1290,10 @@ class MockStore {
         code: "MONACA_INVALID_REQUEST",
       });
     }
+    const rejectedWords =
+      body.password_rejected_words === undefined
+        ? undefined
+        : normaliseRejectedWords(body.password_rejected_words);
     if (body.branding !== undefined) checkBrandingPatch(body.branding);
     for (const [field, value, min, max] of [
       ["session_ttl_secs", body.session_ttl_secs, 3_600, 7_776_000],
@@ -1342,6 +1347,8 @@ class MockStore {
       password_reject_repetition_and_sequence:
         body.password_reject_repetition_and_sequence ??
         this.experience.password_reject_repetition_and_sequence,
+      password_rejected_words:
+        rejectedWords ?? this.experience.password_rejected_words,
       session_ttl_secs: body.session_ttl_secs ?? this.experience.session_ttl_secs,
       refresh_token_ttl_secs:
         body.refresh_token_ttl_secs ?? this.experience.refresh_token_ttl_secs,
@@ -1367,6 +1374,7 @@ class MockStore {
         password_reject_user_info: updated.password_reject_user_info,
         password_reject_repetition_and_sequence:
           updated.password_reject_repetition_and_sequence,
+        password_rejected_words: updated.password_rejected_words,
         session_ttl_secs: updated.session_ttl_secs,
         refresh_token_ttl_secs: updated.refresh_token_ttl_secs,
         branding: { ...updated.branding },
@@ -2238,6 +2246,28 @@ function checkWebhookEvents(raw: string[]): string[] {
 function newWebhookSecret(): string {
   const half = () => crypto.randomUUID().replaceAll("-", "");
   return `whsec_${half()}${half()}`;
+}
+
+/** Lowercase, de-duplicate and bound the rejected-word list, exactly like the server. */
+function normaliseRejectedWords(words: string[]): string[] {
+  if (words.length > 100) {
+    throw new ApiError("password_rejected_words must list at most 100 words", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+  const out: string[] = [];
+  for (const word of words) {
+    const normalised = word.trim().toLowerCase();
+    if ([...normalised].length < 3 || [...normalised].length > 64) {
+      throw new ApiError("each rejected word must be 3-64 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (!out.includes(normalised)) out.push(normalised);
+  }
+  return out;
 }
 
 /** An empty branding object says nothing, which the server treats as an empty patch. */

@@ -63,6 +63,8 @@ pub struct SignInExperienceRow {
     pub password_reject_user_info: bool,
     /// Whether a password may not repeat a character or follow a sequence for a run of four.
     pub password_reject_repetition_and_sequence: bool,
+    /// Lowercased words a password may not contain.
+    pub password_rejected_words: Vec<String>,
     /// How long a browser session stays signed in, in seconds.
     pub session_ttl_secs: i32,
     /// How long a refresh token stays usable, in seconds.
@@ -815,7 +817,7 @@ impl Store {
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
                     mfa_enabled, mfa_policy, password_min_length, password_min_character_types,
                     password_reject_user_info, password_reject_repetition_and_sequence,
-                    session_ttl_secs, refresh_token_ttl_secs, updated_at
+                    password_rejected_words, session_ttl_secs, refresh_token_ttl_secs, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
         .fetch_one(&pool)
@@ -836,6 +838,7 @@ impl Store {
         password_min_character_types: Option<i32>,
         password_reject_user_info: Option<bool>,
         password_reject_repetition_and_sequence: Option<bool>,
+        password_rejected_words: Option<Vec<String>>,
         session_ttl_secs: Option<i32>,
         refresh_token_ttl_secs: Option<i32>,
     ) -> Result<SignInExperienceRow, StoreError> {
@@ -852,14 +855,16 @@ impl Store {
                  password_reject_user_info = COALESCE($8, password_reject_user_info),
                  password_reject_repetition_and_sequence =
                    COALESCE($9, password_reject_repetition_and_sequence),
-                 session_ttl_secs = COALESCE($10, session_ttl_secs),
-                 refresh_token_ttl_secs = COALESCE($11, refresh_token_ttl_secs),
+                 password_rejected_words = COALESCE($10, password_rejected_words),
+                 session_ttl_secs = COALESCE($11, session_ttl_secs),
+                 refresh_token_ttl_secs = COALESCE($12, refresh_token_ttl_secs),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
                        mfa_enabled, mfa_policy, password_min_length, password_min_character_types,
                        password_reject_user_info, password_reject_repetition_and_sequence,
-                       session_ttl_secs, refresh_token_ttl_secs, updated_at",
+                       password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
+                       updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
@@ -870,6 +875,7 @@ impl Store {
         .bind(password_min_character_types)
         .bind(password_reject_user_info)
         .bind(password_reject_repetition_and_sequence)
+        .bind(password_rejected_words)
         .bind(session_ttl_secs)
         .bind(refresh_token_ttl_secs)
         .fetch_one(&pool)
