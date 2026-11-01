@@ -331,6 +331,16 @@ pub fn management_routes() -> Router<Arc<AppState>> {
                 .patch(crate::management::update_sign_in_experience),
         )
         .route(
+            "/v1/resources",
+            get(crate::resources::list_resources).post(crate::resources::create_resource),
+        )
+        .route(
+            "/v1/resources/{resource}",
+            get(crate::resources::get_resource)
+                .patch(crate::resources::update_resource)
+                .delete(crate::resources::delete_resource),
+        )
+        .route(
             "/v1/roles",
             get(crate::management::list_roles).post(crate::management::create_role),
         )

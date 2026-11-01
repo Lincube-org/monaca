@@ -245,6 +245,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "them and keeps the password; disabling both is 400, an empty patch is 400, and re-enabling " +
       "restores every method",
   },
+  {
+    step: "25",
+    title: "api resources",
+    assertion:
+      "POST /v1/resources registers an absolute http(s) identifier with its scopes (a duplicate is " +
+      "409 MONACA_RESOURCE_EXISTS, a relative identifier is 400) and GET lists it; an authorize " +
+      "naming the resource may only ask for its scopes, so a scope it does not define is " +
+      "error=invalid_scope before the page opens; after PATCH adds the scope a role-granted sign-in " +
+      "completes and the access token carries aud=the resource; DELETE is 204 and a missing one is 404",
+  },
 ];
 
 interface StepResult {
@@ -4871,6 +4881,237 @@ async function signInExperienceFlow(base: string, adminToken: string): Promise<S
   };
 }
 
+/**
+ * Step 25 — registered API resources (§6.2).
+ *
+ * A resource fixes the scope namespace of one API. An authorize request that names a registered
+ * resource may only ask for the scopes it defines; after a role grants the scope the access token
+ * carries the indicator as `aud`.
+ */
+async function apiResourceFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const email = `resource-${runId}@demo.localhost`;
+  const password = `pw-${runId}-resource`;
+  const clientId = `e2e-resource-${runId}`;
+  const identifier = `https://api.example.com/${runId}`;
+  const roleName = `resource-role-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "25",
+    title: "api resources",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** An authorize URL asking for `openid tools:write` against the resource. */
+  const authorize = async (tag: string): Promise<{ url: string; verifier: string }> => {
+    const verifier = `r-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid tools:write",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+      resource: identifier,
+    })}`;
+    return { url, verifier };
+  };
+
+  try {
+    // --- an account whose role grants the scope, and a public app that may ask for it -----------
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Resource holder", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const role = await call(`${base}/v1/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, permissions: ["tools:write"] }),
+    });
+    const roleId = (role.body as { id?: unknown })?.id;
+    if (role.status !== 201 || typeof roleId !== "string") {
+      return fail(`POST /v1/roles → ${role.status} ${text(role.body)}`);
+    }
+    const assigned = await call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "POST",
+      headers,
+    });
+    if (assigned.status !== 204) {
+      return fail(`assign role → ${assigned.status} ${text(assigned.body)}`);
+    }
+
+    const client = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Resource App",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid", "tools:read", "tools:write"],
+      }),
+    });
+    if (client.status !== 201) {
+      return fail(`POST /v1/clients → ${client.status} ${text(client.body)}`);
+    }
+
+    // --- register the resource with only tools:read ----------------------------------------------
+    const resource = await call(`${base}/v1/resources`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Example API", identifier, scopes: ["tools:read"] }),
+    });
+    const resourceId = (resource.body as { id?: unknown })?.id;
+    checks.push([
+      "POST /v1/resources registers the resource",
+      resource.status === 201 &&
+        typeof resourceId === "string" &&
+        resourceId.startsWith("res_") &&
+        JSON.stringify(resource.body).includes(identifier) &&
+        JSON.stringify((resource.body as { scopes?: unknown })?.scopes).includes("tools:read"),
+    ]);
+    if (typeof resourceId !== "string") return fail("the resource carried no id");
+
+    const duplicate = await call(`${base}/v1/resources`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Duplicate", identifier, scopes: [] }),
+    });
+    checks.push([
+      "a duplicate identifier is 409 MONACA_RESOURCE_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_RESOURCE_EXISTS",
+    ]);
+
+    const relative = await call(`${base}/v1/resources`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Bad", identifier: "/api", scopes: [] }),
+    });
+    checks.push([
+      "a relative identifier is 400",
+      relative.status === 400,
+    ]);
+
+    const listed = await call(`${base}/v1/resources`, { headers });
+    checks.push([
+      "GET /v1/resources lists it",
+      listed.status === 200 && JSON.stringify(listed.body).includes(identifier),
+    ]);
+
+    const fetched = await call(`${base}/v1/resources/${resourceId}`, { headers });
+    checks.push([
+      "GET /v1/resources/{id} echoes the scopes",
+      fetched.status === 200 && JSON.stringify((fetched.body as { scopes?: unknown })?.scopes).includes("tools:read"),
+    ]);
+
+    // --- the resource's scope set gates authorize before the page opens ---------------------------
+    const denied = await authorize("denied");
+    const refused = await call(denied.url, { redirect: "manual" });
+    const refusedParams = new URL(refused.headers.get("location") ?? "", base).searchParams;
+    checks.push([
+      "a scope the resource does not define is invalid_scope",
+      refused.status === 302 &&
+        refusedParams.get("error") === "invalid_scope" &&
+        refusedParams.get("state") === `st-denied-${runId}`,
+    ]);
+
+    const patched = await call(`${base}/v1/resources/${resourceId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ scopes: ["tools:read", "tools:write"] }),
+    });
+    checks.push([
+      "PATCH adds the scope",
+      patched.status === 200 && JSON.stringify((patched.body as { scopes?: unknown })?.scopes).includes("tools:write"),
+    ]);
+
+    // --- the same request now signs in and the token carries the resource as aud ------------------
+    const allowed = await authorize("allowed");
+    const started = await call(allowed.url, { redirect: "manual" });
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (started.status !== 302 || interaction === null) {
+      return fail(`authorize(allowed) → ${started.status} ${text(started.body)}`);
+    }
+
+    const signIn = await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+    if (signIn.status !== 200 || typeof redirectTo !== "string") {
+      return fail(`sign-in → ${signIn.status} ${text(signIn.body)}`);
+    }
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: allowed.verifier,
+    });
+    const claims = jwtClaims((token.body as { access_token?: unknown })?.access_token);
+    checks.push([
+      "the access token carries the resource as aud and the granted scope",
+      token.status === 200 &&
+        claims !== undefined &&
+        claims.aud === identifier &&
+        Array.isArray(claims.scope) &&
+        (claims.scope as string[]).includes("tools:write"),
+    ]);
+
+    // --- deletion ------------------------------------------------------------------------------
+    const removed = await call(`${base}/v1/resources/${resourceId}`, { method: "DELETE", headers });
+    checks.push(["DELETE /v1/resources/{id} is 204", removed.status === 204]);
+
+    const missing = await call(`${base}/v1/resources/${resourceId}`, { headers });
+    checks.push(["a deleted resource is 404", missing.status === 404]);
+
+    const deleteMissing = await call(`${base}/v1/resources/${resourceId}`, { method: "DELETE", headers });
+    checks.push(["deleting it again is 404", deleteMissing.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "25",
+    title: "api resources",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: create → duplicate 409 → relative 400 → list/get → invalid_scope → patch → sign-in → aud → delete → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -5124,6 +5365,7 @@ async function main(): Promise<number> {
   push(await clientFlow(base, adminToken));
   push(await userManagementFlow(base, adminToken, parsed.consoleSecret));
   push(await signInExperienceFlow(base, adminToken));
+  push(await apiResourceFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

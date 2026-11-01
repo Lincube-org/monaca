@@ -162,6 +162,31 @@ pub async fn authorize(
         ));
     }
 
+    // A registered resource owns its scope namespace: a non-standard scope it does not define is
+    // `invalid_scope`, exactly like a scope the client may not ask for. An unregistered resource
+    // indicator keeps the pre-registry behaviour, because agent/MCP flows use resource URLs that
+    // are not tenant configuration (§6.2 resources).
+    if let Some(resource) = request.resource.as_deref()
+        && let Some(row) = state
+            .store
+            .api_resource_by_identifier(&tenant, resource)
+            .await?
+    {
+        let unknown = request.scopes.iter().any(|scope| {
+            !matches!(
+                scope.as_str(),
+                "openid" | "profile" | "email" | "offline_access"
+            ) && !row.scopes.iter().any(|known| known == scope)
+        });
+        if unknown {
+            return Ok(redirect_error(
+                &request.redirect_uri,
+                "invalid_scope",
+                &request.state,
+            ));
+        }
+    }
+
     let org_slug = request
         .organization
         .clone()

@@ -182,6 +182,7 @@ fn is_known_prefix(prefix: &str) -> bool {
             | "pky"
             | "mfd"
             | "rol"
+            | "res"
     )
 }
 
@@ -343,6 +344,11 @@ typed_id!(
     /// RBAC role (`rol_…`): a named set of permission scopes.
     RoleId,
     "rol"
+);
+typed_id!(
+    /// API resource (`res_…`): a registered resource indicator and the scopes it defines.
+    ResourceId,
+    "res"
 );
 
 #[cfg(test)]
@@ -519,5 +525,6 @@ mod tests {
         check::<InteractionId>("int_");
         check::<KeyId>("key_");
         check::<PasskeyId>("pky_");
+        check::<ResourceId>("res_");
     }
 }

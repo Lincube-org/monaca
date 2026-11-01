@@ -401,7 +401,7 @@ fn normalise_uris(raw: &[String], field: &str) -> Result<Vec<String>, ApiError> 
 }
 
 /// Validate and de-duplicate the requested scopes against the scope grammar.
-fn normalise_scopes(raw: &[String]) -> Result<Vec<String>, ApiError> {
+pub(crate) fn normalise_scopes(raw: &[String]) -> Result<Vec<String>, ApiError> {
     let mut scopes: Vec<String> = Vec::new();
     for scope in raw {
         let scope = scope.trim();

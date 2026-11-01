@@ -128,6 +128,13 @@ pub mod kinds {
         "Client exists",
         409,
     );
+    /// An API resource identifier is already registered in this tenant.
+    pub const RESOURCE_EXISTS: ProblemKind = ProblemKind::new(
+        "resource_exists",
+        "MONACA_RESOURCE_EXISTS",
+        "Resource exists",
+        409,
+    );
     /// A connector slug is already registered in this tenant.
     pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
         "connector_exists",
@@ -262,6 +269,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "social identity" => kinds::SOCIAL_IDENTITY_TAKEN,
                     "role" => kinds::ROLE_EXISTS,
                     "client" => kinds::CLIENT_EXISTS,
+                    "api resource" => kinds::RESOURCE_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))

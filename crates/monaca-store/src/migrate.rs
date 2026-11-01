@@ -109,6 +109,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "hosted sign-in switches: sign-up, password and email code (M1)",
         include_str!("../migrations/tenant_14.sql"),
     ),
+    (
+        15,
+        "registered API resources and their scopes (M1)",
+        include_str!("../migrations/tenant_15.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.

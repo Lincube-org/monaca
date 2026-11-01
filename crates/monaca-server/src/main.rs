@@ -19,6 +19,7 @@ mod oauth;
 mod openapi;
 mod passkey;
 mod protocol;
+mod resources;
 mod routes;
 mod session;
 mod social;

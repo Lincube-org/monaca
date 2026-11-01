@@ -119,6 +119,28 @@ pub struct RoleRow {
     pub created_at: OffsetDateTime,
 }
 
+/// A registered API resource in `tenant.api_resources` (§6.2).
+#[derive(Debug, Clone, FromRow)]
+pub struct ApiResourceRow {
+    /// Row id; its typed form is the `res_…` id the API uses.
+    pub id: Uuid,
+    /// Human-readable name.
+    pub name: String,
+    /// The resource indicator (an absolute `http(s)` URL).
+    pub identifier: String,
+    /// The scopes this resource defines.
+    pub scopes: Vec<String>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+impl ApiResourceRow {
+    /// The resource's typed id.
+    pub fn resource_id(&self) -> monaca_types::ResourceId {
+        monaca_types::ResourceId::from_uuid(self.id)
+    }
+}
+
 impl RoleRow {
     /// The role's typed id.
     pub fn role_id(&self) -> monaca_types::RoleId {
@@ -1828,6 +1850,114 @@ impl Store {
         .bind(agent_id.uuid())
         .fetch_optional(&pool)
         .await?)
+    }
+
+    // ------------------------------------------------------------------ resources
+
+    /// Every registered API resource, by identifier.
+    pub async fn api_resources(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<ApiResourceRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ApiResourceRow>(
+            "SELECT id, name, identifier, scopes, created_at
+             FROM tenant.api_resources ORDER BY identifier",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One API resource by its row id.
+    pub async fn api_resource_by_id(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+    ) -> Result<Option<ApiResourceRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ApiResourceRow>(
+            "SELECT id, name, identifier, scopes, created_at
+             FROM tenant.api_resources WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// One API resource by its indicator.
+    pub async fn api_resource_by_identifier(
+        &self,
+        tenant: &TenantRow,
+        identifier: &str,
+    ) -> Result<Option<ApiResourceRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ApiResourceRow>(
+            "SELECT id, name, identifier, scopes, created_at
+             FROM tenant.api_resources WHERE identifier = $1",
+        )
+        .bind(identifier)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Register a resource; an identifier another row holds is
+    /// `AlreadyExists { entity: "api resource" }`.
+    pub async fn create_api_resource(
+        &self,
+        tenant: &TenantRow,
+        name: &str,
+        identifier: &str,
+        scopes: &[String],
+    ) -> Result<ApiResourceRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query_as::<_, ApiResourceRow>(
+            "INSERT INTO tenant.api_resources (id, name, identifier, scopes)
+             VALUES ($1,$2,$3,$4)
+             RETURNING id, name, identifier, scopes, created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(name)
+        .bind(identifier)
+        .bind(scopes)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| unique_conflict(err, "api resource"))
+    }
+
+    /// Replace the editable fields of a resource; `None` leaves the current value.
+    pub async fn update_api_resource(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+        name: Option<&str>,
+        scopes: Option<&[String]>,
+    ) -> Result<Option<ApiResourceRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ApiResourceRow>(
+            "UPDATE tenant.api_resources
+             SET name = COALESCE($2, name), scopes = COALESCE($3, scopes)
+             WHERE id = $1
+             RETURNING id, name, identifier, scopes, created_at",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(scopes)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Delete a resource; false when it did not exist.
+    pub async fn delete_api_resource(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.api_resources WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // ------------------------------------------------------------------ clients
