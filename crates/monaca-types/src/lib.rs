@@ -20,6 +20,7 @@ pub use ctx::{OrgCtx, Principal, TenantCtx};
 pub use id::{
     AccountId, AgentId, AgentKeyId, ApprovalId, ClientId, DelegationId, EventId, GrantId,
     InteractionId, KeyId, OrgId, OrgInvitationId, PasskeyId, ResourceId, RoleId, SessionId,
-    TenantId, TrustedDeviceId, TypedId, TypedIdError, decode_suffix, encode_suffix,
+    TenantId, TrustedDeviceId, TypedId, TypedIdError, WebhookDeliveryId, WebhookId, decode_suffix,
+    encode_suffix,
 };
 pub use problem::{Problem, ProblemKind};

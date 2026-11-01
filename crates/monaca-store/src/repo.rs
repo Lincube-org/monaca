@@ -9,7 +9,7 @@ use monaca_audit::{
     AuditActorType, AuditDecision, AuditEvent, AuditSubject, ChainFields, ChainHead, StoredEvent,
     VerifyReport, chain_hash, verify_chain,
 };
-use monaca_types::{AccountId, AgentId, GrantId, OrgId, RoleId, TypedId};
+use monaca_types::{AccountId, AgentId, GrantId, OrgId, RoleId, TypedId, WebhookId};
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection};
 use time::OffsetDateTime;
@@ -144,6 +144,46 @@ pub struct SsoStateRow {
     pub connector: String,
     /// The interaction the provider is authenticating for.
     pub interaction_id: String,
+}
+
+/// A tenant webhook subscription in `tenant.webhooks` (§6.2).
+#[derive(Debug, Clone, FromRow)]
+pub struct WebhookRow {
+    /// Row id.
+    pub id: Uuid,
+    /// Absolute http(s) endpoint the deliveries are posted to.
+    pub url: String,
+    /// Audit action names this subscription receives.
+    pub events: Vec<String>,
+    /// The HMAC signing key, sealed by the caller (§5.6) — the store never sees plaintext.
+    pub secret_enc: Vec<u8>,
+    /// Whether deliveries are attempted at all.
+    pub enabled: bool,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// When the row last changed.
+    pub updated_at: OffsetDateTime,
+}
+
+/// One delivery attempt summary in `tenant.webhook_deliveries` (§6.2).
+#[derive(Debug, Clone, FromRow)]
+pub struct WebhookDeliveryRow {
+    /// Row id.
+    pub id: Uuid,
+    /// The subscription the event was sent to.
+    pub webhook_id: Uuid,
+    /// The audit action that fired the delivery.
+    pub event: String,
+    /// The last HTTP status the endpoint answered, if it answered.
+    pub status_code: Option<i32>,
+    /// Whether the endpoint accepted the event (any 2xx).
+    pub success: bool,
+    /// How many attempts the delivery took.
+    pub attempts: i32,
+    /// The last failure, when the endpoint refused or could not be reached.
+    pub error: Option<String>,
+    /// When the delivery finished.
+    pub created_at: OffsetDateTime,
 }
 
 /// An RBAC role in `tenant.roles` (§6.2).
@@ -779,6 +819,189 @@ impl Store {
         .bind(mfa_enabled)
         .bind(mfa_policy)
         .fetch_one(&pool)
+        .await?)
+    }
+
+    // ------------------------------------------------------------------ webhooks
+
+    /// Every webhook the tenant configured, oldest first.
+    pub async fn webhooks(&self, tenant: &TenantRow) -> Result<Vec<WebhookRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookRow>(
+            "SELECT id, url, events, secret_enc, enabled, created_at, updated_at
+             FROM tenant.webhooks ORDER BY created_at, id",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One webhook by its typed id.
+    pub async fn webhook(
+        &self,
+        tenant: &TenantRow,
+        id: WebhookId,
+    ) -> Result<Option<WebhookRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookRow>(
+            "SELECT id, url, events, secret_enc, enabled, created_at, updated_at
+             FROM tenant.webhooks WHERE id = $1",
+        )
+        .bind(id.uuid())
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// The enabled subscriptions that name `action`.
+    ///
+    /// Takes the database name rather than a [`TenantRow`] because delivery is triggered from the
+    /// audit helpers, including org-chain ones where only the tenant context is in scope.
+    pub async fn webhooks_for_event(
+        &self,
+        db_name: &str,
+        action: &str,
+    ) -> Result<Vec<WebhookRow>, StoreError> {
+        let pool = self.tenant_pool(db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookRow>(
+            "SELECT id, url, events, secret_enc, enabled, created_at, updated_at
+             FROM tenant.webhooks
+             WHERE enabled AND $1 = ANY(events)
+             ORDER BY created_at, id",
+        )
+        .bind(action)
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Register a webhook. The caller seals the signing key.
+    pub async fn create_webhook(
+        &self,
+        tenant: &TenantRow,
+        url: &str,
+        events: &[String],
+        secret_enc: &[u8],
+    ) -> Result<WebhookRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookRow>(
+            "INSERT INTO tenant.webhooks (id, url, events, secret_enc)
+             VALUES ($1,$2,$3,$4)
+             RETURNING id, url, events, secret_enc, enabled, created_at, updated_at",
+        )
+        .bind(WebhookId::new().uuid())
+        .bind(url)
+        .bind(events)
+        .bind(secret_enc)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Change only the fields the caller named; `None` leaves each value alone.
+    pub async fn update_webhook(
+        &self,
+        tenant: &TenantRow,
+        id: WebhookId,
+        url: Option<&str>,
+        events: Option<&[String]>,
+        enabled: Option<bool>,
+    ) -> Result<Option<WebhookRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookRow>(
+            "UPDATE tenant.webhooks
+             SET url = COALESCE($2, url),
+                 events = COALESCE($3, events),
+                 enabled = COALESCE($4, enabled),
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING id, url, events, secret_enc, enabled, created_at, updated_at",
+        )
+        .bind(id.uuid())
+        .bind(url)
+        .bind(events)
+        .bind(enabled)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Replace a webhook's sealed signing key; `None` when the row does not exist.
+    pub async fn set_webhook_secret(
+        &self,
+        tenant: &TenantRow,
+        id: WebhookId,
+        secret_enc: &[u8],
+    ) -> Result<Option<WebhookRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookRow>(
+            "UPDATE tenant.webhooks SET secret_enc = $2, updated_at = now()
+             WHERE id = $1
+             RETURNING id, url, events, secret_enc, enabled, created_at, updated_at",
+        )
+        .bind(id.uuid())
+        .bind(secret_enc)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Delete a webhook and its delivery history; false when it did not exist.
+    pub async fn delete_webhook(
+        &self,
+        tenant: &TenantRow,
+        id: WebhookId,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.webhooks WHERE id = $1")
+            .bind(id.uuid())
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record the outcome of one delivery, after its last attempt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_webhook_delivery(
+        &self,
+        db_name: &str,
+        webhook_id: Uuid,
+        event: &str,
+        status_code: Option<i32>,
+        success: bool,
+        attempts: i32,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.webhook_deliveries
+                (id, webhook_id, event, status_code, success, attempts, error)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(webhook_id)
+        .bind(event)
+        .bind(status_code)
+        .bind(success)
+        .bind(attempts)
+        .bind(error)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The most recent deliveries of one webhook, newest first.
+    pub async fn webhook_deliveries(
+        &self,
+        tenant: &TenantRow,
+        webhook_id: WebhookId,
+        limit: i64,
+    ) -> Result<Vec<WebhookDeliveryRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, WebhookDeliveryRow>(
+            "SELECT id, webhook_id, event, status_code, success, attempts, error, created_at
+             FROM tenant.webhook_deliveries
+             WHERE webhook_id = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT $2",
+        )
+        .bind(webhook_id.uuid())
+        .bind(limit)
+        .fetch_all(&pool)
         .await?)
     }
 

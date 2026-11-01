@@ -184,6 +184,8 @@ fn is_known_prefix(prefix: &str) -> bool {
             | "rol"
             | "res"
             | "inv"
+            | "whk"
+            | "dlv"
     )
 }
 
@@ -355,6 +357,16 @@ typed_id!(
     /// Organization invitation (`inv_…`): an email address invited to join an organization.
     OrgInvitationId,
     "inv"
+);
+typed_id!(
+    /// Webhook (`whk_…`): a tenant's outbound event subscription.
+    WebhookId,
+    "whk"
+);
+typed_id!(
+    /// Webhook delivery (`dlv_…`): one attempt summary under a subscription.
+    WebhookDeliveryId,
+    "dlv"
 );
 
 #[cfg(test)]
@@ -532,5 +544,7 @@ mod tests {
         check::<KeyId>("key_");
         check::<PasskeyId>("pky_");
         check::<ResourceId>("res_");
+        check::<WebhookId>("whk_");
+        check::<WebhookDeliveryId>("dlv_");
     }
 }

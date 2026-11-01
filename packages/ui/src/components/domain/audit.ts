@@ -116,6 +116,10 @@ export const M0_ACTIONS = [
   "resource.created",
   "resource.updated",
   "resource.deleted",
+  "webhook.created",
+  "webhook.updated",
+  "webhook.deleted",
+  "webhook.secret_rotated",
 ] as const;
 
 export function isKnownAction(action: string): boolean {

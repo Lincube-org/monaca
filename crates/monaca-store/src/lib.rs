@@ -36,7 +36,8 @@ pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, ClientRow, GrantRow,
     OrgInvitationRow, OrgRoleRow, ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow,
     SignInExperienceRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow,
-    SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow,
+    SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow,
+    WebhookRow,
 };
 
 /// A storage failure.

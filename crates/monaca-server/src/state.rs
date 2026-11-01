@@ -72,6 +72,9 @@ pub struct AppState {
     /// The active signing key per tenant, decoded. Cached because every token needs it and the
     /// private half is sealed at rest.
     signing: Mutex<HashMap<Uuid, Arc<SigningKeyPair>>>,
+    /// The client webhook deliveries are posted with. One pool-backed client, so a tenant with
+    /// many subscriptions does not open a new connection pool per event.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -79,6 +82,10 @@ impl AppState {
     pub fn new(store: Store, config: Config) -> Result<Arc<Self>, anyhow::Error> {
         let keys = DevEnvKeyProvider::from_hex(&crate::config::dev_kek())
             .map_err(|err| anyhow::anyhow!("MONACA_DEV_KEK: {err}"))?;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|err| anyhow::anyhow!("webhook HTTP client: {err}"))?;
         Ok(Arc::new(Self {
             store: Arc::new(store),
             config: Arc::new(config),
@@ -89,6 +96,7 @@ impl AppState {
             totp_enrollments: Mutex::new(HashMap::new()),
             passkey_challenges: Mutex::new(HashMap::new()),
             signing: Mutex::new(HashMap::new()),
+            http,
         }))
     }
 
@@ -495,24 +503,26 @@ impl AppState {
     }
 
     /// Append an audit event to an org chain in its own transaction.
-    pub async fn audit_org(&self, org: &OrgCtx, event: &AuditEvent) -> Result<(), ApiError> {
+    pub async fn audit_org(self: &Arc<Self>, org: &OrgCtx, event: &AuditEvent) -> Result<(), ApiError> {
         let mut tx = self.store.begin_org(org).await?;
         self.store
             .audit_append(&mut *tx, &org.schema_name, event)
             .await?;
         tx.commit().await?;
+        crate::webhooks::dispatch(self, org.tenant.tenant_id, &org.tenant.db_name, event).await;
         Ok(())
     }
 
     /// Append an audit event to the tenant chain in its own transaction.
     pub async fn audit_tenant(
-        &self,
+        self: &Arc<Self>,
         tenant: &TenantRow,
         event: &AuditEvent,
     ) -> Result<(), ApiError> {
         let mut tx = self.store.begin_tenant(tenant).await?;
         self.store.audit_append(&mut *tx, "tenant", event).await?;
         tx.commit().await?;
+        crate::webhooks::dispatch(self, tenant.tenant_id(), &tenant.db_name, event).await;
         Ok(())
     }
 }

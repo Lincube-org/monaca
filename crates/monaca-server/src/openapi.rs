@@ -77,6 +77,10 @@ pub const M0_ACTIONS: &[&str] = &[
     "resource.created",
     "resource.updated",
     "resource.deleted",
+    "webhook.created",
+    "webhook.updated",
+    "webhook.deleted",
+    "webhook.secret_rotated",
 ];
 
 /// The `subject.type` values §8.1 allows.
@@ -210,7 +214,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 48);
+        assert_eq!(M0_ACTIONS.len(), 52);
         for action in [
             "account.created",
             "org.created",
@@ -260,6 +264,10 @@ mod tests {
             "resource.created",
             "resource.updated",
             "resource.deleted",
+            "webhook.created",
+            "webhook.updated",
+            "webhook.deleted",
+            "webhook.secret_rotated",
         ] {
             assert!(
                 M0_ACTIONS.contains(&action),

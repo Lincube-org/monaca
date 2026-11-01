@@ -339,6 +339,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "POST …/mfa/enroll/verify with a computed code finishes the flow, and the next sign-in is " +
       "challenged with mfa_required and factors=[totp]; restoring user_controlled succeeds",
   },
+  {
+    step: "34",
+    title: "webhooks",
+    assertion:
+      "POST /v1/webhooks subscribes a local receiver to account.created and returns a signing key once; " +
+      "creating an account posts a signed event the receiver verifies and the delivery log records; " +
+      "enabled=false pauses deliveries, rotating the key changes the signature, and DELETE is 204",
+  },
 ];
 
 interface StepResult {
@@ -6986,6 +6994,236 @@ async function mandatoryMfaFlow(
   };
 }
 
+/**
+ * Step 34: a tenant subscribes an endpoint, the server signs and posts a matching event, and the
+ * delivery log records what the endpoint answered.
+ *
+ * The receiver is a real local HTTP server — the point is the signature over the exact bytes, so a
+ * recorded body must verify rather than merely parse.
+ */
+async function webhookFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  let webhookId = "";
+
+  interface Received {
+    body: string;
+    signature: string;
+    event: string;
+  }
+  const received: Received[] = [];
+  const receiver = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      if (new URL(request.url).pathname !== "/hook") {
+        return new Response("not found", { status: 404 });
+      }
+      received.push({
+        body: await request.text(),
+        signature: request.headers.get("x-monaca-signature") ?? "",
+        event: request.headers.get("x-monaca-event") ?? "",
+      });
+      return new Response("ok", { status: 200 });
+    },
+  });
+  const url = `http://127.0.0.1:${receiver.port}/hook`;
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const waitFor = async (count: number, timeoutMs = 5_000): Promise<Received | undefined> => {
+    const deadline = performance.now() + timeoutMs;
+    while (received.length < count && performance.now() < deadline) await sleep(50);
+    return received[count - 1];
+  };
+
+  const sign = (secret: string, body: string): string =>
+    `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
+
+  const makeAccount = async (tag: string) => {
+    const email = `hook-${tag}-${runId}@demo.localhost`;
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Webhook Receiver", password: `pw-${runId}` }),
+    });
+    return { status: created.status, body: created.body, email };
+  };
+
+  try {
+    const relative = await call(`${base}/v1/webhooks`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url: "/hook", events: ["account.created"] }),
+    });
+    checks.push(["a relative endpoint is 400", relative.status === 400]);
+
+    const unknown = await call(`${base}/v1/webhooks`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url, events: ["account.no_such_action"] }),
+    });
+    checks.push(["an event outside the catalog is 400", unknown.status === 400]);
+
+    const created = await call(`${base}/v1/webhooks`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url, events: ["account.created"] }),
+    });
+    const secret = (created.body as { secret?: unknown })?.secret;
+    const id = (created.body as { id?: unknown })?.id;
+    checks.push([
+      "creating a webhook returns 201 with a signing key",
+      created.status === 201 &&
+        typeof secret === "string" &&
+        secret.startsWith("whsec_") &&
+        typeof id === "string" &&
+        id.startsWith("whk_"),
+    ]);
+    if (created.status !== 201 || typeof secret !== "string" || typeof id !== "string") {
+      return failWebhook(`POST /v1/webhooks → ${created.status} ${text(created.body)}`);
+    }
+    webhookId = id;
+
+    const list = await call(`${base}/v1/webhooks`, { headers });
+    const items = (list.body as { items?: unknown[] })?.items ?? [];
+    const row = items.find((item) => (item as { id?: unknown }).id === webhookId);
+    checks.push([
+      "the list names the hook without the signing key",
+      list.status === 200 && row !== undefined && !("secret" in (row as object)),
+    ]);
+
+    const first = await makeAccount("first");
+    checks.push(["the triggering account was created", first.status === 201]);
+    const delivery = await waitFor(1);
+    let verified = false;
+    let shaped = false;
+    if (delivery) {
+      verified = delivery.signature === sign(secret, delivery.body);
+      const payload = JSON.parse(delivery.body) as {
+        hook_id?: unknown;
+        event?: unknown;
+        data?: { subject?: { type?: unknown; id?: unknown }; payload?: { email?: unknown } };
+      };
+      shaped =
+        payload.hook_id === webhookId &&
+        payload.event === "account.created" &&
+        delivery.event === "account.created" &&
+        payload.data?.subject?.type === "account" &&
+        payload.data?.subject?.id === (first.body as { id?: unknown })?.id &&
+        payload.data?.payload?.email === first.email;
+    }
+    checks.push(["the delivery carries a valid sha256 HMAC", verified]);
+    checks.push(["the body names the hook, event and subject", shaped]);
+
+    let deliveryRow: {
+      event?: unknown;
+      success?: unknown;
+      status_code?: unknown;
+      attempts?: unknown;
+    } = {};
+    const deadline = performance.now() + 5_000;
+    while (performance.now() < deadline) {
+      const listed = await call(`${base}/v1/webhooks/${webhookId}/deliveries`, { headers });
+      const rows = (listed.body as { items?: unknown[] })?.items ?? [];
+      deliveryRow = (rows[0] as typeof deliveryRow) ?? {};
+      if (deliveryRow.event === "account.created") break;
+      await sleep(100);
+    }
+    checks.push([
+      "the delivery log records the 200 answer",
+      deliveryRow.event === "account.created" &&
+        deliveryRow.success === true &&
+        deliveryRow.status_code === 200 &&
+        typeof deliveryRow.attempts === "number" &&
+        deliveryRow.attempts >= 1,
+    ]);
+
+    const paused = await call(`${base}/v1/webhooks/${webhookId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    checks.push([
+      "PATCH pauses the subscription",
+      paused.status === 200 && (paused.body as { enabled?: unknown })?.enabled === false,
+    ]);
+    const before = received.length;
+    const skipped = await makeAccount("paused");
+    checks.push(["a second account was created while paused", skipped.status === 201]);
+    await sleep(400);
+    checks.push(["a paused hook receives nothing", received.length === before]);
+
+    const rotated = await call(`${base}/v1/webhooks/${webhookId}/secret`, {
+      method: "POST",
+      headers,
+    });
+    const newSecret = (rotated.body as { secret?: unknown })?.secret;
+    checks.push([
+      "rotating the key returns a different signing key",
+      rotated.status === 200 && typeof newSecret === "string" && newSecret !== secret,
+    ]);
+    if (rotated.status !== 200 || typeof newSecret !== "string") {
+      return failWebhook(`webhook/secret → ${rotated.status} ${text(rotated.body)}`);
+    }
+
+    const resumed = await call(`${base}/v1/webhooks/${webhookId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    checks.push([
+      "PATCH resumes the subscription",
+      resumed.status === 200 && (resumed.body as { enabled?: unknown })?.enabled === true,
+    ]);
+    const third = await makeAccount("rotated");
+    checks.push(["a third account was created after rotation", third.status === 201]);
+    const rotatedDelivery = await waitFor(before + 1);
+    checks.push([
+      "the resumed delivery verifies with the new key",
+      rotatedDelivery !== undefined && rotatedDelivery.signature === sign(newSecret, rotatedDelivery.body),
+    ]);
+
+    const removed = await call(`${base}/v1/webhooks/${webhookId}`, { method: "DELETE", headers });
+    checks.push(["DELETE is 204", removed.status === 204]);
+    webhookId = "";
+    const gone = await call(`${base}/v1/webhooks`, { headers });
+    const remaining = (gone.body as { items?: { id?: unknown }[] })?.items ?? [];
+    checks.push([
+      "the list no longer names it",
+      gone.status === 200 && remaining.every((item) => item.id !== id),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (webhookId !== "") {
+      await call(`${base}/v1/webhooks/${webhookId}`, { method: "DELETE", headers }).catch(
+        () => undefined,
+      );
+    }
+    receiver.stop(true);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "34",
+    title: "webhooks",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: validation → create + secret → signed delivery → log → pause → rotate → resume → delete`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+
+  function failWebhook(why: string): StepResult {
+    return { step: "34", title: "webhooks", status: "fail", ms: Math.round(performance.now() - t), detail: why };
+  }
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -7248,6 +7486,7 @@ async function main(): Promise<number> {
   push(await ssoFlow(base, adminToken));
   push(await accountSecurityFlow(base, adminToken));
   push(await mandatoryMfaFlow(base, adminToken, parsed.consoleSecret));
+  push(await webhookFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

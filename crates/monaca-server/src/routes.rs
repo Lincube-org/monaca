@@ -433,6 +433,22 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             "/v1/accounts/{id}/roles/{role}",
             post(crate::management::assign_role).delete(crate::management::unassign_role),
         )
+        .route(
+            "/v1/webhooks",
+            get(crate::webhooks::list_webhooks).post(crate::webhooks::create_webhook),
+        )
+        .route(
+            "/v1/webhooks/{webhook}",
+            patch(crate::webhooks::update_webhook).delete(crate::webhooks::delete_webhook),
+        )
+        .route(
+            "/v1/webhooks/{webhook}/secret",
+            post(crate::webhooks::rotate_webhook_secret),
+        )
+        .route(
+            "/v1/webhooks/{webhook}/deliveries",
+            get(crate::webhooks::list_webhook_deliveries),
+        )
 }
 
 /// `/internal/*` — §6.3. The gateway must never proxy this group.

@@ -27,6 +27,7 @@ mod session;
 mod social;
 mod sso;
 mod state;
+mod webhooks;
 
 #[cfg(test)]
 mod tests;
