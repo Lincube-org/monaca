@@ -172,19 +172,14 @@ pub async fn apply_tenant(pool: &PgPool, _short: &str) -> Result<MigrationReport
 /// Apply the org template inside an already-open provisioning transaction.
 ///
 /// The caller has created the schema and is responsible for the role grants; this function only
-/// creates the tables and records the ledger row.
+/// creates the tables and records the ledger row. It deliberately does not re-create the schema:
+/// `provision_org` already did, and a second `IF NOT EXISTS` would only emit a notice.
 pub async fn apply_org(
     tx: &mut PgConnection,
     schema: &str,
     _tenant_short: &str,
     _org_short: &str,
 ) -> Result<(), StoreError> {
-    sqlx::query(q(format!(
-        "CREATE SCHEMA IF NOT EXISTS {}",
-        crate::quote_ident(schema)
-    )))
-    .execute(&mut *tx)
-    .await?;
     sqlx::query(q(format!(
         "SET LOCAL search_path = {}",
         crate::quote_ident(schema)
