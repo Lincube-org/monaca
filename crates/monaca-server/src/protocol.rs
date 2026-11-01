@@ -485,10 +485,14 @@ const UNGOVERNED_SCOPES: &[&str] = &[
 ];
 
 /// Refuse a sign-in whose requested scopes exceed what the account's roles grant.
+///
+/// Tenant roles grant a scope everywhere; organization roles grant it only while signing into the
+/// org whose role the account holds (§6.2).
 async fn check_scope_grants(
     state: &Arc<AppState>,
     tenant: &TenantRow,
     account: &AccountRow,
+    org: &OrgRow,
     scopes: &[String],
 ) -> Result<(), ApiError> {
     if scopes
@@ -501,6 +505,10 @@ async fn check_scope_grants(
         .store
         .account_roles(tenant, account.account_id())
         .await?;
+    let org_scopes = state
+        .store
+        .org_role_scopes(tenant, org.org_id(), account.account_id())
+        .await?;
     if let Some(scope) = scopes.iter().find(|scope| {
         !UNGOVERNED_SCOPES.iter().any(|allowed| allowed == *scope)
             && !roles.iter().any(|role| {
@@ -508,6 +516,7 @@ async fn check_scope_grants(
                     .iter()
                     .any(|permission| permission == *scope)
             })
+            && !org_scopes.iter().any(|granted| granted == *scope)
     }) {
         return Err(ApiError::problem(
             kinds::INSUFFICIENT_SCOPE,
@@ -532,7 +541,11 @@ pub(crate) async fn finish_sign_in(
     headers: &HeaderMap,
     account: AccountRow,
 ) -> Result<Response, ApiError> {
-    check_scope_grants(&state, &tenant, &account, &interaction.scopes).await?;
+    let org = state
+        .store
+        .org_by_slug(&tenant, &interaction.organization)
+        .await?;
+    check_scope_grants(&state, &tenant, &account, &org, &interaction.scopes).await?;
     if state
         .store
         .totp_secret(&tenant, account.account_id())
@@ -2530,6 +2543,10 @@ async fn authorization_code_grant(
                 .into_iter()
                 .map(|role| role.name)
                 .collect(),
+            org_roles: state
+                .store
+                .org_role_names(&tenant, org.org_id(), account.account_id())
+                .await?,
         };
         Some(
             key.sign("JWT", &id_claims.to_json())
@@ -2723,6 +2740,10 @@ async fn refresh_grant(
                 .into_iter()
                 .map(|role| role.name)
                 .collect(),
+            org_roles: state
+                .store
+                .org_role_names(&tenant, org.org_id(), account.account_id())
+                .await?,
         };
         Some(
             key.sign("JWT", &id_claims.to_json())

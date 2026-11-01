@@ -803,7 +803,7 @@ pub async fn revoke_account_sessions(
     Ok(Json(json!({ "revoked": revoked })))
 }
 
-fn parse_account(raw: &str) -> Result<AccountId, ApiError> {
+pub(crate) fn parse_account(raw: &str) -> Result<AccountId, ApiError> {
     AccountId::parse(raw)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))
 }

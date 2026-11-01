@@ -9,7 +9,7 @@ use monaca_audit::{
     AuditActorType, AuditDecision, AuditEvent, AuditSubject, ChainFields, ChainHead, StoredEvent,
     VerifyReport, chain_hash, verify_chain,
 };
-use monaca_types::{AccountId, AgentId, GrantId, OrgId, TypedId};
+use monaca_types::{AccountId, AgentId, GrantId, OrgId, RoleId, TypedId};
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection};
 use time::OffsetDateTime;
@@ -117,6 +117,31 @@ pub struct RoleRow {
     pub permissions: Vec<String>,
     /// Creation time.
     pub created_at: OffsetDateTime,
+}
+
+/// An arbitrary role in an org schema's `roles` table (§5.7).
+///
+/// Distinct from [`RoleRow`]: tenant roles grant scopes tenant-wide, organization roles grant them
+/// only while signing into that organization.
+#[derive(Debug, Clone, FromRow)]
+pub struct OrgRoleRow {
+    /// Row id; its typed form is the `rol_…` id the API uses.
+    pub id: Uuid,
+    /// The unique, human-readable name.
+    pub name: String,
+    /// Free-form description.
+    pub description: String,
+    /// The scopes this role grants within the org.
+    pub scopes: Vec<String>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+impl OrgRoleRow {
+    /// The role's typed id.
+    pub fn role_id(&self) -> RoleId {
+        RoleId::from_uuid(self.id)
+    }
 }
 
 /// A registered API resource in `tenant.api_resources` (§6.2).
@@ -1805,6 +1830,27 @@ impl Store {
 
     // ------------------------------------------------------------ organizations
 
+    /// Apply the org migration set to every organization of a tenant — `monaca-server migrate`.
+    ///
+    /// A fresh org runs the whole set inside its provisioning transaction; this replays it on the
+    /// orgs that already exist, which is how a later org migration (the role tables, say) reaches
+    /// schemas provisioned before it. The per-org ledger decides which files actually run.
+    pub async fn migrate_orgs(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<(String, crate::MigrationReport)>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut reports = Vec::new();
+        for org in self.all_orgs(tenant).await? {
+            let mut tx = pool.begin().await?;
+            let report =
+                crate::migrate::apply_org(&mut *tx, &org.schema_name, &tenant.short, "").await?;
+            tx.commit().await?;
+            reports.push((org.slug, report));
+        }
+        Ok(reports)
+    }
+
     /// The organization with `slug` in `tenant`, active only.
     pub async fn org_by_slug(&self, tenant: &TenantRow, slug: &str) -> Result<OrgRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
@@ -1965,6 +2011,174 @@ impl Store {
         .bind(domain)
         .fetch_one(&pool)
         .await?)
+    }
+
+    // --------------------------------------------------------- organization roles
+
+    /// Every role defined in the org, oldest first.
+    pub async fn org_roles(&self, conn: &mut PgConnection) -> Result<Vec<OrgRoleRow>, StoreError> {
+        Ok(sqlx::query_as::<_, OrgRoleRow>(
+            "SELECT id, name, description, scopes, created_at FROM roles ORDER BY created_at",
+        )
+        .fetch_all(&mut *conn)
+        .await?)
+    }
+
+    /// One org role by its row id.
+    pub async fn org_role_by_id(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<Option<OrgRoleRow>, StoreError> {
+        Ok(sqlx::query_as::<_, OrgRoleRow>(
+            "SELECT id, name, description, scopes, created_at FROM roles WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?)
+    }
+
+    /// Define an org role; a name another role holds is `AlreadyExists { entity: "org role" }`.
+    pub async fn create_org_role(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        name: &str,
+        description: &str,
+        scopes: &[String],
+    ) -> Result<OrgRoleRow, StoreError> {
+        sqlx::query_as::<_, OrgRoleRow>(
+            "INSERT INTO roles (id, name, description, scopes) VALUES ($1,$2,$3,$4)
+             RETURNING id, name, description, scopes, created_at",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(scopes)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|err| unique_conflict(err, "org role"))
+    }
+
+    /// Replace the supplied fields of an org role; `None` keeps the current value.
+    pub async fn update_org_role(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+        name: Option<&str>,
+        description: Option<&str>,
+        scopes: Option<&[String]>,
+    ) -> Result<Option<OrgRoleRow>, StoreError> {
+        sqlx::query_as::<_, OrgRoleRow>(
+            "UPDATE roles SET name = COALESCE($2, name),
+                    description = COALESCE($3, description),
+                    scopes = COALESCE($4, scopes)
+             WHERE id = $1
+             RETURNING id, name, description, scopes, created_at",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(scopes)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|err| unique_conflict(err, "org role"))
+    }
+
+    /// Delete an org role and every assignment of it; `false` when it does not exist.
+    pub async fn delete_org_role(
+        &self,
+        conn: &mut PgConnection,
+        id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM roles WHERE id = $1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// The org roles assigned to a member, oldest assignment first.
+    pub async fn org_member_roles(
+        &self,
+        conn: &mut PgConnection,
+        account_id: AccountId,
+    ) -> Result<Vec<OrgRoleRow>, StoreError> {
+        Ok(sqlx::query_as::<_, OrgRoleRow>(
+            "SELECT r.id, r.name, r.description, r.scopes, r.created_at
+             FROM member_roles m JOIN roles r ON r.id = m.role_id
+             WHERE m.account_id = $1 ORDER BY m.created_at",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&mut *conn)
+        .await?)
+    }
+
+    /// Assign an org role; `false` when the member already held it.
+    pub async fn assign_org_role(
+        &self,
+        conn: &mut PgConnection,
+        account_id: AccountId,
+        role_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO member_roles (account_id, role_id) VALUES ($1,$2)
+             ON CONFLICT (account_id, role_id) DO NOTHING",
+        )
+        .bind(account_id.uuid())
+        .bind(role_id)
+        .execute(&mut *conn)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove an assignment; `false` when the member did not hold it.
+    pub async fn unassign_org_role(
+        &self,
+        conn: &mut PgConnection,
+        account_id: AccountId,
+        role_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM member_roles WHERE account_id = $1 AND role_id = $2")
+            .bind(account_id.uuid())
+            .bind(role_id)
+            .execute(&mut *conn)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// The org role names a member holds — the `org_roles` claim of their id_token (§7.3).
+    pub async fn org_role_names(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        account_id: AccountId,
+    ) -> Result<Vec<String>, StoreError> {
+        let org = self.org_by_id(tenant, org_id).await?;
+        let mut tx = self.begin_org(&org.ctx(tenant)).await?;
+        let roles = self.org_member_roles(&mut *tx, account_id).await?;
+        tx.rollback().await?;
+        Ok(roles.into_iter().map(|role| role.name).collect())
+    }
+
+    /// Every scope granted by the org roles a member holds in that org (§6.2).
+    pub async fn org_role_scopes(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        account_id: AccountId,
+    ) -> Result<Vec<String>, StoreError> {
+        let org = self.org_by_id(tenant, org_id).await?;
+        let mut tx = self.begin_org(&org.ctx(tenant)).await?;
+        let roles = self.org_member_roles(&mut *tx, account_id).await?;
+        tx.rollback().await?;
+        let mut scopes: Vec<String> = Vec::new();
+        for scope in roles.iter().flat_map(|role| role.scopes.iter()) {
+            if !scopes.iter().any(|existing| existing == scope) {
+                scopes.push(scope.clone());
+            }
+        }
+        Ok(scopes)
     }
 
     /// The account's default org: `is_default` if it is a member, else its oldest membership.

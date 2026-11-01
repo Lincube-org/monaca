@@ -142,6 +142,13 @@ pub mod kinds {
         "Organization exists",
         409,
     );
+    /// An organization role name is already defined in this org.
+    pub const ORG_ROLE_EXISTS: ProblemKind = ProblemKind::new(
+        "org_role_exists",
+        "MONACA_ORG_ROLE_EXISTS",
+        "Organization role exists",
+        409,
+    );
     /// An organization email domain is already registered in this tenant.
     pub const DOMAIN_EXISTS: ProblemKind = ProblemKind::new(
         "domain_exists",
@@ -286,6 +293,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "api resource" => kinds::RESOURCE_EXISTS,
                     "organization" => kinds::ORG_EXISTS,
                     "email domain" => kinds::DOMAIN_EXISTS,
+                    "org role" => kinds::ORG_ROLE_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))

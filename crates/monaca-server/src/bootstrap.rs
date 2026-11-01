@@ -145,6 +145,15 @@ pub async fn migrate(store: &Store) -> anyhow::Result<()> {
             skipped = report.skipped,
             "tenant migrations"
         );
+        for (slug, org_report) in store.migrate_orgs(&tenant).await? {
+            tracing::info!(
+                tenant = %tenant.slug,
+                org = %slug,
+                applied = ?org_report.applied,
+                skipped = org_report.skipped,
+                "org migrations"
+            );
+        }
     }
     Ok(())
 }

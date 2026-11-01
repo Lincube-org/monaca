@@ -383,6 +383,9 @@ pub struct IdTokenClaims {
     pub at_hash: Option<String>,
     /// `roles`, the RBAC role names granted to this account; omitted when it holds none (§7.3).
     pub roles: Vec<String>,
+    /// `org_roles`, the organization role names this account holds in the token's org; omitted when
+    /// it holds none (§7.3).
+    pub org_roles: Vec<String>,
 }
 
 impl IdTokenClaims {
@@ -414,6 +417,9 @@ impl IdTokenClaims {
         }
         if !self.roles.is_empty() {
             value["roles"] = json!(self.roles);
+        }
+        if !self.org_roles.is_empty() {
+            value["org_roles"] = json!(self.org_roles);
         }
         value
     }
@@ -633,11 +639,13 @@ mod tests {
             auth_time: Some(90),
             at_hash: Some(at_hash("access-token")),
             roles: vec!["admin".into()],
+            org_roles: vec!["support".into()],
         };
         let value = claims.to_json();
         assert_eq!(value["auth_time"], json!(90));
         assert_eq!(value["at_hash"], json!(at_hash("access-token")));
         assert_eq!(value["roles"], json!(["admin"]));
+        assert_eq!(value["org_roles"], json!(["support"]));
     }
 
     #[test]
@@ -656,8 +664,10 @@ mod tests {
             auth_time: None,
             at_hash: None,
             roles: Vec::new(),
+            org_roles: Vec::new(),
         };
         assert!(claims.to_json().get("roles").is_none());
+        assert!(claims.to_json().get("org_roles").is_none());
     }
 
     #[test]

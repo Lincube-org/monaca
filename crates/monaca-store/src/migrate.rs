@@ -121,12 +121,20 @@ const TENANT: &[(i64, &str, &str)] = &[
     ),
 ];
 
-/// The org template (§5.7). Applied to a fresh `org_<oshort>` schema.
-const ORG: &[(i64, &str, &str)] = &[(
-    1,
-    "org schema (§5.7)",
-    include_str!("../migrations/org.sql"),
-)];
+/// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every
+/// existing one by `monaca-server migrate`, so an org created before a migration existed catches up.
+const ORG: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "org schema (§5.7)",
+        include_str!("../migrations/org.sql"),
+    ),
+    (
+        2,
+        "organization roles and member role assignments (M1)",
+        include_str!("../migrations/org_2.sql"),
+    ),
+];
 
 /// Apply the control-plane set.
 pub async fn apply_control(pool: &PgPool) -> Result<MigrationReport, StoreError> {
@@ -184,7 +192,7 @@ pub async fn apply_org(
     schema: &str,
     _tenant_short: &str,
     _org_short: &str,
-) -> Result<(), StoreError> {
+) -> Result<MigrationReport, StoreError> {
     sqlx::query(q(format!(
         "SET LOCAL search_path = {}",
         crate::quote_ident(schema)
@@ -196,11 +204,16 @@ pub async fn apply_org(
     // The control-plane `migration_rollup` lives in the control database, not here; the org's own
     // `_migrations` ledger is the authority for this schema. `monaca-server migrate` aggregates the
     // rollup from the control side.
+    let mut report = MigrationReport::default();
     for (version, description, sql) in ORG {
-        apply_one(tx, *version, description, sql).await?;
+        if apply_one(tx, *version, description, sql).await? {
+            report.applied.push(*version);
+        } else {
+            report.skipped += 1;
+        }
     }
 
-    Ok(())
+    Ok(report)
 }
 
 /// The per-target ledger. `_migrations` is unqualified because the search_path is set by the

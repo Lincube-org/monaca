@@ -286,6 +286,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "token with the org), while an account from another domain is 403 MONACA_INSUFFICIENT_SCOPE; " +
       "DELETE is 204, the list is empty, and deleting it again is 404",
   },
+  {
+    step: "29",
+    title: "org roles",
+    assertion:
+      "POST /v1/orgs/{org}/roles defines a scoped role (201; a duplicate name is 409 " +
+      "MONACA_ORG_ROLE_EXISTS, an invalid scope is 400) and GET lists it; PATCH replaces its scopes " +
+      "and DELETE removes it; assigning it to a member is 204 and GET …/members/{account}/roles " +
+      "lists it; a member asking for a scope only its org role grants signs in (200 → code → token), " +
+      "the id_token carries org_roles and the access token carries the scope; before the assignment " +
+      "the same request is 403 MONACA_INSUFFICIENT_SCOPE; unassigning is 204 and repeating it is 404",
+  },
 ];
 
 interface StepResult {
@@ -5742,6 +5753,278 @@ async function orgDomainFlow(base: string, adminToken: string): Promise<StepResu
   };
 }
 
+/**
+ * Step 29 — organization roles (§5.7, §6.2).
+ *
+ * An org role is a named scope set defined inside the org. Assigning one to a member lets that
+ * member's sign-in request the role's scopes for that org only; the id_token lists the role and
+ * the access token carries the scope. The membership rank is separate and grants nothing.
+ */
+async function orgRoleFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `roles-${runId}`;
+  const roleName = `support-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const clientId = `e2e-roles-${runId}`;
+  const email = `roles-${runId}@demo.localhost`;
+  const password = `pw-${runId}-roles`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "29",
+    title: "org roles",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** An authorize URL asking for `openid tools:read`, with a PKCE challenge. */
+  const authorize = async (tag: string): Promise<{ url: string; verifier: string }> => {
+    const verifier = `r-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid tools:read",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: slug,
+    })}`;
+    return { url, verifier };
+  };
+
+  try {
+    // --- the org, its member and an app that may ask for tools:read ------------------------------
+    const created = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug }),
+    });
+    const orgId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof orgId !== "string") {
+      return fail(`POST /v1/orgs → ${created.status} ${text(created.body)}`);
+    }
+
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Org role holder", password }),
+    });
+    const accountId = (account.body as { id?: unknown })?.id;
+    if (account.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const added = await call(`${base}/v1/orgs/${slug}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    if (added.status !== 201) {
+      return fail(`add member → ${added.status} ${text(added.body)}`);
+    }
+
+    const client = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Org Roles App",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid", "tools:read"],
+      }),
+    });
+    if (client.status !== 201) {
+      return fail(`POST /v1/clients → ${client.status} ${text(client.body)}`);
+    }
+
+    // --- the membership alone grants nothing: the same request is refused ------------------------
+    const denied = await authorize("denied");
+    const deniedStart = await call(denied.url, { redirect: "manual" });
+    const deniedInteraction = new URL(deniedStart.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (deniedStart.status !== 302 || deniedInteraction === null) {
+      return fail(`authorize(denied) → ${deniedStart.status} ${text(deniedStart.body)}`);
+    }
+    const deniedSignIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(deniedInteraction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      },
+    );
+    checks.push([
+      "a member without a role is refused tools:read",
+      deniedSignIn.status === 403 &&
+        (deniedSignIn.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_INSUFFICIENT_SCOPE",
+    ]);
+
+    // --- the role catalog ------------------------------------------------------------------------
+    const role = await call(`${base}/v1/orgs/${slug}/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, description: "", scopes: ["tools:read"] }),
+    });
+    const roleId = (role.body as { id?: unknown })?.id;
+    checks.push([
+      "POST /v1/orgs/{org}/roles defines the role",
+      role.status === 201 &&
+        typeof roleId === "string" &&
+        roleId.startsWith("rol_") &&
+        (role.body as { name?: unknown })?.name === roleName,
+    ]);
+    if (typeof roleId !== "string") return fail("the role carried no id");
+
+    const duplicate = await call(`${base}/v1/orgs/${slug}/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, scopes: ["tools:read"] }),
+    });
+    checks.push([
+      "a duplicate role name is 409 MONACA_ORG_ROLE_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_ORG_ROLE_EXISTS",
+    ]);
+
+    const badScope = await call(`${base}/v1/orgs/${slug}/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: `bad-${runId}`, scopes: ["Tools Read"] }),
+    });
+    checks.push(["an invalid scope is 400", badScope.status === 400]);
+
+    const listed = await call(`${base}/v1/orgs/${slug}/roles`, { headers });
+    checks.push([
+      "GET lists the role with its scopes",
+      listed.status === 200 && JSON.stringify(listed.body).includes(roleName),
+    ]);
+
+    const patched = await call(`${base}/v1/orgs/${slug}/roles/${roleId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ description: "Read-only support" }),
+    });
+    checks.push([
+      "PATCH updates the description",
+      patched.status === 200 &&
+        (patched.body as { description?: unknown })?.description === "Read-only support",
+    ]);
+
+    // --- assignment ------------------------------------------------------------------------------
+    const assigned = await call(`${base}/v1/orgs/${slug}/members/${accountId}/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ role_id: roleId }),
+    });
+    checks.push(["assigning the role is 204", assigned.status === 204]);
+
+    const memberRoles = await call(`${base}/v1/orgs/${slug}/members/${accountId}/roles`, { headers });
+    checks.push([
+      "GET member roles lists it",
+      memberRoles.status === 200 && JSON.stringify(memberRoles.body).includes(roleName),
+    ]);
+
+    // --- the assigned role now grants the scope for this org --------------------------------------
+    const allowed = await authorize("allowed");
+    const started = await call(allowed.url, { redirect: "manual" });
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (started.status !== 302 || interaction === null) {
+      return fail(`authorize(allowed) → ${started.status} ${text(started.body)}`);
+    }
+    const signIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      },
+    );
+    const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+    if (signIn.status !== 200 || typeof redirectTo !== "string") {
+      return fail(`sign-in (role) → ${signIn.status} ${text(signIn.body)}`);
+    }
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: allowed.verifier,
+    });
+    const accessClaims = jwtClaims((token.body as { access_token?: unknown })?.access_token);
+    checks.push([
+      "the access token carries the scope the org role granted",
+      token.status === 200 &&
+        accessClaims !== undefined &&
+        accessClaims.org === orgId &&
+        Array.isArray(accessClaims.scope) &&
+        (accessClaims.scope as string[]).includes("tools:read"),
+    ]);
+    const idClaims = jwtClaims((token.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "the id_token carries org_roles",
+      idClaims !== undefined &&
+        Array.isArray(idClaims.org_roles) &&
+        (idClaims.org_roles as string[]).includes(roleName),
+    ]);
+
+    // --- unassign and delete ---------------------------------------------------------------------
+    const unassigned = await call(`${base}/v1/orgs/${slug}/members/${accountId}/roles/${roleId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["unassigning the role is 204", unassigned.status === 204]);
+
+    const afterUnassign = await call(`${base}/v1/orgs/${slug}/members/${accountId}/roles`, { headers });
+    checks.push([
+      "the member role list is empty",
+      afterUnassign.status === 200 && !JSON.stringify(afterUnassign.body).includes(roleName),
+    ]);
+
+    const unassignAgain = await call(`${base}/v1/orgs/${slug}/members/${accountId}/roles/${roleId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["unassigning it again is 404", unassignAgain.status === 404]);
+
+    const removed = await call(`${base}/v1/orgs/${slug}/roles/${roleId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["DELETE the role is 204", removed.status === 204]);
+
+    const rolesAfter = await call(`${base}/v1/orgs/${slug}/roles`, { headers });
+    checks.push([
+      "the role list no longer has it",
+      rolesAfter.status === 200 && !JSON.stringify(rolesAfter.body).includes(roleName),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "29",
+    title: "org roles",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: define → duplicate 409 → invalid scope 400 → list → patch → assign → member roles → denied 403 → sign-in → scope → org_roles → unassign → 404 → delete`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -5999,6 +6282,7 @@ async function main(): Promise<number> {
   push(await organizationFlow(base, adminToken));
   push(await orgMemberFlow(base, adminToken));
   push(await orgDomainFlow(base, adminToken));
+  push(await orgRoleFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

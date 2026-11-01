@@ -299,6 +299,22 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             delete(crate::orgs::remove_email_domain),
         )
         .route(
+            "/v1/orgs/{org}/roles",
+            get(crate::org_roles::list_org_roles).post(crate::org_roles::create_org_role),
+        )
+        .route(
+            "/v1/orgs/{org}/roles/{role}",
+            patch(crate::org_roles::update_org_role).delete(crate::org_roles::delete_org_role),
+        )
+        .route(
+            "/v1/orgs/{org}/members/{account}/roles",
+            get(crate::org_roles::list_member_roles).post(crate::org_roles::assign_member_role),
+        )
+        .route(
+            "/v1/orgs/{org}/members/{account}/roles/{role}",
+            delete(crate::org_roles::unassign_member_role),
+        )
+        .route(
             "/v1/orgs/{org}/agents",
             get(crate::management::list_agents).post(crate::management::create_agent),
         )
