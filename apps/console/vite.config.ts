@@ -7,8 +7,11 @@ import { defineConfig, loadEnv } from "vite";
  * Contract: docs/contracts/m0.md §2.1. The console is never the public origin — every protocol
  * call goes through the gateway (8080) so the browser only ever sees one origin, and the BFF
  * cookies stay first-party. /internal/ is deliberately absent: it is never proxied (§9).
+ *
+ * `/t/` keeps its trailing slash on purpose: Vite matches these as plain string prefixes, so a
+ * bare `/t` would also swallow console routes such as `/tenant-roles`.
  */
-const PROXIED_PREFIXES = ["/bff", "/oauth2", "/t", "/.well-known", "/v1", "/interaction", "/mcp"];
+const PROXIED_PREFIXES = ["/bff", "/oauth2", "/t/", "/.well-known", "/v1", "/interaction", "/mcp"];
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");

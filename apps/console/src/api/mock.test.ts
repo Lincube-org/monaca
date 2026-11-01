@@ -994,7 +994,7 @@ describe("users", () => {
     return `${prefix}-${Math.random().toString(36).slice(2, 8)}@example.com`;
   }
 
-  it("lists the tenant directory newest first with typed ids and an empty tenant-role set", async () => {
+  it("lists the tenant directory newest first with typed ids and its seeded tenant roles", async () => {
     const page = await mockApi.listAccounts();
     expect(page.next).toBe(null);
     expect(page.items.length).toBeGreaterThanOrEqual(5);
@@ -1006,6 +1006,12 @@ describe("users", () => {
       expect(account.id).toMatch(/^acc_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
       expect(Array.isArray(account.roles)).toBe(true);
     }
+
+    const admin = page.items.find((account) => account.email === "admin@demo.localhost");
+    expect(admin?.roles.map((role) => role.name)).toEqual(["contributor"]);
+    const intern = page.items.find((account) => account.email === "intern@demo.localhost");
+    expect(intern?.roles.map((role) => role.name)).toEqual(["viewer"]);
+
     expect(page.items.some((account) => account.state === "disabled")).toBe(true);
   });
 
@@ -1178,5 +1184,136 @@ describe("organization email domains", () => {
     expect((await mockApi.listOrgEmailDomains(ORG)).items.map((entry) => entry.domain)).toEqual([
       "demo.localhost",
     ]);
+  });
+});
+
+describe("tenant roles", () => {
+  async function freshRoleName(): Promise<string> {
+    return `role-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  async function accountByEmail(email: string) {
+    const page = await mockApi.listAccounts();
+    const account = page.items.find((candidate) => candidate.email === email);
+    if (!account) throw new Error(`test account ${email} is missing`);
+    return account;
+  }
+
+  it("lists the seeded roles by name with typed ids and their permissions", async () => {
+    const page = await mockApi.listTenantRoles();
+    expect(page.next).toBe(null);
+    const names = page.items.map((role) => role.name);
+    expect(names).toEqual([...names].sort((left, right) => left.localeCompare(right)));
+    expect(names).toContain("contributor");
+    expect(names).toContain("viewer");
+
+    for (const role of page.items) {
+      expect(role.id).toMatch(/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+      expect(Array.isArray(role.permissions)).toBe(true);
+    }
+  });
+
+  it("creates a role, drops duplicate permissions, and appends role.created", async () => {
+    const name = await freshRoleName();
+    const created = await mockApi.createTenantRole({
+      name: `  ${name}  `,
+      description: "  A test role.  ",
+      permissions: ["tools:read", "tools:read", "tools:write"],
+    });
+    expect(created.name).toBe(name);
+    expect(created.description).toBe("A test role.");
+    expect(created.permissions).toEqual(["tools:read", "tools:write"]);
+
+    const listed = await mockApi.listTenantRoles();
+    expect(listed.items.some((role) => role.id === created.id)).toBe(true);
+
+    const audit = await mockApi.listAudit(ORG, { action: "role.created", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ name });
+    expect(audit.items[0]?.subject.type).toBe("tenant");
+
+    await mockApi.deleteTenantRole(created.id);
+  });
+
+  it("refuses a duplicate name, an empty name, and an invalid permission", async () => {
+    const duplicate = await mockApi
+      .createTenantRole({ name: "viewer", description: "", permissions: [] })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).status).toBe(409);
+    expect((duplicate as ApiError).code).toBe("MONACA_ROLE_EXISTS");
+
+    const empty = await mockApi
+      .createTenantRole({ name: "   ", description: "", permissions: [] })
+      .catch((error: unknown) => error);
+    expect((empty as ApiError).status).toBe(400);
+
+    const badPermission = await mockApi
+      .createTenantRole({
+        name: await freshRoleName(),
+        description: "",
+        permissions: ["two words"],
+      })
+      .catch((error: unknown) => error);
+    expect((badPermission as ApiError).status).toBe(400);
+  });
+
+  it("assigns a role idempotently, reflects it on the directory row, and unassigns it", async () => {
+    const account = await accountByEmail("sam.oduya@demo.localhost");
+    const role = (await mockApi.listTenantRoles()).items.find((candidate) => candidate.name === "contributor");
+    if (!role) throw new Error("the seeded contributor role is missing");
+
+    await mockApi.assignAccountRole(account.id, role.id);
+    await mockApi.assignAccountRole(account.id, role.id);
+    const holder = await accountByEmail(account.email);
+    expect(holder.roles.map((held) => held.name)).toEqual(["contributor"]);
+
+    // An assignment is what the account row carries, so it is also what the UI reads.
+    expect(holder.roles).toEqual([{ id: role.id, name: role.name }]);
+
+    await mockApi.unassignAccountRole(account.id, role.id);
+    const freed = await accountByEmail(account.email);
+    expect(freed.roles).toEqual([]);
+  });
+
+  it("refuses an unknown account or role, and a missing assignment is a 404", async () => {
+    const viewer = (await mockApi.listTenantRoles()).items.find((role) => role.name === "viewer")!;
+    const account = await accountByEmail("priya.raman@demo.localhost");
+
+    const unknownAccount = await mockApi
+      .assignAccountRole(newId("acc"), viewer.id)
+      .catch((error: unknown) => error);
+    expect((unknownAccount as ApiError).status).toBe(404);
+
+    const unknownRole = await mockApi
+      .assignAccountRole(account.id, newId("rol"))
+      .catch((error: unknown) => error);
+    expect((unknownRole as ApiError).status).toBe(404);
+
+    const missing = await mockApi
+      .unassignAccountRole(account.id, viewer.id)
+      .catch((error: unknown) => error);
+    expect((missing as ApiError).status).toBe(404);
+  });
+
+  it("deleting a role removes every assignment and records role.deleted", async () => {
+    const name = await freshRoleName();
+    const role = await mockApi.createTenantRole({
+      name,
+      description: "",
+      permissions: ["tools:read"],
+    });
+    const account = await accountByEmail("priya.raman@demo.localhost");
+    await mockApi.assignAccountRole(account.id, role.id);
+
+    await mockApi.deleteTenantRole(role.id);
+    const freed = await accountByEmail(account.email);
+    expect(freed.roles.some((held) => held.id === role.id)).toBe(false);
+
+    const second = await mockApi.deleteTenantRole(role.id).catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "role.deleted", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ name });
   });
 });

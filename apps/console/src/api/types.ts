@@ -31,6 +31,20 @@ export interface AccountRole {
 }
 
 /**
+ * A tenant role (§6.2) — a named permission set an account holds in every organization.
+ *
+ * Distinct from an organization role: this one is tenant-wide, its name is what the id_token's
+ * `roles` claim carries, and it is immutable after creation (create, list and delete only).
+ */
+export interface TenantRole {
+  id: string;
+  name: string;
+  description: string;
+  permissions: string[];
+  created_at: string;
+}
+
+/**
  * An account as `/v1/accounts` returns it: the identity plus the tenant roles it holds.
  *
  * Org membership and org roles are separate — this list is the tenant-wide directory, not one
@@ -243,6 +257,13 @@ export interface AddMemberRequest {
 /** A DNS name; the server lowercases it and rejects malformed values with a 400. */
 export interface AddOrgEmailDomainRequest {
   domain: string;
+}
+
+/** `permissions` is the wire name for the role's scope set; duplicates are dropped. */
+export interface CreateTenantRoleRequest {
+  name: string;
+  description: string;
+  permissions: string[];
 }
 
 export interface CreateOrganizationRequest {

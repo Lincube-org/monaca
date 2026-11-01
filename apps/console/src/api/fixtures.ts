@@ -16,6 +16,7 @@ import type {
   OrgRole,
   OrgRoleDetail,
   SignInExperience,
+  TenantRole,
 } from "./types";
 
 /**
@@ -137,6 +138,40 @@ export interface SeededEmailDomain {
  */
 export function seedEmailDomains(): SeededEmailDomain[] {
   return [{ org: DEFAULT_ORG, domain: "demo.localhost", created_at: at(895 * 60) }];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tenant roles
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Roles that apply in every organization, as opposed to the org roles below.
+ *
+ * Two shapes an administrator distinguishes: a read-only role for people (and agents) who inspect
+ * work, and one that may also change it. The names are what the id_token's `roles` claim carries.
+ */
+export function seedTenantRoles(): TenantRole[] {
+  return [
+    {
+      id: newId("rol", BASE - 340 * HOUR_MS),
+      name: "viewer",
+      description: "Read-only access to the tenant's tools.",
+      permissions: ["tools:read"],
+      created_at: at(340 * 60),
+    },
+    {
+      id: newId("rol", BASE - 280 * HOUR_MS),
+      name: "contributor",
+      description: "Read and write access to the tenant's tools.",
+      permissions: ["tools:read", "tools:write"],
+      created_at: at(280 * 60),
+    },
+  ];
+}
+
+/** Which seeded account holds which seeded tenant role, by account index. */
+export function seedAccountRoleIndexes(): Record<number, number[]> {
+  return { 0: [1], 1: [0], 4: [0] };
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import {
   buildAuditLog,
   buildGrants,
   seedAccounts,
+  seedAccountRoleIndexes,
   seedClients,
   seedConnectors,
   seedEmailDomains,
@@ -18,11 +19,13 @@ import {
   seedOrgRoles,
   seedResources,
   seedSignInExperience,
+  seedTenantRoles,
   verifyLog,
   type AuditLog,
   type SeededEmailDomain,
 } from "./fixtures";
 import type {
+  AccountRole,
   AccountWithRoles,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
@@ -42,6 +45,7 @@ import type {
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
+  CreateTenantRoleRequest,
   CreatedClient,
   Grant,
   ListAccountsQuery,
@@ -54,6 +58,7 @@ import type {
   RegisterAgentKeyRequest,
   SessionInfo,
   SignInExperience,
+  TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
@@ -97,6 +102,9 @@ class MockStore {
   private experience: SignInExperience = seedSignInExperience();
   private members: Member[] = seedMembers(this.accounts);
   private emailDomains: SeededEmailDomain[] = seedEmailDomains();
+  private tenantRoles: TenantRole[] = seedTenantRoles();
+  /** account id → the tenant role ids it holds. A role may be held by many accounts. */
+  private accountRoles = new Map<string, Set<string>>();
   private orgRoles: OrgRoleDetail[] = seedOrgRoles();
   /** account id → role ids held in this org. A role may be held by many members. */
   private memberRoles = new Map<string, Set<string>>();
@@ -116,6 +124,7 @@ class MockStore {
       this.log = log;
     });
     this.seedMemberRoles();
+    this.seedAccountRoles();
   }
 
   private seedMemberRoles(): void {
@@ -128,6 +137,28 @@ class MockStore {
         .filter((id): id is string => id !== undefined);
       if (ids.length > 0) this.memberRoles.set(account.id, new Set(ids));
     }
+  }
+
+  private seedAccountRoles(): void {
+    const indexes = seedAccountRoleIndexes();
+    for (const [accountIndex, roleIndexes] of Object.entries(indexes)) {
+      const account = this.accounts[Number(accountIndex)];
+      if (!account) continue;
+      const ids = roleIndexes
+        .map((index) => this.tenantRoles[index]?.id)
+        .filter((id): id is string => id !== undefined);
+      if (ids.length > 0) this.accountRoles.set(account.id, new Set(ids));
+    }
+  }
+
+  /** The tenant roles an account holds, by name — the shape `AccountWithRoles.roles` carries. */
+  private rolesFor(accountId: string): AccountRole[] {
+    const ids = this.accountRoles.get(accountId);
+    if (!ids) return [];
+    return this.tenantRoles
+      .filter((role) => ids.has(role.id))
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((role) => ({ id: role.id, name: role.name }));
   }
 
   private async audit(): Promise<AuditLog> {
@@ -534,7 +565,7 @@ class MockStore {
           account.display_name.toLowerCase().includes(needle),
       )
       .slice(0, limit)
-      .map((account) => ({ ...account, roles: [] }));
+      .map((account) => ({ ...account, roles: this.rolesFor(account.id) }));
     return { items, next: null };
   }
 
@@ -571,9 +602,7 @@ class MockStore {
   }
 
   async updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles> {
-    if (!/^acc_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(accountId)) {
-      throw new ApiError("not an account id", { status: 400, code: "MONACA_INVALID_REQUEST" });
-    }
+    parseAccountId(accountId);
     if (body.state !== "active" && body.state !== "disabled") {
       throw new ApiError("state must be `active` or `disabled`", {
         status: 400,
@@ -585,7 +614,7 @@ class MockStore {
     if (!account) {
       throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
     }
-    if (account.state === body.state) return { ...account, roles: [] };
+    if (account.state === body.state) return { ...account, roles: this.rolesFor(account.id) };
 
     const updated = { ...account, state: body.state };
     this.accounts = [...this.accounts.slice(0, index), updated, ...this.accounts.slice(index + 1)];
@@ -598,7 +627,107 @@ class MockStore {
       decision: "info",
       payload: { email: account.email },
     });
-    return { ...updated, roles: [] };
+    return { ...updated, roles: this.rolesFor(account.id) };
+  }
+
+  listTenantRoles(): Page<TenantRole> {
+    // Ordered by name, as `tenant.roles` is, so a new role lands where a reader looks for it.
+    const items = [...this.tenantRoles]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map(cloneTenantRole);
+    return { items, next: null };
+  }
+
+  async createTenantRole(body: CreateTenantRoleRequest): Promise<TenantRole> {
+    const name = body.name.trim();
+    if (name.length === 0 || name.length > 80) {
+      throw new ApiError("name must be 1-80 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const permissions = normaliseScopes(body.permissions);
+    if (this.tenantRoles.some((role) => role.name === name)) {
+      throw new ApiError("role is already taken", {
+        status: 409,
+        code: "MONACA_ROLE_EXISTS",
+      });
+    }
+
+    const role: TenantRole = {
+      id: newId("rol"),
+      name,
+      description: body.description.trim(),
+      permissions,
+      created_at: new Date().toISOString(),
+    };
+    this.tenantRoles = [...this.tenantRoles, role];
+
+    await this.append({
+      action: "role.created",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { name: role.name },
+    });
+    return cloneTenantRole(role);
+  }
+
+  async deleteTenantRole(roleId: string): Promise<void> {
+    parseRoleId(roleId);
+    const index = this.tenantRoles.findIndex((role) => role.id === roleId);
+    const role = this.tenantRoles[index];
+    if (!role) {
+      throw new ApiError("role not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    this.tenantRoles = [
+      ...this.tenantRoles.slice(0, index),
+      ...this.tenantRoles.slice(index + 1),
+    ];
+    // Deleting the role drops every assignment of it, exactly as the server's cascade does.
+    for (const [accountId, ids] of this.accountRoles) {
+      if (ids.delete(roleId) && ids.size === 0) this.accountRoles.delete(accountId);
+    }
+
+    await this.append({
+      action: "role.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { name: role.name },
+    });
+  }
+
+  async assignAccountRole(accountId: string, roleId: string): Promise<void> {
+    parseAccountId(accountId);
+    parseRoleId(roleId);
+    if (!this.accounts.some((account) => account.id === accountId)) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    if (!this.tenantRoles.some((role) => role.id === roleId)) {
+      throw new ApiError("role not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    // Repeating an assignment is a success, not a second row.
+    const ids = this.accountRoles.get(accountId) ?? new Set<string>();
+    ids.add(roleId);
+    this.accountRoles.set(accountId, ids);
+  }
+
+  async unassignAccountRole(accountId: string, roleId: string): Promise<void> {
+    parseAccountId(accountId);
+    parseRoleId(roleId);
+    const ids = this.accountRoles.get(accountId);
+    if (!ids?.delete(roleId)) {
+      throw new ApiError("role assignment not found", {
+        status: 404,
+        code: "MONACA_NOT_FOUND",
+      });
+    }
+    if (ids.size === 0) this.accountRoles.delete(accountId);
   }
 
   listConnectors(): Page<Connector> {
@@ -1296,6 +1425,10 @@ function cloneRole(role: OrgRoleDetail): OrgRoleDetail {
   return { ...role, scopes: [...role.scopes] };
 }
 
+function cloneTenantRole(role: TenantRole): TenantRole {
+  return { ...role, permissions: [...role.permissions] };
+}
+
 function cloneResource(resource: ApiResource): ApiResource {
   return { ...resource, scopes: [...resource.scopes] };
 }
@@ -1308,6 +1441,13 @@ function cloneConnector(connector: Connector): Connector {
 function parseRoleId(roleId: string): void {
   if (!/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(roleId)) {
     throw new ApiError("not a role id", { status: 400, code: "MONACA_INVALID_REQUEST" });
+  }
+}
+
+/** The server's `AccountId::parse`: a typed `acc_…` id, nothing else. */
+function parseAccountId(accountId: string): void {
+  if (!/^acc_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(accountId)) {
+    throw new ApiError("not an account id", { status: 400, code: "MONACA_INVALID_REQUEST" });
   }
 }
 
@@ -1461,6 +1601,26 @@ export const mockApi: MonacaApi = {
   async updateAccount(accountId, body) {
     await delay();
     return store.updateAccount(accountId, body);
+  },
+  async listTenantRoles() {
+    await delay();
+    return store.listTenantRoles();
+  },
+  async createTenantRole(body) {
+    await delay();
+    return store.createTenantRole(body);
+  },
+  async deleteTenantRole(roleId) {
+    await delay();
+    return store.deleteTenantRole(roleId);
+  },
+  async assignAccountRole(accountId, roleId) {
+    await delay();
+    return store.assignAccountRole(accountId, roleId);
+  },
+  async unassignAccountRole(accountId, roleId) {
+    await delay();
+    return store.unassignAccountRole(accountId, roleId);
   },
   async listConnectors() {
     await delay();

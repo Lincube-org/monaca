@@ -23,6 +23,7 @@ import type {
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
+  CreateTenantRoleRequest,
   CreatedClient,
   Grant,
   ListAuditQuery,
@@ -34,6 +35,7 @@ import type {
   RegisterAgentKeyRequest,
   SessionInfo,
   SignInExperience,
+  TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
@@ -274,6 +276,64 @@ export function useUpdateAccount() {
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
       invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useTenantRoles(): UseQueryReturnType<Page<TenantRole>, Error> {
+  return useQuery({
+    queryKey: queryKeys.tenantRoles(),
+    queryFn: () => api.listTenantRoles(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateTenantRole() {
+  const client = useQueryClient();
+  return useMutation<TenantRole, Error, CreateTenantRoleRequest>({
+    mutationFn: (body) => api.createTenantRole(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.tenantRoles() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+/**
+ * Deleting a role also drops every assignment of it, so the account directory is stale as well.
+ */
+export function useDeleteTenantRole() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { roleId: string }>({
+    mutationFn: ({ roleId }) => api.deleteTenantRole(roleId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.tenantRoles() });
+      void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+/**
+ * Assignments have no endpoint of their own to list: the account row carries them. Every write
+ * therefore refreshes the directory, which is where the users page reads a holder list from.
+ */
+export function useAssignAccountRole() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string; roleId: string }>({
+    mutationFn: ({ accountId, roleId }) => api.assignAccountRole(accountId, roleId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+    },
+  });
+}
+
+export function useUnassignAccountRole() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string; roleId: string }>({
+    mutationFn: ({ accountId, roleId }) => api.unassignAccountRole(accountId, roleId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
     },
   });
 }

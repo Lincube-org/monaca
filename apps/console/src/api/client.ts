@@ -19,6 +19,7 @@ import type {
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
+  CreateTenantRoleRequest,
   CreatedClient,
   Grant,
   ListAccountsQuery,
@@ -32,6 +33,7 @@ import type {
   RegisterAgentKeyRequest,
   SessionInfo,
   SignInExperience,
+  TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
@@ -181,6 +183,32 @@ export const httpApi: MonacaApi = {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+  },
+
+  listTenantRoles(): Promise<Page<TenantRole>> {
+    return request<Page<TenantRole>>("/roles");
+  },
+
+  createTenantRole(body: CreateTenantRoleRequest): Promise<TenantRole> {
+    return request<TenantRole>("/roles", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  deleteTenantRole(roleId: string): Promise<void> {
+    return request<void>(`/roles/${encodeURIComponent(roleId)}`, { method: "DELETE" });
+  },
+
+  assignAccountRole(accountId: string, roleId: string): Promise<void> {
+    return request<void>(
+      `/accounts/${encodeURIComponent(accountId)}/roles/${encodeURIComponent(roleId)}`,
+      { method: "POST" },
+    );
+  },
+
+  unassignAccountRole(accountId: string, roleId: string): Promise<void> {
+    return request<void>(
+      `/accounts/${encodeURIComponent(accountId)}/roles/${encodeURIComponent(roleId)}`,
+      { method: "DELETE" },
+    );
   },
 
   listConnectors(): Promise<Page<Connector>> {

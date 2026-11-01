@@ -10,6 +10,8 @@ import {
   DialogTitle,
   Input,
   Label,
+  NativeSelect,
+  ScopeBadge,
   Table,
   TableBody,
   TableCell,
@@ -20,13 +22,21 @@ import {
 } from "@monaca/ui";
 import { Plus, RefreshCw, Search } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
+import { RouterLink } from "vue-router";
 
 import { describeError } from "@/api/contract";
-import type { AccountWithRoles } from "@/api/types";
+import type { AccountRole, AccountWithRoles } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
-import { useAccounts, useCreateAccount, useUpdateAccount } from "@/queries";
+import {
+  useAccounts,
+  useAssignAccountRole,
+  useCreateAccount,
+  useTenantRoles,
+  useUnassignAccountRole,
+  useUpdateAccount,
+} from "@/queries";
 import { useUiStore } from "@/stores/ui";
 
 /**
@@ -154,6 +164,98 @@ function formatDate(at: string): string {
   const parsed = new Date(at);
   return Number.isNaN(parsed.getTime()) ? at : parsed.toISOString().slice(0, 10);
 }
+
+/**
+ * Tenant roles, per account.
+ *
+ * There is no "list the holders of a role" endpoint: the directory row carries the roles an account
+ * holds, so the dialog is opened from the account side and the available select is the role list
+ * minus what is already held. That makes a repeated assignment impossible to start from the UI, and
+ * the server treats one that arrives anyway as a no-op.
+ */
+const allRoles = useTenantRoles();
+const assignAccountRole = useAssignAccountRole();
+const unassignAccountRole = useUnassignAccountRole();
+
+const rolesOpen = ref(false);
+const rolesTarget = ref<AccountWithRoles | null>(null);
+const selectedRoleId = ref("");
+const rolesError = ref<string | null>(null);
+
+/**
+ * The account as the directory now reports it.
+ *
+ * `rolesTarget` is a snapshot taken when the dialog opened; after an assignment the query refetches
+ * and this follows it, so the list in the open dialog is what the server will answer next.
+ */
+const currentRoles = computed(() => {
+  const target = rolesTarget.value;
+  if (!target) return [];
+  return rows.value.find((account) => account.id === target.id)?.roles ?? target.roles;
+});
+
+const availableRoles = computed(() =>
+  (allRoles.data.value?.items ?? []).filter(
+    (role) => !currentRoles.value.some((held) => held.id === role.id),
+  ),
+);
+
+watch(
+  availableRoles,
+  (roles) => {
+    if (!roles.some((role) => role.id === selectedRoleId.value)) {
+      selectedRoleId.value = roles[0]?.id ?? "";
+    }
+  },
+  { immediate: true },
+);
+
+function rolePermissions(roleId: string): string[] {
+  return allRoles.data.value?.items.find((role) => role.id === roleId)?.permissions ?? [];
+}
+
+function openRoles(account: AccountWithRoles): void {
+  rolesTarget.value = account;
+  selectedRoleId.value = "";
+  rolesError.value = null;
+  rolesOpen.value = true;
+}
+
+async function assignSelected(): Promise<void> {
+  const account = rolesTarget.value;
+  if (!account || selectedRoleId.value.length === 0) return;
+  rolesError.value = null;
+  try {
+    await assignAccountRole.mutateAsync({ accountId: account.id, roleId: selectedRoleId.value });
+    const role = allRoles.data.value?.items.find((candidate) => candidate.id === selectedRoleId.value);
+    toast({
+      title: t("users.assigned"),
+      description: t("users.assignedDescription", {
+        role: role?.name ?? selectedRoleId.value,
+        email: account.email,
+      }),
+      variant: "success",
+    });
+  } catch (error) {
+    rolesError.value = describeError(error).title;
+  }
+}
+
+async function removeRole(role: AccountRole): Promise<void> {
+  const account = rolesTarget.value;
+  if (!account) return;
+  rolesError.value = null;
+  try {
+    await unassignAccountRole.mutateAsync({ accountId: account.id, roleId: role.id });
+    toast({
+      title: t("users.unassigned"),
+      description: t("users.unassignedDescription", { role: role.name, email: account.email }),
+      variant: "success",
+    });
+  } catch (error) {
+    rolesError.value = describeError(error).title;
+  }
+}
 </script>
 
 <template>
@@ -240,7 +342,10 @@ function formatDate(at: string): string {
               {{ formatDate(account.created_at) }}
             </TableCell>
             <TableCell>
-              <div class="flex justify-end">
+              <div class="flex justify-end gap-1.5">
+                <Button variant="secondary" size="xs" @click="openRoles(account)">
+                  {{ t('users.manageRoles') }}
+                </Button>
                 <Button
                   v-if="account.state === 'active'"
                   variant="secondary"
@@ -338,6 +443,76 @@ function formatDate(at: string): string {
           <Button variant="danger" type="button" :disabled="updateAccount.isPending.value" @click="confirmSuspend">
             {{ updateAccount.isPending.value ? t('common.saving') : t('users.suspend') }}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="rolesOpen">
+      <DialogContent class="max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('users.rolesTitle', { email: rolesTarget?.email ?? '' }) }}</DialogTitle>
+          <DialogDescription>{{ t('users.rolesDescription', { email: rolesTarget?.email ?? '' }) }}</DialogDescription>
+        </DialogHeader>
+
+        <div class="flex flex-col gap-2">
+          <p v-if="allRoles.isPending.value" class="text-[12.5px] text-ink-faint">
+            {{ t('users.rolesLoading') }}
+          </p>
+          <p v-else-if="allRoles.error.value" class="text-[12.5px] text-deny">
+            {{ describeError(allRoles.error.value).title }}
+          </p>
+          <p v-else-if="currentRoles.length === 0" class="text-[12.5px] text-ink-faint">
+            {{ t('users.rolesEmpty') }}
+          </p>
+          <div v-else class="divide-y divide-rule rounded-md border border-rule">
+            <div v-for="role in currentRoles" :key="role.id" class="flex items-center gap-2 px-2.5 py-2">
+              <div class="min-w-0 flex-1">
+                <span class="block text-[12.5px] font-medium text-ink">{{ role.name }}</span>
+                <span v-if="rolePermissions(role.id).length > 0" class="mt-0.5 flex flex-wrap gap-1">
+                  <ScopeBadge v-for="permission in rolePermissions(role.id)" :key="permission" :scope="permission" />
+                </span>
+              </div>
+              <Button
+                variant="secondary"
+                size="xs"
+                :disabled="unassignAccountRole.isPending.value"
+                @click="removeRole(role)"
+              >
+                {{ t('users.unassign') }}
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-2 border-t border-rule pt-3">
+          <div v-if="availableRoles.length > 0" class="flex items-end gap-2">
+            <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+              <Label for="account-role-assign">{{ t('users.assignRole') }}</Label>
+              <NativeSelect id="account-role-assign" v-model="selectedRoleId">
+                <option v-for="role in availableRoles" :key="role.id" :value="role.id">{{ role.name }}</option>
+              </NativeSelect>
+            </div>
+            <Button
+              variant="primary"
+              size="sm"
+              :disabled="assignAccountRole.isPending.value"
+              @click="assignSelected"
+            >
+              {{ assignAccountRole.isPending.value ? t('common.saving') : t('users.assign') }}
+            </Button>
+          </div>
+          <p v-else class="text-[11.5px] text-ink-faint">{{ t('users.allRolesAssigned') }}</p>
+          <p v-if="rolesError" class="text-[12.5px] text-deny">{{ rolesError }}</p>
+          <RouterLink
+            :to="{ name: 'tenant-roles' }"
+            class="text-[11.5px] text-brand-ink underline decoration-brand/40 underline-offset-4 hover:decoration-brand"
+          >
+            {{ t('users.manageDefinitions') }}
+          </RouterLink>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="rolesOpen = false">{{ t('common.close') }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -18,6 +18,7 @@ import type {
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
+  CreateTenantRoleRequest,
   CreatedClient,
   Grant,
   ListAccountsQuery,
@@ -31,6 +32,7 @@ import type {
   RegisterAgentKeyRequest,
   SessionInfo,
   SignInExperience,
+  TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
@@ -85,6 +87,17 @@ export interface MonacaApi {
   listAccounts(query?: ListAccountsQuery): Promise<Page<AccountWithRoles>>;
   createAccount(body: CreateAccountRequest): Promise<AccountWithRoles>;
   updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles>;
+
+  /**
+   * Tenant roles are what an account holds everywhere; organization roles are per-org and live
+   * under `/orgs/{org}/roles`. A role is immutable once created, and deleting it also drops every
+   * assignment.
+   */
+  listTenantRoles(): Promise<Page<TenantRole>>;
+  createTenantRole(body: CreateTenantRoleRequest): Promise<TenantRole>;
+  deleteTenantRole(roleId: string): Promise<void>;
+  assignAccountRole(accountId: string, roleId: string): Promise<void>;
+  unassignAccountRole(accountId: string, roleId: string): Promise<void>;
 
   /** Social sign-in providers, tenant-level; deleting one also drops every identity it linked. */
   listConnectors(): Promise<Page<Connector>>;
