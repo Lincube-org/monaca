@@ -7,6 +7,7 @@ import type {
   AccountSession,
   AccountSecurity,
   AccountWithRoles,
+  AccountDetail,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
   Agent,
@@ -317,12 +318,25 @@ export function useCreateAccount() {
 
 export function useUpdateAccount() {
   const client = useQueryClient();
-  return useMutation<AccountWithRoles, Error, { accountId: string; body: UpdateAccountRequest }>({
+  return useMutation<AccountDetail, Error, { accountId: string; body: UpdateAccountRequest }>({
     mutationFn: ({ accountId, body }) => api.updateAccount(accountId, body),
-    onSuccess: () => {
+    onSuccess: (_updated, { accountId }) => {
       void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+      void client.invalidateQueries({ queryKey: queryKeys.account(accountId) });
       invalidateTenantAudit(client);
     },
+  });
+}
+
+/** The detail read for an edit form; disabled until a row names an account. */
+export function useAccount(
+  accountId: MaybeRefOrGetter<string | null>,
+): UseQueryReturnType<AccountDetail, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.account(toValue(accountId) ?? "none")),
+    queryFn: () => api.getAccount(toValue(accountId) ?? ""),
+    enabled: computed(() => toValue(accountId) !== null),
+    staleTime: STALE.fast,
   });
 }
 

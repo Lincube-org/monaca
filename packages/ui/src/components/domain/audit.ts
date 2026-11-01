@@ -69,6 +69,7 @@ export interface AuditIntegrity {
  */
 export const M0_ACTIONS = [
   "account.created",
+  "account.updated",
   "org.created",
   "org.archived",
   "org.reactivated",
@@ -136,6 +137,7 @@ export function isKnownAction(action: string): boolean {
  */
 export const WEBHOOK_EVENTS = [
   "account.created",
+  "account.updated",
   "account.deleted",
   "account.suspended",
   "account.reactivated",

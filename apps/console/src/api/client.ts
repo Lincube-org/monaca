@@ -1,6 +1,7 @@
 import { ApiError, type MonacaApi } from "./contract";
 import type {
   AccountWithRoles,
+  AccountDetail,
   AccountSession,
   AccountSecurity,
   AddMemberRequest,
@@ -191,8 +192,12 @@ export const httpApi: MonacaApi = {
     return request<AccountWithRoles>("/accounts", { method: "POST", body: JSON.stringify(body) });
   },
 
-  updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles> {
-    return request<AccountWithRoles>(`/accounts/${encodeURIComponent(accountId)}`, {
+  getAccount(accountId: string): Promise<AccountDetail> {
+    return request<AccountDetail>(`/accounts/${encodeURIComponent(accountId)}`);
+  },
+
+  updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountDetail> {
+    return request<AccountDetail>(`/accounts/${encodeURIComponent(accountId)}`, {
       method: "PATCH",
       body: JSON.stringify(body),
     });

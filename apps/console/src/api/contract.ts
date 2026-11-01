@@ -1,5 +1,6 @@
 import type {
   AccountWithRoles,
+  AccountDetail,
   AccountSession,
   AccountSecurity,
   AddMemberRequest,
@@ -99,7 +100,9 @@ export interface MonacaApi {
   /** The tenant-wide account directory; organization membership is a separate concept. */
   listAccounts(query?: ListAccountsQuery): Promise<Page<AccountWithRoles>>;
   createAccount(body: CreateAccountRequest): Promise<AccountWithRoles>;
-  updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles>;
+  /** The detail read, which also names the sign-in username for the edit form. */
+  getAccount(accountId: string): Promise<AccountDetail>;
+  updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountDetail>;
 
   /**
    * Tenant roles are what an account holds everywhere; organization roles are per-org and live

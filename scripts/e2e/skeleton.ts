@@ -363,6 +363,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "is 200 and the public read echoes it; a relative URL and a non-hex colour are 400; an empty string clears a field; " +
       "clearing every field restores the built-in look",
   },
+  {
+    step: "37",
+    title: "account profile editing",
+    assertion:
+      "PATCH /v1/accounts/{id} {display_name,username} is 200 and GET echoes both; an empty patch or a blank display name " +
+      "is 400; a username another account holds is 409 MONACA_USERNAME_TAKEN; a state-only patch still suspends and " +
+      "reactivates",
+  },
 ];
 
 interface StepResult {
@@ -7575,6 +7583,141 @@ async function brandingFlow(base: string, adminToken: string): Promise<StepResul
   };
 }
 
+/**
+ * Step 37: an administrator can edit an account's profile, and the edit is audited.
+ *
+ * The username is a sign-in identifier, so its uniqueness and grammar are the same rules the
+ * account centre enforces — this step proves the management entrance did not bypass them.
+ */
+async function accountProfileFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const makeAccount = async (tag: string) => {
+    const email = `profile-${tag}-${runId}@demo.localhost`;
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Profile", password: `pw-${runId}-profile` }),
+    });
+    return { status: created.status, id: (created.body as { id?: string })?.id, email };
+  };
+
+  try {
+    const first = await makeAccount("first");
+    const second = await makeAccount("second");
+    if (first.status !== 201 || first.id === undefined || second.status !== 201 || second.id === undefined) {
+      return failProfile(`account creation → ${first.status}/${second.status}`);
+    }
+
+    const before = await call(`${base}/v1/accounts/${first.id}`, { headers });
+    checks.push([
+      "the detail starts without a username",
+      before.status === 200 && (before.body as { username?: unknown })?.username === null,
+    ]);
+
+    const empty = await call(`${base}/v1/accounts/${first.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({}),
+    });
+    checks.push(["an empty profile patch is 400", empty.status === 400]);
+
+    const blank = await call(`${base}/v1/accounts/${first.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ display_name: "   " }),
+    });
+    checks.push(["a blank display name is 400", blank.status === 400]);
+
+    const badUsername = await call(`${base}/v1/accounts/${first.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ username: "Bad Name" }),
+    });
+    checks.push(["an invalid username is 400", badUsername.status === 400]);
+
+    const username = `profile-${runId}`;
+    const renamed = await call(`${base}/v1/accounts/${first.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ display_name: "Renamed Profile", username }),
+    });
+    checks.push([
+      "PATCH writes the display name and username",
+      renamed.status === 200 &&
+        (renamed.body as { display_name?: unknown })?.display_name === "Renamed Profile" &&
+        (renamed.body as { username?: unknown })?.username === username,
+    ]);
+
+    const echoed = await call(`${base}/v1/accounts/${first.id}`, { headers });
+    checks.push([
+      "GET echoes the edited profile",
+      echoed.status === 200 &&
+        (echoed.body as { display_name?: unknown })?.display_name === "Renamed Profile" &&
+        (echoed.body as { username?: unknown })?.username === username,
+    ]);
+
+    const taken = await call(`${base}/v1/accounts/${second.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ username }),
+    });
+    checks.push([
+      "a username another account holds is 409 MONACA_USERNAME_TAKEN",
+      taken.status === 409 &&
+        (taken.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_USERNAME_TAKEN",
+    ]);
+
+    const suspended = await call(`${base}/v1/accounts/${first.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    checks.push([
+      "a state-only patch still suspends",
+      suspended.status === 200 && (suspended.body as { state?: unknown })?.state === "disabled",
+    ]);
+    const reactivated = await call(`${base}/v1/accounts/${first.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "active" }),
+    });
+    checks.push([
+      "and reactivates",
+      reactivated.status === 200 && (reactivated.body as { state?: unknown })?.state === "active",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "37",
+    title: "account profile editing",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: detail → empty 400 → blank 400 → bad username 400 → rename → GET → duplicate 409 → state`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+
+  function failProfile(why: string): StepResult {
+    return {
+      step: "37",
+      title: "account profile editing",
+      status: "fail",
+      ms: Math.round(performance.now() - t),
+      detail: why,
+    };
+  }
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -7840,6 +7983,7 @@ async function main(): Promise<number> {
   push(await webhookFlow(base, adminToken));
   push(await passwordPolicyFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await brandingFlow(base, adminToken));
+  push(await accountProfileFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

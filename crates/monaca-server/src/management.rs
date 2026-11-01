@@ -342,21 +342,30 @@ pub async fn get_account(
         .store
         .account_roles(&tenant, account.account_id())
         .await?;
-    Ok(Json(account_json(&account, &roles)))
+    let username = state.store.account_username(&tenant, id).await?;
+    Ok(Json(account_detail_json(&account, &roles, username.as_deref())))
 }
 
 /// The body of `PATCH /v1/accounts/{id}`.
+///
+/// Any subset may be sent: `state` suspends or reactivates, while `display_name` and `username`
+/// edit the profile an administrator sees in the directory and the account can edit itself.
 #[derive(Debug, Deserialize)]
 pub struct UpdateAccountBody {
     /// `active` | `disabled`.
-    pub state: String,
+    pub state: Option<String>,
+    /// The new display name.
+    pub display_name: Option<String>,
+    /// The new username, a second sign-in identifier (§6.1).
+    pub username: Option<String>,
 }
 
-/// `PATCH /v1/accounts/{id}` — suspend or reactivate an account (§6.2).
+/// `PATCH /v1/accounts/{id}` — suspend/reactivate or edit the profile (§6.2).
 ///
 /// Suspension is immediate: every live session and refresh token is revoked with the state
 /// change, so the browser is signed out and no new access token can be minted. Repeating the
-/// current state is a no-op that answers with the unchanged account.
+/// current state is a no-op that answers with the unchanged account. A profile edit writes
+/// `account.updated`; a username another account holds is `409 MONACA_USERNAME_TAKEN`.
 pub async fn update_account(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -365,27 +374,50 @@ pub async fn update_account(
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let account_id = parse_account(&id)?;
-    if !matches!(body.state.as_str(), "active" | "disabled") {
+    if body.state.is_none() && body.display_name.is_none() && body.username.is_none() {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            "state must be `active` or `disabled`",
+            "nothing to update; send `state`, `display_name` and/or `username`",
         ));
     }
+    let state_change = match body.state.as_deref() {
+        Some(value) if !matches!(value, "active" | "disabled") => {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "state must be `active` or `disabled`",
+            ));
+        }
+        Some(value) => Some(value),
+        None => None,
+    };
+    let display_name = body
+        .display_name
+        .as_deref()
+        .map(crate::account::check_display_name)
+        .transpose()?;
+    let username = body
+        .username
+        .as_deref()
+        .map(crate::protocol::check_username)
+        .transpose()?;
+
     let account = state
         .store
         .account_by_id(&tenant, account_id)
         .await?
         .ok_or_else(|| ApiError::not_found("account"))?;
 
-    if account.state != body.state {
+    if let Some(target) = state_change
+        && account.state != target
+    {
         if !state
             .store
-            .set_account_state(&tenant, account_id, &body.state)
+            .set_account_state(&tenant, account_id, target)
             .await?
         {
             return Err(ApiError::not_found("account"));
         }
-        if body.state == "disabled" {
+        if target == "disabled" {
             state
                 .store
                 .revoke_account_sessions(&tenant, account_id)
@@ -399,7 +431,7 @@ pub async fn update_account(
         let event = AuditEvent {
             id: EventId::new(),
             at: state.now(),
-            action: if body.state == "disabled" {
+            action: if target == "disabled" {
                 "account.suspended".into()
             } else {
                 "account.reactivated".into()
@@ -419,13 +451,68 @@ pub async fn update_account(
         }
     }
 
+    let current_username = state
+        .store
+        .account_username(&tenant, account_id)
+        .await?;
+    let mut changed: Vec<&str> = Vec::new();
+    let mut profile_payload = serde_json::Map::new();
+    if let Some(name) = display_name
+        && name != account.display_name
+    {
+        state
+            .store
+            .update_display_name(&tenant, account_id, &name)
+            .await?;
+        changed.push("display_name");
+        profile_payload.insert("display_name".into(), json!(name));
+    }
+    if let Some(username) = username
+        && current_username.as_deref() != Some(username.as_str())
+    {
+        state
+            .store
+            .set_username(&tenant, account_id, &username)
+            .await?;
+        changed.push("username");
+        profile_payload.insert("username".into(), json!(username));
+    }
+    if !changed.is_empty() {
+        let event = AuditEvent {
+            id: EventId::new(),
+            at: state.now(),
+            action: "account.updated".into(),
+            actor_chain: vec![admin.actor()],
+            subject: AuditSubject {
+                subject_type: AuditActorType::Account,
+                id: Some(account.account_id().to_typed_string()),
+            },
+            decision: AuditDecision::Allow,
+            grant_id: None,
+            jti: None,
+            payload: json!({
+                "email": account.primary_email,
+                "fields": changed,
+                "display_name": profile_payload.get("display_name"),
+                "username": profile_payload.get("username"),
+            }),
+        };
+        if let Err(err) = state.audit_tenant(&tenant, &event).await {
+            tracing::warn!(%err, "could not append account.updated audit event");
+        }
+    }
+
     let updated = state
         .store
         .account_by_id(&tenant, account_id)
         .await?
         .ok_or_else(|| ApiError::not_found("account"))?;
     let roles = state.store.account_roles(&tenant, account_id).await?;
-    Ok(Json(account_json(&updated, &roles)))
+    let username = state
+        .store
+        .account_username(&tenant, account_id)
+        .await?;
+    Ok(Json(account_detail_json(&updated, &roles, username.as_deref())))
 }
 
 /// The optional hosted-page branding in `PATCH /v1/sign-in-experience` (§6.2).
@@ -1764,6 +1851,14 @@ fn account_json(account: &AccountRow, roles: &[RoleRow]) -> Value {
             .map(|role| json!({ "id": role.role_id().to_typed_string(), "name": role.name }))
             .collect::<Vec<_>>(),
     })
+}
+
+/// The detail shape, which also names the sign-in username. Lists omit it to avoid a second
+/// identifier read per row; `GET` and `PATCH` are where an edit form reads it.
+fn account_detail_json(account: &AccountRow, roles: &[RoleRow], username: Option<&str>) -> Value {
+    let mut value = account_json(account, roles);
+    value["username"] = json!(username);
+    value
 }
 
 fn session_json(session: &SessionRow) -> Value {

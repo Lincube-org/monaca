@@ -30,6 +30,7 @@ import {
 } from "./fixtures";
 import type {
   AccountRole,
+  AccountDetail,
   AccountSecurity,
   AccountSession,
   AccountWithRoles,
@@ -143,6 +144,8 @@ class MockStore {
   private tenantRoles: TenantRole[] = seedTenantRoles();
   /** account id → the tenant role ids it holds. A role may be held by many accounts. */
   private accountRoles = new Map<string, Set<string>>();
+  /** account id → its lowercase sign-in username, when one is set. */
+  private accountUsernames = new Map<string, string>();
   private orgRoles: OrgRoleDetail[] = seedOrgRoles();
   /** account id → role ids held in this org. A role may be held by many members. */
   private memberRoles = new Map<string, Set<string>>();
@@ -664,9 +667,28 @@ class MockStore {
     return { ...account, roles: [] };
   }
 
-  async updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles> {
+  getAccount(accountId: string): AccountDetail {
     parseAccountId(accountId);
-    if (body.state !== "active" && body.state !== "disabled") {
+    const account = this.accounts.find((candidate) => candidate.id === accountId);
+    if (!account) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    return {
+      ...account,
+      roles: this.rolesFor(account.id),
+      username: this.accountUsernames.get(account.id) ?? null,
+    };
+  }
+
+  async updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountDetail> {
+    parseAccountId(accountId);
+    if (body.state === undefined && body.display_name === undefined && body.username === undefined) {
+      throw new ApiError("nothing to update; send `state`, `display_name` and/or `username`", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (body.state !== undefined && body.state !== "active" && body.state !== "disabled") {
       throw new ApiError("state must be `active` or `disabled`", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
@@ -677,24 +699,85 @@ class MockStore {
     if (!account) {
       throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
     }
-    if (account.state === body.state) return { ...account, roles: this.rolesFor(account.id) };
-    if (body.state === "disabled") {
-      // Suspension revokes every live session; "suspended" has to mean signed out everywhere.
-      this.sessions = this.sessions.filter((session) => session.account_id !== account.id);
+
+    const displayName = body.display_name?.trim();
+    if (displayName !== undefined && (displayName.length === 0 || displayName.length > 80)) {
+      throw new ApiError("display_name must be 1-80 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    let username: string | undefined;
+    if (body.username !== undefined) {
+      username = body.username.trim().toLowerCase();
+      if (!/^[a-z0-9_-]{3,32}$/.test(username)) {
+        throw new ApiError("username is 3-32 letters, digits, `_` or `-`", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      const held = [...this.accountUsernames.entries()].find(
+        ([other, value]) => value === username && other !== account.id,
+      );
+      if (held !== undefined) {
+        throw new ApiError("username is already taken", {
+          status: 409,
+          code: "MONACA_USERNAME_TAKEN",
+        });
+      }
     }
 
-    const updated = { ...account, state: body.state };
+    if (body.state !== undefined && account.state !== body.state) {
+      if (body.state === "disabled") {
+        // Suspension revokes every live session; "suspended" has to mean signed out everywhere.
+        this.sessions = this.sessions.filter((session) => session.account_id !== account.id);
+      }
+    }
+
+    const updated = {
+      ...account,
+      state: body.state ?? account.state,
+      display_name: displayName ?? account.display_name,
+    };
     this.accounts = [...this.accounts.slice(0, index), updated, ...this.accounts.slice(index + 1)];
 
-    await this.append({
-      action: body.state === "disabled" ? "account.suspended" : "account.reactivated",
-      actor: this.session().account_id,
-      subjectType: "account",
-      subjectId: account.id,
-      decision: "info",
-      payload: { email: account.email },
-    });
-    return { ...updated, roles: this.rolesFor(account.id) };
+    if (body.state !== undefined && account.state !== body.state) {
+      await this.append({
+        action: body.state === "disabled" ? "account.suspended" : "account.reactivated",
+        actor: this.session().account_id,
+        subjectType: "account",
+        subjectId: account.id,
+        decision: "info",
+        payload: { email: account.email },
+      });
+    }
+    const changed: string[] = [];
+    const profile: Record<string, unknown> = { email: account.email };
+    if (displayName !== undefined && displayName !== account.display_name) {
+      changed.push("display_name");
+      profile["display_name"] = displayName;
+    }
+    if (username !== undefined && username !== this.accountUsernames.get(account.id)) {
+      this.accountUsernames.set(account.id, username);
+      changed.push("username");
+      profile["username"] = username;
+    }
+    if (changed.length > 0) {
+      await this.append({
+        action: "account.updated",
+        actor: this.session().account_id,
+        subjectType: "account",
+        subjectId: account.id,
+        decision: "allow",
+        payload: { ...profile, fields: changed },
+      });
+    }
+
+    return {
+      ...updated,
+      roles: this.rolesFor(account.id),
+      username: this.accountUsernames.get(account.id) ?? null,
+    };
   }
 
   listTenantRoles(): Page<TenantRole> {
@@ -2353,6 +2436,10 @@ export const mockApi: MonacaApi = {
   async createAccount(body) {
     await delay();
     return store.createAccount(body);
+  },
+  async getAccount(accountId) {
+    await delay();
+    return store.getAccount(accountId);
   },
   async updateAccount(accountId, body) {
     await delay();

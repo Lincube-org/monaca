@@ -39,6 +39,7 @@ use crate::state::AppState;
 /// would promise a delivery the server cannot make.
 pub const WEBHOOK_EVENTS: &[&str] = &[
     "account.created",
+    "account.updated",
     "account.deleted",
     "account.suspended",
     "account.reactivated",

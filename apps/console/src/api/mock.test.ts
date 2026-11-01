@@ -1435,6 +1435,61 @@ describe("users", () => {
       .catch((error: unknown) => error);
     expect((malformed as ApiError).status).toBe(400);
   });
+
+  it("edits the display name and username from the directory", async () => {
+    const first = await mockApi.createAccount({
+      email: await freshEmail("edited"),
+      display_name: "Before Name",
+      password: "x",
+    });
+    const second = await mockApi.createAccount({
+      email: await freshEmail("other"),
+      display_name: "Other",
+      password: "x",
+    });
+
+    const before = await mockApi.getAccount(first.id);
+    expect(before.username).toBeNull();
+
+    const empty = await mockApi
+      .updateAccount(first.id, {})
+      .catch((error: unknown) => error);
+    expect((empty as ApiError).status).toBe(400);
+
+    const blank = await mockApi
+      .updateAccount(first.id, { display_name: "   " })
+      .catch((error: unknown) => error);
+    expect((blank as ApiError).status).toBe(400);
+
+    const badUsername = await mockApi
+      .updateAccount(first.id, { username: "Bad Name" })
+      .catch((error: unknown) => error);
+    expect((badUsername as ApiError).status).toBe(400);
+
+    const username = `ada-${Date.now().toString(36)}`;
+    const updated = await mockApi.updateAccount(first.id, {
+      display_name: "After Name",
+      username: username.toUpperCase(),
+    });
+    expect(updated.display_name).toBe("After Name");
+    expect(updated.username).toBe(username);
+    expect((await mockApi.getAccount(first.id)).username).toBe(username);
+
+    const taken = await mockApi
+      .updateAccount(second.id, { username })
+      .catch((error: unknown) => error);
+    expect(taken).toBeInstanceOf(ApiError);
+    expect((taken as ApiError).code).toBe("MONACA_USERNAME_TAKEN");
+    expect((taken as ApiError).status).toBe(409);
+
+    const audit = await mockApi.listAudit(ORG, { action: "account.updated", limit: 200 });
+    const event = audit.items.find((item) => item.subject.id === first.id);
+    expect(event?.payload).toMatchObject({
+      fields: ["display_name", "username"],
+      display_name: "After Name",
+      username,
+    });
+  });
 });
 
 describe("members", () => {

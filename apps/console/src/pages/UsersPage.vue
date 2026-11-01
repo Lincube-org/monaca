@@ -30,6 +30,7 @@ import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
 import {
+  useAccount,
   useAccountSecurity,
   useAccountSessions,
   useAccounts,
@@ -115,6 +116,64 @@ async function submit(): Promise<void> {
     createOpen.value = false;
   } catch (error) {
     formError.value = describeError(error).title;
+  }
+}
+
+// --- Edit profile --------------------------------------------------------------------------------
+
+const editOpen = ref(false);
+const editTarget = ref<AccountWithRoles | null>(null);
+const editName = ref("");
+const editUsername = ref("");
+const editError = ref<string | null>(null);
+const editDetail = useAccount(computed(() => editTarget.value?.id ?? null));
+
+watch(
+  () => editDetail.data.value,
+  (detail) => {
+    if (!detail || editTarget.value === null || detail.id !== editTarget.value.id) return;
+    editName.value = detail.display_name;
+    editUsername.value = detail.username ?? "";
+  },
+);
+
+function openEdit(account: AccountWithRoles): void {
+  editTarget.value = account;
+  editName.value = account.display_name;
+  editUsername.value = "";
+  editError.value = null;
+  editOpen.value = true;
+}
+
+async function submitEdit(): Promise<void> {
+  const target = editTarget.value;
+  if (!target) return;
+  const name = editName.value.trim();
+  if (name.length === 0 || name.length > 80) {
+    editError.value = t("users.invalidDisplayName");
+    return;
+  }
+  const username = editUsername.value.trim().toLowerCase();
+  if (username !== "" && !/^[a-z0-9_-]{3,32}$/.test(username)) {
+    editError.value = t("users.invalidUsername");
+    return;
+  }
+  editError.value = null;
+  try {
+    const updated = await updateAccount.mutateAsync({
+      accountId: target.id,
+      body: { display_name: name, username },
+    });
+    editOpen.value = false;
+    toast({
+      title: t("users.profileSavedToast"),
+      description: t("users.profileSavedDescription", { email: updated.email }),
+      variant: "success",
+    });
+  } catch (error) {
+    const described = describeError(error);
+    editError.value =
+      described.code === "MONACA_USERNAME_TAKEN" ? t("users.usernameTaken") : described.title;
   }
 }
 
@@ -487,6 +546,9 @@ function formatDateTime(at: string): string {
             </TableCell>
             <TableCell>
               <div class="flex justify-end gap-1.5">
+                <Button variant="secondary" size="xs" @click="openEdit(account)">
+                  {{ t('users.edit') }}
+                </Button>
                 <Button variant="secondary" size="xs" @click="openRoles(account)">
                   {{ t('users.manageRoles') }}
                 </Button>
@@ -573,6 +635,54 @@ function formatDateTime(at: string): string {
             <Button variant="ghost" type="button" @click="createOpen = false">{{ t('common.cancel') }}</Button>
             <Button variant="primary" type="submit" :disabled="createAccount.isPending.value">
               {{ createAccount.isPending.value ? t('common.saving') : t('users.create') }}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="editOpen">
+      <DialogContent class="max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('users.editTitle') }}</DialogTitle>
+          <DialogDescription>
+            {{ t('users.editDescription', { email: editTarget?.email ?? '' }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <form class="flex flex-col gap-3.5" @submit.prevent="submitEdit">
+          <div class="flex flex-col gap-1.5">
+            <Label for="user-edit-name">{{ t('users.displayNameField') }}</Label>
+            <Input
+              id="user-edit-name"
+              v-model="editName"
+              :invalid="editName.trim().length === 0 || editName.trim().length > 80"
+              autocomplete="off"
+            />
+            <p class="text-[11.5px] leading-snug text-ink-faint">
+              {{ t('users.editDisplayNameHint') }}
+            </p>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <Label for="user-edit-username">{{ t('users.usernameField') }}</Label>
+            <Input
+              id="user-edit-username"
+              v-model="editUsername"
+              :invalid="editUsername.trim() !== '' && !/^[a-z0-9_-]{3,32}$/.test(editUsername.trim().toLowerCase())"
+              placeholder="e.g. ada"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('users.usernameHint') }}</p>
+          </div>
+
+          <p v-if="editError" class="text-[12.5px] text-deny">{{ editError }}</p>
+
+          <DialogFooter>
+            <Button variant="ghost" type="button" @click="editOpen = false">{{ t('common.cancel') }}</Button>
+            <Button variant="primary" type="submit" :disabled="updateAccount.isPending.value">
+              {{ updateAccount.isPending.value ? t('common.saving') : t('users.saveProfile') }}
             </Button>
           </DialogFooter>
         </form>

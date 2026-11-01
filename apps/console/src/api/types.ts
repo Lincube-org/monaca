@@ -93,6 +93,11 @@ export interface AccountWithRoles extends Account {
   roles: AccountRole[];
 }
 
+/** The detail shape, which also names the sign-in username (the list omits it). */
+export interface AccountDetail extends AccountWithRoles {
+  username: string | null;
+}
+
 export interface Member {
   account_id: string;
   email: string;
@@ -508,8 +513,11 @@ export interface CreateAccountRequest {
   password: string;
 }
 
+/** Any subset may be sent: `state` suspends/reactivates; profile fields edit the account. */
 export interface UpdateAccountRequest {
-  state: "active" | "disabled";
+  state?: "active" | "disabled";
+  display_name?: string;
+  username?: string;
 }
 
 export interface CreateClientRequest {

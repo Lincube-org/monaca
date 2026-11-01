@@ -169,7 +169,7 @@ pub struct UpdateProfileBody {
 }
 
 /// Reject a display name that is blank or too long, trimming the accepted one.
-fn check_display_name(raw: &str) -> Result<String, ApiError> {
+pub(crate) fn check_display_name(raw: &str) -> Result<String, ApiError> {
     let name = raw.trim();
     if name.is_empty() {
         return Err(ApiError::problem(

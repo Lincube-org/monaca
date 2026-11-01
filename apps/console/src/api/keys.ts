@@ -17,6 +17,7 @@ export const queryKeys = {
   resources: () => ["resources"] as const,
 
   accounts: (query: string) => ["accounts", query] as const,
+  account: (accountId: string) => ["accounts", "detail", accountId] as const,
 
   tenantRoles: () => ["tenant-roles"] as const,
 
