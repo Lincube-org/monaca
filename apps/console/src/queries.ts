@@ -13,10 +13,12 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  Connector,
   CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
+  CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
@@ -229,6 +231,36 @@ export function useUpdateAccount() {
     mutationFn: ({ accountId, body }) => api.updateAccount(accountId, body),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useConnectors(): UseQueryReturnType<Page<Connector>, Error> {
+  return useQuery({
+    queryKey: queryKeys.connectors(),
+    queryFn: () => api.listConnectors(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateConnector() {
+  const client = useQueryClient();
+  return useMutation<Connector, Error, CreateConnectorRequest>({
+    mutationFn: (body) => api.createConnector(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.connectors() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteConnector() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { connectorId: string }>({
+    mutationFn: ({ connectorId }) => api.deleteConnector(connectorId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.connectors() });
       invalidateTenantAudit(client);
     },
   });

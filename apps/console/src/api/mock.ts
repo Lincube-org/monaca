@@ -11,6 +11,7 @@ import {
   buildGrants,
   seedAccounts,
   seedClients,
+  seedConnectors,
   seedMemberRoleIndexes,
   seedMembers,
   seedOrgRoles,
@@ -28,10 +29,12 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  Connector,
   CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
+  CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
@@ -83,6 +86,7 @@ class MockStore {
    */
   private clientSecrets = new Map<string, string>();
   private resources: ApiResource[] = seedResources();
+  private connectors: Connector[] = seedConnectors();
   private members: Member[] = seedMembers(this.accounts);
   private orgRoles: OrgRoleDetail[] = seedOrgRoles();
   /** account id → role ids held in this org. A role may be held by many members. */
@@ -588,6 +592,108 @@ class MockStore {
     return { ...updated, roles: [] };
   }
 
+  listConnectors(): Page<Connector> {
+    const items = [...this.connectors]
+      .sort((left, right) => left.connector_id.localeCompare(right.connector_id))
+      .map(cloneConnector);
+    return { items, next: null };
+  }
+
+  async createConnector(body: CreateConnectorRequest): Promise<Connector> {
+    // The slug is lowercased before validation, exactly as `check_connector_id` does.
+    const connectorId = body.connector_id.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{1,31}$/.test(connectorId)) {
+      throw new ApiError("connector_id must be 2-32 lowercase letters, digits or hyphens", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const displayName = body.display_name.trim();
+    if (displayName.length === 0) {
+      throw new ApiError("display_name must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    for (const [field, url] of [
+      ["authorize_url", body.authorize_url.trim()],
+      ["token_url", body.token_url.trim()],
+      ["userinfo_url", body.userinfo_url.trim()],
+    ] as const) {
+      if (!/^https?:\/\/[^\s]+$/.test(url)) {
+        throw new ApiError(`${field} must be an absolute http(s) URL`, {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
+    if (body.client_id.trim().length === 0 || body.client_secret.length === 0) {
+      throw new ApiError("client_id and client_secret must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (this.connectors.some((connector) => connector.connector_id === connectorId)) {
+      throw new ApiError("connector is already taken", {
+        status: 409,
+        code: "MONACA_CONNECTOR_EXISTS",
+      });
+    }
+
+    const scopes: string[] = [];
+    for (const scope of body.scopes) {
+      const trimmed = scope.trim();
+      if (trimmed.length === 0 || /\s/.test(trimmed)) {
+        throw new ApiError("each scope must be a single non-empty token", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      if (!scopes.includes(trimmed)) scopes.push(trimmed);
+    }
+
+    const connector: Connector = {
+      connector_id: connectorId,
+      display_name: displayName,
+      authorize_url: body.authorize_url.trim(),
+      token_url: body.token_url.trim(),
+      userinfo_url: body.userinfo_url.trim(),
+      client_id: body.client_id.trim(),
+      scopes,
+      created_at: new Date().toISOString(),
+    };
+    this.connectors = [...this.connectors, connector];
+
+    await this.append({
+      action: "connector.created",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { connector_id: connector.connector_id },
+    });
+    return cloneConnector(connector);
+  }
+
+  async deleteConnector(connectorId: string): Promise<void> {
+    const index = this.connectors.findIndex((connector) => connector.connector_id === connectorId);
+    const connector = this.connectors[index];
+    if (!connector) {
+      throw new ApiError("connector not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    this.connectors = [...this.connectors.slice(0, index), ...this.connectors.slice(index + 1)];
+
+    await this.append({
+      action: "connector.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { connector_id: connector.connector_id },
+    });
+  }
+
   listMembers(): Page<Member> {
     return { items: [...this.members], next: null };
   }
@@ -1052,6 +1158,10 @@ function cloneResource(resource: ApiResource): ApiResource {
   return { ...resource, scopes: [...resource.scopes] };
 }
 
+function cloneConnector(connector: Connector): Connector {
+  return { ...connector, scopes: [...connector.scopes] };
+}
+
 /** The server's `RoleId::parse`: a typed `rol_…` id, nothing else. */
 function parseRoleId(roleId: string): void {
   if (!/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(roleId)) {
@@ -1191,6 +1301,18 @@ export const mockApi: MonacaApi = {
   async updateAccount(accountId, body) {
     await delay();
     return store.updateAccount(accountId, body);
+  },
+  async listConnectors() {
+    await delay();
+    return store.listConnectors();
+  },
+  async createConnector(body) {
+    await delay();
+    return store.createConnector(body);
+  },
+  async deleteConnector(connectorId) {
+    await delay();
+    return store.deleteConnector(connectorId);
   },
   async listMembers() {
     await delay();

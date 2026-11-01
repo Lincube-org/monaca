@@ -8,10 +8,12 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  Connector,
   CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
+  CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
@@ -79,6 +81,11 @@ export interface MonacaApi {
   listAccounts(query?: ListAccountsQuery): Promise<Page<AccountWithRoles>>;
   createAccount(body: CreateAccountRequest): Promise<AccountWithRoles>;
   updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles>;
+
+  /** Social sign-in providers, tenant-level; deleting one also drops every identity it linked. */
+  listConnectors(): Promise<Page<Connector>>;
+  createConnector(body: CreateConnectorRequest): Promise<Connector>;
+  deleteConnector(connectorId: string): Promise<void>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;

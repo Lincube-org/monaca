@@ -10,6 +10,7 @@ import type {
   AuditEvent,
   AuditIntegrity,
   Client,
+  Connector,
   Grant,
   Member,
   OrgRole,
@@ -188,6 +189,40 @@ export function seedResources(): ApiResource[] {
       identifier: "https://api.demo.localhost",
       scopes: ["notes:read", "notes:write"],
       created_at: at(420 * 60),
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Social connectors
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Two providers with the shapes a real tenant registers: GitHub's non-OIDC userinfo endpoint and
+ * Google's OIDC discovery equivalents. No secret is part of the fixture because the API never
+ * returns one.
+ */
+export function seedConnectors(): Connector[] {
+  return [
+    {
+      connector_id: "github",
+      display_name: "GitHub",
+      authorize_url: "https://github.com/login/oauth/authorize",
+      token_url: "https://github.com/login/oauth/access_token",
+      userinfo_url: "https://api.github.com/user",
+      client_id: "demo-github-client",
+      scopes: ["read:user", "user:email"],
+      created_at: at(600 * 60),
+    },
+    {
+      connector_id: "google",
+      display_name: "Google",
+      authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+      token_url: "https://oauth2.googleapis.com/token",
+      userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo",
+      client_id: "demo-google-client",
+      scopes: ["openid", "profile", "email"],
+      created_at: at(360 * 60),
     },
   ];
 }

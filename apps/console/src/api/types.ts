@@ -107,6 +107,23 @@ export interface ApiResource {
   created_at: string;
 }
 
+/**
+ * A social sign-in provider (§6.2).
+ *
+ * The client secret is sealed at rest and never part of this object; the endpoints and the client
+ * id are what the sign-in flow needs, and the sign-in page shows only the id and the display name.
+ */
+export interface Connector {
+  connector_id: string;
+  display_name: string;
+  authorize_url: string;
+  token_url: string;
+  userinfo_url: string;
+  client_id: string;
+  scopes: string[];
+  created_at: string;
+}
+
 /** A create response for a confidential client carries the new secret exactly once. */
 export type CreatedClient = Client & { client_secret?: string };
 
@@ -232,6 +249,17 @@ export interface CreateApiResourceRequest {
 export interface UpdateApiResourceRequest {
   name?: string;
   scopes?: string[];
+}
+
+export interface CreateConnectorRequest {
+  connector_id: string;
+  display_name: string;
+  authorize_url: string;
+  token_url: string;
+  userinfo_url: string;
+  client_id: string;
+  client_secret: string;
+  scopes: string[];
 }
 
 export interface ListAccountsQuery {

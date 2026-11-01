@@ -9,10 +9,12 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  Connector,
   CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
+  CreateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgRoleRequest,
@@ -175,6 +177,18 @@ export const httpApi: MonacaApi = {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+  },
+
+  listConnectors(): Promise<Page<Connector>> {
+    return request<Page<Connector>>("/connectors");
+  },
+
+  createConnector(body: CreateConnectorRequest): Promise<Connector> {
+    return request<Connector>("/connectors", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  deleteConnector(connectorId: string): Promise<void> {
+    return request<void>(`/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" });
   },
 
   listMembers(org: string): Promise<Page<Member>> {

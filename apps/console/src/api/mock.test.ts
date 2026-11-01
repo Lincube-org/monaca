@@ -808,6 +808,123 @@ describe("audit", () => {
   });
 });
 
+describe("connectors", () => {
+  async function freshConnectorId(): Promise<string> {
+    return `provider-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  it("lists the seeded connectors ordered by id, without secrets", async () => {
+    const page = await mockApi.listConnectors();
+    expect(page.next).toBe(null);
+    const ids = page.items.map((connector) => connector.connector_id);
+    expect(ids).toEqual([...ids].sort((left, right) => left.localeCompare(right)));
+    expect(ids).toContain("github");
+    expect(ids).toContain("google");
+
+    for (const connector of page.items) {
+      expect("client_secret" in connector).toBe(false);
+      expect(Array.isArray(connector.scopes)).toBe(true);
+    }
+  });
+
+  it("registers a connector, lowercasing its id, and appends connector.created", async () => {
+    const rawId = await freshConnectorId();
+    const connectorId = rawId.toUpperCase();
+    const created = await mockApi.createConnector({
+      connector_id: connectorId,
+      display_name: "Provider",
+      authorize_url: "https://provider.example/authorize",
+      token_url: "https://provider.example/token",
+      userinfo_url: "https://provider.example/userinfo",
+      client_id: "client-1",
+      client_secret: "shhh",
+      scopes: ["openid", "openid", "profile"],
+    });
+    expect(created.connector_id).toBe(rawId);
+    expect(created.scopes).toEqual(["openid", "profile"]);
+    expect("client_secret" in created).toBe(false);
+
+    const audit = await mockApi.listAudit(ORG, { action: "connector.created", limit: 200 });
+    expect(audit.items.some((event) => event.payload["connector_id"] === rawId)).toBe(true);
+
+    const duplicate = await mockApi
+      .createConnector({
+        connector_id: rawId,
+        display_name: "Copy",
+        authorize_url: "https://copy.example/authorize",
+        token_url: "https://copy.example/token",
+        userinfo_url: "https://copy.example/userinfo",
+        client_id: "client-2",
+        client_secret: "x",
+        scopes: [],
+      })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).code).toBe("MONACA_CONNECTOR_EXISTS");
+    expect((duplicate as ApiError).status).toBe(409);
+  });
+
+  it("refuses a relative endpoint, an empty secret and a scope with whitespace", async () => {
+    const connectorId = await freshConnectorId();
+    const valid = {
+      connector_id: connectorId,
+      display_name: "Provider",
+      authorize_url: "https://provider.example/authorize",
+      token_url: "https://provider.example/token",
+      userinfo_url: "https://provider.example/userinfo",
+      client_id: "client-1",
+      client_secret: "shhh",
+      scopes: [] as string[],
+    };
+
+    const relative = await mockApi
+      .createConnector({ ...valid, authorize_url: "/authorize" })
+      .catch((error: unknown) => error);
+    expect((relative as ApiError).status).toBe(400);
+
+    const noSecret = await mockApi
+      .createConnector({ ...valid, client_secret: "" })
+      .catch((error: unknown) => error);
+    expect((noSecret as ApiError).status).toBe(400);
+
+    const badScope = await mockApi
+      .createConnector({ ...valid, scopes: ["two words"] })
+      .catch((error: unknown) => error);
+    expect((badScope as ApiError).status).toBe(400);
+
+    const badId = await mockApi
+      .createConnector({ ...valid, connector_id: "-provider" })
+      .catch((error: unknown) => error);
+    expect((badId as ApiError).status).toBe(400);
+  });
+
+  it("deletes a connector and refuses the second delete", async () => {
+    const connectorId = await freshConnectorId();
+    await mockApi.createConnector({
+      connector_id: connectorId,
+      display_name: "Ephemeral",
+      authorize_url: "https://ephemeral.example/authorize",
+      token_url: "https://ephemeral.example/token",
+      userinfo_url: "https://ephemeral.example/userinfo",
+      client_id: "client-1",
+      client_secret: "shhh",
+      scopes: [],
+    });
+
+    await mockApi.deleteConnector(connectorId);
+    expect((await mockApi.listConnectors()).items.some((connector) => connector.connector_id === connectorId)).toBe(
+      false,
+    );
+
+    const second = await mockApi.deleteConnector(connectorId).catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "connector.deleted", limit: 200 });
+    expect(audit.items.some((event) => event.payload["connector_id"] === connectorId)).toBe(true);
+  });
+});
+
 describe("users", () => {
   async function freshEmail(prefix: string): Promise<string> {
     return `${prefix}-${Math.random().toString(36).slice(2, 8)}@example.com`;
