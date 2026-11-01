@@ -497,7 +497,7 @@ fn subject_uuid(id: Option<&str>) -> Option<Uuid> {
 /// The unique indexes are the authority on uniqueness, so the constraint — not a prior SELECT — is
 /// what decides; this keeps two concurrent claims from both succeeding. `entity` names the value
 /// the caller tried to claim, e.g. `username` or `email`.
-fn unique_conflict(err: sqlx::Error, entity: &'static str) -> StoreError {
+pub(crate) fn unique_conflict(err: sqlx::Error, entity: &'static str) -> StoreError {
     if let sqlx::Error::Database(ref db) = err
         && db.code().as_deref() == Some("23505")
     {
@@ -1777,11 +1777,11 @@ impl Store {
 
     // ------------------------------------------------------------ organizations
 
-    /// The organization with `slug` in `tenant`.
+    /// The organization with `slug` in `tenant`, active only.
     pub async fn org_by_slug(&self, tenant: &TenantRow, slug: &str) -> Result<OrgRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         sqlx::query_as::<_, OrgRow>(
-            "SELECT id, slug, schema_name, role_name, is_default
+            "SELECT id, slug, schema_name, role_name, state, is_default, created_at
              FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
         )
         .bind(slug)
@@ -1790,11 +1790,31 @@ impl Store {
         .ok_or_else(|| StoreError::UnknownOrg(slug.to_owned()))
     }
 
-    /// The organization with `id`.
+    /// The organization with `slug` in any state — the management API's view (§6.2).
+    ///
+    /// The operational lookups keep using [`Store::org_by_slug`]; this one exists so an archived
+    /// org stays addressable for the `GET`/`PATCH` that reports and reverses the archive.
+    pub async fn org_by_slug_any(
+        &self,
+        tenant: &TenantRow,
+        slug: &str,
+    ) -> Result<OrgRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query_as::<_, OrgRow>(
+            "SELECT id, slug, schema_name, role_name, state, is_default, created_at
+             FROM tenant.organizations WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| StoreError::UnknownOrg(slug.to_owned()))
+    }
+
+    /// The organization with `id`, whatever its state.
     pub async fn org_by_id(&self, tenant: &TenantRow, id: OrgId) -> Result<OrgRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         sqlx::query_as::<_, OrgRow>(
-            "SELECT id, slug, schema_name, role_name, is_default
+            "SELECT id, slug, schema_name, role_name, state, is_default, created_at
              FROM tenant.organizations WHERE id = $1",
         )
         .bind(id.uuid())
@@ -1810,11 +1830,41 @@ impl Store {
     pub async fn orgs(&self, tenant: &TenantRow) -> Result<Vec<OrgRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, OrgRow>(
-            "SELECT id, slug, schema_name, role_name, is_default
+            "SELECT id, slug, schema_name, role_name, state, is_default, created_at
              FROM tenant.organizations WHERE state = 'active' ORDER BY created_at",
         )
         .fetch_all(&pool)
         .await?)
+    }
+
+    /// Every org in the tenant, archived included, oldest first — the management listing.
+    pub async fn all_orgs(&self, tenant: &TenantRow) -> Result<Vec<OrgRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, OrgRow>(
+            "SELECT id, slug, schema_name, role_name, state, is_default, created_at
+             FROM tenant.organizations ORDER BY created_at",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Move an org to `state`; `false` when no row matched.
+    ///
+    /// The `organizations` CHECK constraint rejects anything but `active` / `archived`; the
+    /// server validates the same set first so a bad value is a 400 rather than a 500.
+    pub async fn set_org_state(
+        &self,
+        tenant: &TenantRow,
+        id: OrgId,
+        state: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("UPDATE tenant.organizations SET state = $2 WHERE id = $1")
+            .bind(id.uuid())
+            .bind(state)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// The account's default org: `is_default` if it is a member, else its oldest membership.
@@ -1842,7 +1892,7 @@ impl Store {
     ) -> Result<Option<OrgRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, OrgRow>(
-            "SELECT o.id, o.slug, o.schema_name, o.role_name, o.is_default
+            "SELECT o.id, o.slug, o.schema_name, o.role_name, o.state, o.is_default, o.created_at
              FROM tenant.agent_directory d
              JOIN tenant.organizations o ON o.id = d.org_id
              WHERE d.agent_id = $1",

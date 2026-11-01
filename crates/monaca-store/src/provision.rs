@@ -9,8 +9,10 @@
 
 use monaca_types::{OrgId, TenantId};
 use sqlx::FromRow;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::repo::unique_conflict;
 use crate::{Store, StoreError, q, quote_ident};
 
 /// A tenant as stored in the control plane.
@@ -53,14 +55,24 @@ pub struct OrgRow {
     pub schema_name: String,
     /// `t<tshort>_o<oshort>`.
     pub role_name: String,
+    /// `active` | `archived` (§5.6).
+    pub state: String,
     /// Whether this is the tenant's default org.
     pub is_default: bool,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
 }
 
 impl OrgRow {
     /// The organization's typed id.
     pub fn org_id(&self) -> OrgId {
         OrgId::from_uuid(self.id)
+    }
+
+    /// Whether the org is serving traffic. An archived org keeps its schema and audit chain but
+    /// is no longer addressable by slug, so `authorize` and the `/v1` sub-resources refuse it.
+    pub fn is_active(&self) -> bool {
+        self.state == "active"
     }
 }
 
@@ -249,7 +261,11 @@ impl Store {
         .bind(&role_name)
         .bind(is_default)
         .execute(&mut *tx)
-        .await?;
+        .await
+        // A duplicate slug fails here, after the schema and role DDL: PostgreSQL aborts the
+        // transaction, so the rollback removes both and the caller sees "already taken" — the
+        // unique index in `tenant.organizations` is the authority, not a prior SELECT.
+        .map_err(|err| unique_conflict(err, "organization"))?;
 
         tx.commit().await?;
 

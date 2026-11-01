@@ -275,6 +275,14 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             delete(crate::management::revoke_account_session),
         )
         .route(
+            "/v1/orgs",
+            get(crate::orgs::list_orgs).post(crate::orgs::create_org),
+        )
+        .route(
+            "/v1/orgs/{org}",
+            get(crate::orgs::get_org).patch(crate::orgs::update_org),
+        )
+        .route(
             "/v1/orgs/{org}/members",
             get(crate::management::list_members).post(crate::management::add_member),
         )

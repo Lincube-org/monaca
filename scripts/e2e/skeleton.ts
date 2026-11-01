@@ -255,6 +255,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "error=invalid_scope before the page opens; after PATCH adds the scope a role-granted sign-in " +
       "completes and the access token carries aud=the resource; DELETE is 204 and a missing one is 404",
   },
+  {
+    step: "26",
+    title: "organizations",
+    assertion:
+      "POST /v1/orgs provisions an org and returns 201 with an org_ id (a duplicate slug is " +
+      "409 MONACA_ORG_EXISTS, an invalid slug is 400); GET /v1/orgs lists it with its state, and " +
+      "GET /v1/orgs/{org} resolves both the slug and the typed id; a member added to the new org is " +
+      "listed there; PATCH {state:archived} is 200, the authorize naming that org redirects " +
+      "error=invalid_request and its member list is 404, while GET by id still reports it; " +
+      "{state:active} restores sign-in and membership, an invalid state is 400, and an unknown org is 404",
+  },
 ];
 
 interface StepResult {
@@ -5112,6 +5123,240 @@ async function apiResourceFlow(base: string, adminToken: string): Promise<StepRe
   };
 }
 
+/**
+ * Step 26 — organizations (§5.5, §6.2).
+ *
+ * Creating an org runs the §5.5 provisioning transaction; archiving is the reversible substitute
+ * for deleting it, so the slug must stop resolving for `authorize` and for the org's own
+ * sub-resources while the row stays addressable by its typed id.
+ */
+async function organizationFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `team-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const email = `org-${runId}@demo.localhost`;
+  const password = `pw-${runId}-org`;
+  const clientId = `e2e-org-${runId}`;
+  const stateValue = `st-org-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "26",
+    title: "organizations",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** An authorize URL naming the org, with a PKCE challenge. */
+  const authorizeUrl = async (): Promise<string> => {
+    const verifier = `o-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    return `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid",
+      state: stateValue,
+      nonce: `n-org-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: slug,
+    })}`;
+  };
+
+  try {
+    // --- provisioning ---------------------------------------------------------------------------
+    const created = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug }),
+    });
+    const orgId = (created.body as { id?: unknown })?.id;
+    checks.push([
+      "POST /v1/orgs provisions an org",
+      created.status === 201 &&
+        typeof orgId === "string" &&
+        orgId.startsWith("org_") &&
+        (created.body as { slug?: unknown })?.slug === slug &&
+        (created.body as { state?: unknown })?.state === "active",
+    ]);
+    if (typeof orgId !== "string") return fail("the org carried no id");
+
+    const duplicate = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug }),
+    });
+    checks.push([
+      "a duplicate slug is 409 MONACA_ORG_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_ORG_EXISTS",
+    ]);
+
+    const invalid = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug: `Bad_${runId}` }),
+    });
+    checks.push(["an invalid slug is 400", invalid.status === 400]);
+
+    // --- listing and both address forms ----------------------------------------------------------
+    const listed = await call(`${base}/v1/orgs`, { headers });
+    const items = (listed.body as { items?: { slug?: unknown; state?: unknown }[] })?.items;
+    checks.push([
+      "GET /v1/orgs lists it with its state",
+      listed.status === 200 &&
+        Array.isArray(items) &&
+        items.some((item) => item.slug === slug && item.state === "active"),
+    ]);
+
+    const bySlug = await call(`${base}/v1/orgs/${slug}`, { headers });
+    checks.push([
+      "GET /v1/orgs/{slug} reports the active org",
+      bySlug.status === 200 &&
+        (bySlug.body as { id?: unknown })?.id === orgId &&
+        (bySlug.body as { state?: unknown })?.state === "active",
+    ]);
+
+    const byId = await call(`${base}/v1/orgs/${orgId}`, { headers });
+    checks.push([
+      "GET /v1/orgs/{id} resolves the typed id",
+      byId.status === 200 && (byId.body as { slug?: unknown })?.slug === slug,
+    ]);
+
+    // --- the new org is a real membership scope --------------------------------------------------
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Org holder", password }),
+    });
+    const accountId = (account.body as { id?: unknown })?.id;
+    if (account.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const added = await call(`${base}/v1/orgs/${slug}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push([
+      "a member can join the new org",
+      added.status === 201 && (added.body as { org?: unknown })?.org === orgId,
+    ]);
+
+    const members = await call(`${base}/v1/orgs/${slug}/members`, { headers });
+    checks.push([
+      "the new org lists its member",
+      members.status === 200 && JSON.stringify(members.body).includes(email),
+    ]);
+
+    const client = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Org App",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+      }),
+    });
+    if (client.status !== 201) {
+      return fail(`POST /v1/clients → ${client.status} ${text(client.body)}`);
+    }
+
+    // --- archiving hides the org from every operational lookup -----------------------------------
+    const archived = await call(`${base}/v1/orgs/${slug}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "archived" }),
+    });
+    checks.push([
+      "PATCH archives it",
+      archived.status === 200 && (archived.body as { state?: unknown })?.state === "archived",
+    ]);
+
+    const refused = await call(await authorizeUrl(), { redirect: "manual" });
+    const refusedParams = new URL(refused.headers.get("location") ?? "", base).searchParams;
+    checks.push([
+      "authorize naming the archived org is invalid_request",
+      refused.status === 302 &&
+        refusedParams.get("error") === "invalid_request" &&
+        refusedParams.get("state") === stateValue,
+    ]);
+
+    const membersGone = await call(`${base}/v1/orgs/${slug}/members`, { headers });
+    checks.push(["its member list is 404 while archived", membersGone.status === 404]);
+
+    const byIdArchived = await call(`${base}/v1/orgs/${orgId}`, { headers });
+    checks.push([
+      "GET by id still reports the archived org",
+      byIdArchived.status === 200 && (byIdArchived.body as { state?: unknown })?.state === "archived",
+    ]);
+
+    // --- reactivating restores both -----------------------------------------------------------------
+    const restored = await call(`${base}/v1/orgs/${orgId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "active" }),
+    });
+    checks.push([
+      "PATCH by id reactivates it",
+      restored.status === 200 && (restored.body as { state?: unknown })?.state === "active",
+    ]);
+
+    const membersBack = await call(`${base}/v1/orgs/${slug}/members`, { headers });
+    checks.push([
+      "the member list works again",
+      membersBack.status === 200 && JSON.stringify(membersBack.body).includes(email),
+    ]);
+
+    const authorizeBack = await call(await authorizeUrl(), { redirect: "manual" });
+    const interaction = new URL(authorizeBack.headers.get("location") ?? "", base).searchParams.get("interaction");
+    checks.push([
+      "authorize opens the page again rather than refusing",
+      authorizeBack.status === 302 && interaction !== null,
+    ]);
+
+    const badState = await call(`${base}/v1/orgs/${slug}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "deleted" }),
+    });
+    checks.push(["an invalid state is 400", badState.status === 400]);
+
+    const defaultOrg = await call(`${base}/v1/orgs/${ORG}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "archived" }),
+    });
+    checks.push(["the tenant's default org cannot be archived", defaultOrg.status === 400]);
+
+    const missing = await call(`${base}/v1/orgs/no-such-${runId}`, { headers });
+    checks.push(["an unknown org is 404", missing.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "26",
+    title: "organizations",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: create → duplicate 409 → invalid 400 → list/get → member → archive → invalid_request → 404 → reactivate → 400 → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -5366,6 +5611,7 @@ async function main(): Promise<number> {
   push(await userManagementFlow(base, adminToken, parsed.consoleSecret));
   push(await signInExperienceFlow(base, adminToken));
   push(await apiResourceFlow(base, adminToken));
+  push(await organizationFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
