@@ -18,7 +18,10 @@ use monaca_oidc::{
     Interaction, TokenErrorCode, TokenForm, TokenRequest, at_hash, scope_subset, verify_pkce_s256,
 };
 use monaca_store::{AccountRow, OrgRow, PasskeyRow, TenantRow, topics};
-use monaca_types::{AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, TypedId};
+use monaca_types::{
+    AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, OrgInvitationId,
+    TypedId,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -609,10 +612,11 @@ async fn complete_sign_in(
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
     let org_ctx = org.ctx(&tenant);
 
-    // The account must be a member of the org the flow issues into. An organization may admit its
-    // own email domain instead of inviting each account (§6.2): a non-member whose primary email
-    // domain is registered to that org joins just in time, and the audit event records the JIT
-    // decision so the membership is afterwards indistinguishable from an administrator's.
+    // The account must be a member of the org the flow issues into. Two tenant-level rules can
+    // admit a non-member (§6.2): a pending invitation naming the account's primary email (with the
+    // role it carries), or a registered email domain (as `member`). The invitation is checked
+    // first so an invited admin is not downgraded by a domain rule; both record the join on the
+    // org chain, and the invitation also gets its own acceptance mark.
     let mut tx = state.store.begin_org(&org_ctx).await?;
     let role = state
         .store
@@ -620,26 +624,47 @@ async fn complete_sign_in(
         .await?;
     tx.rollback().await?;
     if role.is_none() {
-        let admitted = match email_domain(&account.primary_email) {
-            Some(domain) => {
-                state
-                    .store
-                    .has_org_email_domain(&tenant, org.org_id(), &domain)
-                    .await?
+        let email = account.primary_email.trim().to_ascii_lowercase();
+        let invitation = state
+            .store
+            .pending_org_invitation(&tenant, org.org_id(), &email)
+            .await?;
+        let join_role = match &invitation {
+            Some((_, invited_role)) => invited_role.clone(),
+            None => {
+                let admitted = match email_domain(&account.primary_email) {
+                    Some(domain) => {
+                        state
+                            .store
+                            .has_org_email_domain(&tenant, org.org_id(), &domain)
+                            .await?
+                    }
+                    None => false,
+                };
+                if !admitted {
+                    return Err(ApiError::problem(
+                        kinds::INSUFFICIENT_SCOPE,
+                        format!("account is not a member of `{org_slug}`"),
+                    ));
+                }
+                "member".to_owned()
             }
-            None => false,
         };
-        if !admitted {
-            return Err(ApiError::problem(
-                kinds::INSUFFICIENT_SCOPE,
-                format!("account is not a member of `{org_slug}`"),
-            ));
-        }
+
         let mut tx = state.store.begin_org(&org_ctx).await?;
         state
             .store
-            .org_member_add(&mut *tx, account.account_id(), "member")
+            .org_member_add(&mut *tx, account.account_id(), &join_role)
             .await?;
+        let mut payload = json!({
+            "org": org_slug,
+            "role": join_role,
+            "jit": invitation.is_none(),
+        });
+        if let Some((id, _)) = &invitation {
+            payload["invitation"] =
+                json!(OrgInvitationId::from_uuid(*id).to_typed_string());
+        }
         let event = AuditEvent {
             id: EventId::new(),
             at: state.now(),
@@ -652,13 +677,23 @@ async fn complete_sign_in(
             decision: AuditDecision::Allow,
             grant_id: None,
             jti: None,
-            payload: json!({ "org": org_slug, "role": "member", "jit": true }),
+            payload,
         };
         state
             .store
             .audit_append(&mut *tx, &org_ctx.schema_name, &event)
             .await?;
         tx.commit().await?;
+
+        // `tenant.organization_invitations` is outside the org role's privileges, so the mark is
+        // a separate tenant-level write after the membership commits. A failure here leaves a
+        // live invitation pointing at a member, which only the expiry cleans up — the join itself
+        // is already correct, so this is a warning rather than a failed sign-in.
+        if let Some((id, _)) = invitation
+            && let Err(err) = state.store.accept_org_invitation(&tenant, id).await
+        {
+            tracing::warn!(%err, "could not mark the organization invitation accepted");
+        }
     }
 
     // Establish (or reuse) the cross-application session before the code is minted, so the browser

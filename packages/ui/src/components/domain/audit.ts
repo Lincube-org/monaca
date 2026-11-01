@@ -78,6 +78,8 @@ export const M0_ACTIONS = [
   "org.member.roles_changed",
   "org.domain.added",
   "org.domain.removed",
+  "org.invitation.created",
+  "org.invitation.revoked",
   "org.role.created",
   "org.role.updated",
   "org.role.deleted",

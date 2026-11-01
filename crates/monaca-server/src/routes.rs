@@ -299,6 +299,14 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             delete(crate::orgs::remove_email_domain),
         )
         .route(
+            "/v1/orgs/{org}/invitations",
+            get(crate::orgs::list_invitations).post(crate::orgs::create_invitation),
+        )
+        .route(
+            "/v1/orgs/{org}/invitations/{invitation}",
+            delete(crate::orgs::revoke_invitation),
+        )
+        .route(
             "/v1/orgs/{org}/roles",
             get(crate::org_roles::list_org_roles).post(crate::org_roles::create_org_role),
         )

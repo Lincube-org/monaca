@@ -156,6 +156,13 @@ pub mod kinds {
         "Domain exists",
         409,
     );
+    /// A live organization invitation already names this address.
+    pub const INVITATION_EXISTS: ProblemKind = ProblemKind::new(
+        "invitation_exists",
+        "MONACA_INVITATION_EXISTS",
+        "Invitation exists",
+        409,
+    );
     /// A connector slug is already registered in this tenant.
     pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
         "connector_exists",
@@ -293,6 +300,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "api resource" => kinds::RESOURCE_EXISTS,
                     "organization" => kinds::ORG_EXISTS,
                     "email domain" => kinds::DOMAIN_EXISTS,
+                    "invitation" => kinds::INVITATION_EXISTS,
                     "org role" => kinds::ORG_ROLE_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };

@@ -297,6 +297,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "the id_token carries org_roles and the access token carries the scope; before the assignment " +
       "the same request is 403 MONACA_INSUFFICIENT_SCOPE; unassigning is 204 and repeating it is 404",
   },
+  {
+    step: "30",
+    title: "org invitations",
+    assertion:
+      "POST /v1/orgs/{org}/invitations invites an address with a role (201, lowercased; a live " +
+      "duplicate is 409 MONACA_INVITATION_EXISTS, an invalid address is 400) and GET lists it; the " +
+      "invited account signs in to an authorize naming the org and joins with the invited role " +
+      "(sign-in → code → token with the org), after which the invitation is no longer listed; a " +
+      "revoked invitation is gone from the list, and that account's sign-in is 403 " +
+      "MONACA_INSUFFICIENT_SCOPE",
+  },
 ];
 
 interface StepResult {
@@ -6025,6 +6036,253 @@ async function orgRoleFlow(base: string, adminToken: string): Promise<StepResult
   };
 }
 
+/**
+ * Step 30 — organization invitations accepted at sign-in (§6.2).
+ *
+ * An invitation names one address and a role; there is no bearer token, so the invited account
+ * joins by signing in to the org. A revoked invitation stops admitting that address immediately.
+ */
+async function orgInvitationFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `inv-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const clientId = `e2e-inv-${runId}`;
+  const inviteeEmail = `invitee-${runId}@demo.localhost`;
+  const revokedEmail = `revoked-${runId}@demo.localhost`;
+  const password = `pw-${runId}-inv`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "30",
+    title: "org invitations",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** An authorize URL naming the org, with a PKCE challenge. */
+  const authorize = async (tag: string): Promise<{ url: string; verifier: string }> => {
+    const verifier = `d-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: slug,
+    })}`;
+    return { url, verifier };
+  };
+
+  /** Opens an interaction for `email` and returns the sign-in response with its PKCE verifier. */
+  const signIn = async (
+    tag: string,
+    email: string,
+  ): Promise<{ status: number; body: unknown; verifier: string }> => {
+    const request = await authorize(tag);
+    const started = await call(request.url, { redirect: "manual" });
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) {
+      throw new Error(`authorize(${tag}) → ${started.status} ${text(started.body)}`);
+    }
+    const response = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      },
+    );
+    return { ...response, verifier: request.verifier };
+  };
+
+  try {
+    const created = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug }),
+    });
+    const orgId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof orgId !== "string") {
+      return fail(`POST /v1/orgs → ${created.status} ${text(created.body)}`);
+    }
+
+    const client = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Invitation App",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+      }),
+    });
+    if (client.status !== 201) {
+      return fail(`POST /v1/clients → ${client.status} ${text(client.body)}`);
+    }
+
+    for (const email of [inviteeEmail, revokedEmail]) {
+      const account = await call(`${base}/v1/accounts`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ email, display_name: "Invitee", password }),
+      });
+      if (account.status !== 201) {
+        return fail(`POST /v1/accounts (${email}) → ${account.status} ${text(account.body)}`);
+      }
+    }
+
+    // --- creating, validating and listing an invitation ----------------------------------------
+    const invited = await call(`${base}/v1/orgs/${slug}/invitations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: ` ${inviteeEmail.toUpperCase()} `, role: "admin", expires_in_days: 3 }),
+    });
+    const invitation = invited.body as { id?: unknown; email?: unknown; role?: unknown };
+    checks.push([
+      "POST returns the invitation lowercased and in the typed form",
+      invited.status === 201 &&
+        invitation.email === inviteeEmail &&
+        invitation.role === "admin" &&
+        typeof invitation.id === "string" &&
+        invitation.id.startsWith("inv_"),
+    ]);
+    if (invited.status !== 201 || typeof invitation.id !== "string") {
+      return fail(`POST /v1/orgs/${slug}/invitations → ${invited.status} ${text(invited.body)}`);
+    }
+
+    const duplicate = await call(`${base}/v1/orgs/${slug}/invitations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: inviteeEmail }),
+    });
+    checks.push([
+      "a live invitation for the same address is 409 MONACA_INVITATION_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_INVITATION_EXISTS",
+    ]);
+
+    const invalid = await call(`${base}/v1/orgs/${slug}/invitations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: "not-an-email" }),
+    });
+    checks.push(["an invalid address is 400", invalid.status === 400]);
+
+    const listed = await call(`${base}/v1/orgs/${slug}/invitations`, { headers });
+    checks.push([
+      "GET lists the pending invitation",
+      listed.status === 200 && JSON.stringify(listed.body).includes(inviteeEmail),
+    ]);
+
+    // --- the invited account joins on sign-in with the invited role -----------------------------
+    const joined = await signIn("join", inviteeEmail);
+    const redirectTo = (joined.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "the invited account signs in",
+      joined.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (joined.status !== 200 || typeof redirectTo !== "string") {
+      return fail(`sign-in (invited) → ${joined.status} ${text(joined.body)}`);
+    }
+
+    const verifier = joined.verifier;
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: verifier,
+    });
+    const claims = jwtClaims((token.body as { access_token?: unknown })?.access_token);
+    checks.push([
+      "the accepted invitation's token carries the org",
+      token.status === 200 && claims !== undefined && claims.org === orgId,
+    ]);
+
+    const members = await call(`${base}/v1/orgs/${slug}/members`, { headers });
+    const items = (members.body as { items?: { email?: string; role?: string }[] })?.items;
+    const joinedMember = Array.isArray(items)
+      ? items.find((item) => item.email === inviteeEmail)
+      : undefined;
+    checks.push([
+      "the join uses the invited role, not the default",
+      members.status === 200 && joinedMember?.role === "admin",
+    ]);
+
+    const afterAccept = await call(`${base}/v1/orgs/${slug}/invitations`, { headers });
+    checks.push([
+      "accepted invitations are no longer listed",
+      afterAccept.status === 200 && !JSON.stringify(afterAccept.body).includes(inviteeEmail),
+    ]);
+
+    // --- a revoked invitation stops admitting its address ---------------------------------------
+    const pending = await call(`${base}/v1/orgs/${slug}/invitations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: revokedEmail }),
+    });
+    const pendingId = (pending.body as { id?: unknown })?.id;
+    if (pending.status !== 201 || typeof pendingId !== "string") {
+      return fail(`POST /v1/orgs/${slug}/invitations (revoked) → ${pending.status} ${text(pending.body)}`);
+    }
+
+    const revoked = await call(`${base}/v1/orgs/${slug}/invitations/${pendingId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["DELETE the invitation is 204", revoked.status === 204]);
+
+    const afterRevoke = await call(`${base}/v1/orgs/${slug}/invitations`, { headers });
+    checks.push([
+      "the revoked invitation is no longer listed",
+      afterRevoke.status === 200 && !JSON.stringify(afterRevoke.body).includes(revokedEmail),
+    ]);
+
+    const revokedAgain = await call(`${base}/v1/orgs/${slug}/invitations/${pendingId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["revoking it again is 404", revokedAgain.status === 404]);
+
+    const refused = await signIn("revoked", revokedEmail);
+    checks.push([
+      "a revoked invitation is refused",
+      refused.status === 403 &&
+        (refused.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_INSUFFICIENT_SCOPE",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "30",
+    title: "org invitations",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: invite → duplicate 409 → invalid 400 → list → sign-in → token org → admin role → hidden → revoke 204 → hidden → 404 → refused`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -6283,6 +6541,7 @@ async function main(): Promise<number> {
   push(await orgMemberFlow(base, adminToken));
   push(await orgDomainFlow(base, adminToken));
   push(await orgRoleFlow(base, adminToken));
+  push(await orgInvitationFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

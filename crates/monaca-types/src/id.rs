@@ -183,6 +183,7 @@ fn is_known_prefix(prefix: &str) -> bool {
             | "mfd"
             | "rol"
             | "res"
+            | "inv"
     )
 }
 
@@ -349,6 +350,11 @@ typed_id!(
     /// API resource (`res_…`): a registered resource indicator and the scopes it defines.
     ResourceId,
     "res"
+);
+typed_id!(
+    /// Organization invitation (`inv_…`): an email address invited to join an organization.
+    OrgInvitationId,
+    "inv"
 );
 
 #[cfg(test)]

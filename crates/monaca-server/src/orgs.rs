@@ -13,10 +13,11 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActorType, AuditDecision, AuditEvent, AuditSubject};
-use monaca_store::{OrgRow, TenantRow};
-use monaca_types::{EventId, OrgId, TypedId};
+use monaca_store::{OrgInvitationRow, OrgRow, TenantRow};
+use monaca_types::{AccountId, EventId, OrgId, OrgInvitationId, TypedId};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use time::Duration;
 
 use crate::error::{ApiError, kinds};
 use crate::management::{authorize_admin, ts};
@@ -281,6 +282,167 @@ pub async fn remove_email_domain(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The body of `POST /v1/orgs/{org}/invitations`.
+#[derive(Debug, Deserialize)]
+pub struct CreateInvitationBody {
+    /// The invited address, matched case-insensitively against an account's primary email.
+    pub email: String,
+    /// `owner` | `admin` | `member`; defaults to `member`.
+    pub role: Option<String>,
+    /// How long the invitation keeps admitting its address; defaults to 7 days.
+    pub expires_in_days: Option<i64>,
+}
+
+/// `GET /v1/orgs/{org}/invitations` — the invitations that still admit their address (§6.2).
+pub async fn list_invitations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let rows = state.store.org_invitations(&tenant, org.org_id()).await?;
+    let items: Vec<Value> = rows.iter().map(invitation_json).collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `POST /v1/orgs/{org}/invitations` — invite an email address to join the org.
+///
+/// The invitation writes a tenant-chain audit event and nothing else: no token is minted and no
+/// email is sent, because acceptance is the invited account signing in (§6.2).
+pub async fn create_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+    Json(body): Json<CreateInvitationBody>,
+) -> Result<Response, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let Some(email) = normalise_email(&body.email) else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "email must be a single address without whitespace",
+        ));
+    };
+    let role = body.role.as_deref().unwrap_or("member");
+    if !matches!(role, "owner" | "admin" | "member") {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "role must be owner, admin or member",
+        ));
+    }
+    let days = body.expires_in_days.unwrap_or(7);
+    if !(1..=90).contains(&days) {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "expires_in_days must be between 1 and 90",
+        ));
+    }
+
+    let expires_at = state.now() + Duration::days(days);
+    let row = state
+        .store
+        .create_org_invitation(
+            &tenant,
+            org.org_id(),
+            OrgInvitationId::new().uuid(),
+            &email,
+            role,
+            admin.account_id.map(|account| account.uuid()),
+            expires_at,
+        )
+        .await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "org.invitation.created".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Org,
+            id: Some(org.org_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "org": org.slug,
+            "email": row.email,
+            "role": row.role,
+            "expires_at": ts(row.expires_at),
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append org.invitation.created audit event");
+    }
+
+    Ok((StatusCode::CREATED, Json(invitation_json(&row))).into_response())
+}
+
+/// `DELETE /v1/orgs/{org}/invitations/{invitation}` — revoke a pending invitation.
+pub async fn revoke_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((org, raw)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let invitation = OrgInvitationId::parse(&raw).map_err(|_| {
+        ApiError::problem(kinds::INVALID_REQUEST, "not an organization invitation id")
+    })?;
+    let Some(email) = state
+        .store
+        .revoke_org_invitation(&tenant, org.org_id(), invitation.uuid())
+        .await?
+    else {
+        return Err(ApiError::not_found("invitation"));
+    };
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "org.invitation.revoked".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Org,
+            id: Some(org.org_id().to_typed_string()),
+        },
+        decision: AuditDecision::Deny,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "org": org.slug, "email": email, "invitation": invitation.to_typed_string() }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append org.invitation.revoked audit event");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Trim and lowercase an email, rejecting anything that is not a single address.
+///
+/// The rule is deliberately looser than the account schema's: an invitation may name an address
+/// before the account exists, so it only has to be one `local@domain` with no whitespace.
+fn normalise_email(raw: &str) -> Option<String> {
+    let email = raw.trim().to_ascii_lowercase();
+    if email.matches('@').count() != 1 || email.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (local, domain) = email.split_once('@')?;
+    (!local.is_empty() && !domain.is_empty()).then_some(email)
+}
+
+fn invitation_json(row: &OrgInvitationRow) -> Value {
+    json!({
+        "id": row.invitation_id().to_typed_string(),
+        "email": row.email,
+        "role": row.role,
+        "invited_by": row.invited_by.map(|id| AccountId::from_uuid(id).to_typed_string()),
+        "created_at": ts(row.created_at),
+        "expires_at": ts(row.expires_at),
+    })
+}
+
 /// Trim and lowercase a domain, rejecting anything that is not a plain DNS name.
 ///
 /// The same rule as the `organization_email_domains` CHECK constraint (§5.6), so a malformed value
@@ -357,6 +519,24 @@ mod tests {
             &"x".repeat(32),
         ] {
             assert!(!valid_slug(bad), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn the_invitation_email_rule_lowercases_and_rejects_junk() {
+        assert_eq!(
+            normalise_email(" User@Example.COM "),
+            Some("user@example.com".to_owned())
+        );
+        for bad in [
+            "",
+            "user",
+            "@example.com",
+            "user@",
+            "user@@example.com",
+            "us er@example.com",
+        ] {
+            assert!(normalise_email(bad).is_none(), "{bad} must be rejected");
         }
     }
 

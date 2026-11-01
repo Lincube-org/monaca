@@ -166,6 +166,30 @@ impl ApiResourceRow {
     }
 }
 
+/// A pending invitation to join an organization, in `tenant.organization_invitations` (§5.6).
+#[derive(Debug, Clone, FromRow)]
+pub struct OrgInvitationRow {
+    /// Row id; its typed form is the `inv_…` id the API uses.
+    pub id: Uuid,
+    /// The invited address, lowercased.
+    pub email: String,
+    /// The role the account receives when the invitation is accepted.
+    pub role: String,
+    /// The administrator who issued it; `NULL` after that account is deleted.
+    pub invited_by: Option<Uuid>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// The moment the invitation stops admitting its address.
+    pub expires_at: OffsetDateTime,
+}
+
+impl OrgInvitationRow {
+    /// The invitation's typed id.
+    pub fn invitation_id(&self) -> monaca_types::OrgInvitationId {
+        monaca_types::OrgInvitationId::from_uuid(self.id)
+    }
+}
+
 impl RoleRow {
     /// The role's typed id.
     pub fn role_id(&self) -> monaca_types::RoleId {
@@ -2011,6 +2035,135 @@ impl Store {
         .bind(domain)
         .fetch_one(&pool)
         .await?)
+    }
+
+    // ------------------------------------------------------- organization invitations
+
+    /// The invitations that still admit their address, oldest first.
+    ///
+    /// Accepted and expired rows stay for the record but are not listed: the management view is
+    /// the set of invitations an administrator can still revoke (§6.2).
+    pub async fn org_invitations(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+    ) -> Result<Vec<OrgInvitationRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, OrgInvitationRow>(
+            "SELECT id, email, role, invited_by, created_at, expires_at
+             FROM tenant.organization_invitations
+             WHERE org_id = $1 AND accepted_at IS NULL AND expires_at > now()
+             ORDER BY created_at",
+        )
+        .bind(org_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Invite `email` to join an org with `role`; a live invitation for the same address is
+    /// `AlreadyExists { entity: "invitation" }`.
+    ///
+    /// An expired row for the same pair is removed first, so re-inviting after the expiry date is
+    /// the natural retry rather than a conflict the administrator has to clean up by hand.
+    pub async fn create_org_invitation(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        id: Uuid,
+        email: &str,
+        role: &str,
+        invited_by: Option<Uuid>,
+        expires_at: OffsetDateTime,
+    ) -> Result<OrgInvitationRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM tenant.organization_invitations
+             WHERE org_id = $1 AND email = $2 AND accepted_at IS NULL AND expires_at <= now()",
+        )
+        .bind(org_id.uuid())
+        .bind(email)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query_as::<_, OrgInvitationRow>(
+            "INSERT INTO tenant.organization_invitations
+                (id, org_id, email, role, invited_by, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             RETURNING id, email, role, invited_by, created_at, expires_at",
+        )
+        .bind(id)
+        .bind(org_id.uuid())
+        .bind(email)
+        .bind(role)
+        .bind(invited_by)
+        .bind(expires_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| unique_conflict(err, "invitation"))?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Revoke a pending invitation, returning its address; `None` when it is already accepted,
+    /// expired past the cleanup window or simply not there.
+    pub async fn revoke_org_invitation(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        id: Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let removed: Option<(String,)> = sqlx::query_as(
+            "DELETE FROM tenant.organization_invitations
+             WHERE id = $1 AND org_id = $2 AND accepted_at IS NULL
+             RETURNING email",
+        )
+        .bind(id)
+        .bind(org_id.uuid())
+        .fetch_optional(&pool)
+        .await?;
+        Ok(removed.map(|(email,)| email))
+    }
+
+    /// The live invitation for `email` in an org — the acceptance predicate of sign-in (§6.2).
+    pub async fn pending_org_invitation(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        email: &str,
+    ) -> Result<Option<(Uuid, String)>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as(
+            "SELECT id, role FROM tenant.organization_invitations
+             WHERE org_id = $1 AND email = $2 AND accepted_at IS NULL AND expires_at > now()
+             ORDER BY created_at LIMIT 1",
+        )
+        .bind(org_id.uuid())
+        .bind(email)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Mark an invitation accepted; `false` when another sign-in consumed it first.
+    ///
+    /// Deliberately a tenant-level write: the org role that owns a sign-in transaction has no
+    /// privileges on `tenant.organization_invitations`, so acceptance runs after the membership
+    /// transaction commits. A missed acceptance leaves a pending row pointing at a member, which
+    /// the list hides only when the row expires — the membership itself is already correct.
+    pub async fn accept_org_invitation(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.organization_invitations SET accepted_at = now()
+             WHERE id = $1 AND accepted_at IS NULL",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // --------------------------------------------------------- organization roles
