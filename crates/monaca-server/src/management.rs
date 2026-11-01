@@ -832,6 +832,17 @@ fn normalise_rejected_words(words: Option<&[String]>) -> Result<Option<Vec<Strin
     Ok(Some(normalised))
 }
 
+/// Reject a stylesheet over the contract's 20 000-character limit.
+pub(crate) fn validate_custom_css(css: &str) -> Result<(), ApiError> {
+    if css.trim().chars().count() > 20_000 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "custom_css must be at most 20000 characters",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a branding patch: non-empty values must be usable by the page.
 fn check_branding(branding: &BrandingPatch) -> Result<(), ApiError> {
     if branding.is_empty() {
@@ -872,13 +883,8 @@ fn check_branding(branding: &BrandingPatch) -> Result<(), ApiError> {
             ));
         }
     }
-    if let Some(css) = branding.custom_css.as_deref()
-        && css.trim().chars().count() > 20_000
-    {
-        return Err(ApiError::problem(
-            kinds::INVALID_REQUEST,
-            "custom_css must be at most 20000 characters",
-        ));
+    if let Some(css) = branding.custom_css.as_deref() {
+        validate_custom_css(css)?;
     }
     Ok(())
 }

@@ -348,6 +348,8 @@ pub struct ClientRow {
     pub token_auth_method: String,
     /// Registered public keys for `private_key_jwt`.
     pub jwks: Option<Value>,
+    /// Application-specific CSS for the hosted page; falls back to the tenant's.
+    pub custom_css: Option<String>,
     /// Scopes this client may ask for.
     pub scopes: Vec<String>,
     /// A third-party application must show a consent screen.
@@ -3053,8 +3055,8 @@ impl Store {
     ) -> Result<Option<ClientRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
-            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                    is_third_party, created_at
+            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
+                    scopes, is_third_party, created_at
              FROM tenant.clients WHERE client_id = $1",
         )
         .bind(client_id)
@@ -3070,8 +3072,8 @@ impl Store {
     ) -> Result<Option<ClientRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
-            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                    is_third_party, created_at
+            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
+                    scopes, is_third_party, created_at
              FROM tenant.clients WHERE id = $1",
         )
         .bind(id)
@@ -3166,8 +3168,8 @@ impl Store {
     pub async fn clients(&self, tenant: &TenantRow) -> Result<Vec<ClientRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
-            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                    is_third_party, created_at
+            "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
+                    scopes, is_third_party, created_at
              FROM tenant.clients ORDER BY client_id",
         )
         .fetch_all(&pool)
@@ -3200,8 +3202,8 @@ impl Store {
                (id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
                 post_logout_redirect_uris, is_third_party)
              VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9)
-             RETURNING id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                       is_third_party, created_at",
+             RETURNING id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
+                       scopes, is_third_party, created_at",
         )
         .bind(Uuid::now_v7())
         .bind(client_id)
@@ -3243,6 +3245,7 @@ impl Store {
         scopes: Option<&[String]>,
         redirect_uris: Option<&[String]>,
         post_logout_redirect_uris: Option<&[String]>,
+        custom_css: Option<&str>,
     ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
@@ -3250,13 +3253,16 @@ impl Store {
             "UPDATE tenant.clients
              SET name = COALESCE($2, name),
                  scopes = COALESCE($3, scopes),
-                 post_logout_redirect_uris = COALESCE($4, post_logout_redirect_uris)
+                 post_logout_redirect_uris = COALESCE($4, post_logout_redirect_uris),
+                 custom_css = CASE WHEN $5 IS NULL THEN custom_css
+                                   WHEN $5 = '' THEN NULL ELSE $5 END
              WHERE id = $1",
         )
         .bind(id)
         .bind(name)
         .bind(scopes)
         .bind(post_logout_redirect_uris)
+        .bind(custom_css)
         .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {

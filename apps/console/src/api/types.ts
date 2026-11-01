@@ -191,6 +191,8 @@ export interface Client {
   scopes: string[];
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
+  /** Application CSS for the hosted page; `null` falls back to the tenant's. */
+  custom_css: string | null;
   is_third_party: boolean;
   created_at: string;
 }
@@ -557,6 +559,8 @@ export interface UpdateClientRequest {
   redirect_uris?: string[];
   post_logout_redirect_uris?: string[];
   scopes?: string[];
+  /** Application CSS; an empty string clears it. */
+  custom_css?: string;
 }
 
 export interface ListAuditQuery {

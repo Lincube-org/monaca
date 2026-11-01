@@ -368,6 +368,7 @@ class MockStore {
       scopes,
       redirect_uris: redirectUris,
       post_logout_redirect_uris: postLogout,
+      custom_css: null,
       is_third_party: body.is_third_party,
       created_at: new Date().toISOString(),
     };
@@ -426,12 +427,26 @@ class MockStore {
         ? client.post_logout_redirect_uris
         : normaliseUris(body.post_logout_redirect_uris, "post_logout_redirect_uris");
 
+    // §6.2: an empty string clears the application's style; an absent field leaves it alone.
+    let customCss = client.custom_css;
+    if (body.custom_css !== undefined) {
+      const trimmed = body.custom_css.trim();
+      if ([...trimmed].length > 20_000) {
+        throw new ApiError("custom_css must be at most 20000 characters", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      customCss = trimmed === "" ? null : trimmed;
+    }
+
     const updated: Client = {
       ...client,
       name,
       scopes,
       redirect_uris: redirectUris,
       post_logout_redirect_uris: postLogout,
+      custom_css: customCss,
     };
     this.clients = [...this.clients.slice(0, index), updated, ...this.clients.slice(index + 1)];
 

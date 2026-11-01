@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts};
+use crate::management::{authorize_admin, ts, validate_custom_css};
 use crate::state::AppState;
 
 /// The body of `POST /v1/clients`.
@@ -57,6 +57,8 @@ pub struct UpdateClientBody {
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Replacement scope set.
     pub scopes: Option<Vec<String>>,
+    /// Application CSS for the hosted page; an empty string clears it.
+    pub custom_css: Option<String>,
 }
 
 /// `POST /v1/clients` — register an application.
@@ -207,6 +209,14 @@ pub async fn update_client(
         .as_deref()
         .map(|uris| normalise_uris(uris, "post_logout_redirect_uris"))
         .transpose()?;
+    let custom_css = match body.custom_css.as_deref() {
+        Some(css) => {
+            let css = css.trim();
+            validate_custom_css(css)?;
+            Some(css.to_owned())
+        }
+        None => None,
+    };
 
     if !state
         .store
@@ -217,6 +227,7 @@ pub async fn update_client(
             scopes.as_deref(),
             redirect_uris.as_deref(),
             post_logout.as_deref(),
+            custom_css.as_deref(),
         )
         .await?
     {
@@ -366,6 +377,7 @@ fn client_json(row: &ClientRow, redirect_uris: &[String], post_logout: &[String]
         "scopes": row.scopes,
         "redirect_uris": redirect_uris,
         "post_logout_redirect_uris": post_logout,
+        "custom_css": row.custom_css,
         "is_third_party": row.is_third_party,
         "created_at": ts(row.created_at),
     })

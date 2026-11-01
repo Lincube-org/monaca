@@ -181,6 +181,10 @@ export const messages = {
     postLogoutUrisHint: "One per line. Where RP-initiated logout may return the user. Optional.",
     scopesField: "Scopes",
     scopesHint: "Space- or comma-separated, such as openid profile tools:read. Optional.",
+    customCssField: "Custom CSS",
+    customCssHint:
+      "Applied to this application's hosted sign-in pages in place of the tenant's CSS. Empty falls back to the tenant style. At most 20,000 characters.",
+    invalidCustomCss: "Custom CSS must be at most 20,000 characters",
     thirdPartyField: "Third-party application",
     thirdPartyHint: "Always shows the consent screen, even after a previous approval.",
     createdToast: "Application registered",

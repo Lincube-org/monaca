@@ -214,8 +214,12 @@ export function getInteraction(tenant: string, iid: string): Promise<Interaction
 }
 
 /** The tenant's public sign-in switches — public because the page reads them before sign-in. */
-export function getSignInExperience(tenant: string): Promise<SignInExperience> {
-  return call<SignInExperience>(`/t/${encodeURIComponent(tenant)}/sign-in-experience`);
+export function getSignInExperience(
+  tenant: string,
+  clientId?: string | null,
+): Promise<SignInExperience> {
+  const query = clientId ? `?client_id=${encodeURIComponent(clientId)}` : "";
+  return call<SignInExperience>(`/t/${encodeURIComponent(tenant)}/sign-in-experience${query}`);
 }
 
 /**

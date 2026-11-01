@@ -43,20 +43,39 @@ pub async fn discovery(
     Ok(Json(DiscoveryDocument::new(tenant.issuer).to_json()))
 }
 
+/// The optional application whose CSS should override the tenant's.
+#[derive(Debug, Deserialize)]
+pub struct SignInExperienceQuery {
+    /// The protocol `client_id` from the authorize request.
+    pub client_id: Option<String>,
+}
+
 /// `GET /t/{tenant}/sign-in-experience` — the hosted switches the page applies before rendering.
 ///
 /// Public like the connector list: the sign-in page must know which forms to offer before anyone
-/// is signed in, and these switches disclose nothing about accounts.
+/// is signed in, and these switches disclose nothing about accounts. An optional `client_id`
+/// selects the application's CSS when it has one; the tenant's branding stays the fallback.
 pub async fn sign_in_experience(
     State(state): State<Arc<AppState>>,
     Path(tenant): Path<String>,
+    Query(query): Query<SignInExperienceQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let tenant = state.tenant(&tenant).await?;
     if !tenant.is_active() {
         return Err(ApiError::problem(kinds::NOT_FOUND, "tenant is not active"));
     }
     let experience = state.store.sign_in_experience(&tenant).await?;
-    let branding = state.store.branding(&tenant).await?;
+    let mut branding = state.store.branding(&tenant).await?;
+    if let Some(client_id) = query
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && let Some(client) = state.store.client_by_client_id(&tenant, client_id).await?
+        && let Some(css) = client.custom_css.filter(|css| !css.trim().is_empty())
+    {
+        branding.custom_css = Some(css);
+    }
     Ok(Json(json!({
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,

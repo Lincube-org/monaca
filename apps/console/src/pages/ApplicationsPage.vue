@@ -69,6 +69,7 @@ const redirectUrisText = ref("");
 const postLogoutText = ref("");
 const scopesText = ref("");
 const thirdParty = ref(false);
+const customCss = ref("");
 const formError = ref<string | null>(null);
 
 /** The protocol-id rule from §6.2, checked before a round trip is spent on it. */
@@ -79,6 +80,9 @@ const urisLookValid = computed(
     splitLines(redirectUrisText.value).every((uri) => /^https?:\/\/[^\s]+$/.test(uri)) &&
     splitLines(postLogoutText.value).every((uri) => /^https?:\/\/[^\s]+$/.test(uri)),
 );
+
+/** §6.2: the same 20,000-character ceiling the server enforces. */
+const cssLooksValid = computed(() => [...customCss.value.trim()].length <= 20_000);
 
 function splitLines(text: string): string[] {
   return text
@@ -94,7 +98,7 @@ function splitScopes(text: string): string[] {
     .filter((scope) => scope.length > 0);
 }
 
-watch([name, clientId, redirectUrisText, postLogoutText], () => (formError.value = null));
+watch([name, clientId, redirectUrisText, postLogoutText, customCss], () => (formError.value = null));
 
 function openCreate(): void {
   editing.value = null;
@@ -105,6 +109,7 @@ function openCreate(): void {
   postLogoutText.value = "";
   scopesText.value = "openid profile email";
   thirdParty.value = false;
+  customCss.value = "";
   formError.value = null;
   formOpen.value = true;
 }
@@ -118,6 +123,7 @@ function openEdit(client: Client): void {
   postLogoutText.value = client.post_logout_redirect_uris.join("\n");
   scopesText.value = client.scopes.join(" ");
   thirdParty.value = client.is_third_party;
+  customCss.value = client.custom_css ?? "";
   formError.value = null;
   formOpen.value = true;
 }
@@ -133,6 +139,10 @@ async function submit(): Promise<void> {
   }
   if (!urisLookValid.value) {
     formError.value = t("applications.invalidUris");
+    return;
+  }
+  if (!cssLooksValid.value) {
+    formError.value = t("applications.invalidCustomCss");
     return;
   }
   formError.value = null;
@@ -164,7 +174,10 @@ async function submit(): Promise<void> {
         showSecret(created.client_id, created.client_secret);
       }
     } else {
-      const updated = await updateClient.mutateAsync({ clientId: editing.value.id, body });
+      const updated = await updateClient.mutateAsync({
+        clientId: editing.value.id,
+        body: { ...body, custom_css: customCss.value },
+      });
       formOpen.value = false;
       toast({
         title: t("applications.updatedToast"),
@@ -453,6 +466,22 @@ function formatDate(at: string): string {
             <Label for="app-scopes">{{ t('applications.scopesField') }}</Label>
             <Input id="app-scopes" v-model="scopesText" placeholder="openid profile email" autocomplete="off" spellcheck="false" />
             <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('applications.scopesHint') }}</p>
+          </div>
+
+          <div v-if="editing !== null" class="flex flex-col gap-1.5">
+            <Label for="app-custom-css">{{ t('applications.customCssField') }}</Label>
+            <Textarea
+              id="app-custom-css"
+              v-model="customCss"
+              :invalid="!cssLooksValid"
+              rows="6"
+              placeholder=":root { --monaca-accent: #4f46e5; }"
+              spellcheck="false"
+              class="mono-data text-[12px]"
+            />
+            <p class="text-[11.5px] leading-snug text-ink-faint">
+              {{ t('applications.customCssHint') }}
+            </p>
           </div>
 
           <div v-if="editing === null" class="flex items-start gap-2">

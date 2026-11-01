@@ -476,7 +476,10 @@ onMounted(async () => {
     // The switches decide which forms the page offers. A failed read keeps every method so a
     // transient error cannot keep a visitor from signing in.
     try {
-      experience.value = await getSignInExperience(tenantFromUrl.value);
+      experience.value = await getSignInExperience(
+        tenantFromUrl.value,
+        details.value?.client.client_id,
+      );
       if (!experience.value.password_sign_in_enabled && experience.value.email_code_sign_in_enabled) {
         mode.value = "code";
       }

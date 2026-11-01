@@ -413,6 +413,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "public read follows; a word shorter than three characters and a list over 100 words are 400; a password " +
       "containing a listed word is 400 MONACA_WEAK_PASSWORD while a clean one is 201; an empty list restores none",
   },
+  {
+    step: "43",
+    title: "application custom CSS",
+    assertion:
+      "PATCH /v1/clients/{client} {custom_css:…} is 200 and GET /t/{tenant}/sign-in-experience?client_id=… serves " +
+      "that stylesheet; without client_id or for an unknown client_id the tenant's CSS is served; a stylesheet " +
+      "over 20,000 characters is 400; an empty string clears it and the client-scoped read falls back",
+  },
 ];
 
 interface StepResult {
@@ -8428,6 +8436,144 @@ async function passwordWordListFlow(base: string, adminToken: string): Promise<S
   };
 }
 
+/**
+ * Step 43: an application's own stylesheet replaces the tenant's on its hosted page.
+ *
+ * The precedence is deliberately narrow: the tenant stylesheet is the fallback, and the
+ * application one applies only when the public read is told which `client_id` is signing in.
+ * An unknown id or a cleared value therefore returns the tenant style, which is what a
+ * misconfigured authorize request should render rather than an unstyled page.
+ */
+async function applicationCssFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const clientId = `e2e-css-${runId}`;
+  const tenantCss = ".mono-card { border-radius: 4px; }";
+  const applicationCss = ".mono-card { border-radius: 16px; }";
+
+  const brandingCss = (body: unknown): unknown =>
+    (body as { branding?: { custom_css?: unknown } } | undefined)?.branding?.custom_css;
+  const clientCss = (body: unknown): unknown =>
+    (body as { custom_css?: unknown } | undefined)?.custom_css;
+
+  const setTenantCss = (css: string): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { custom_css: css } }),
+    });
+
+  const publicRead = (query: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/sign-in-experience${query}`);
+
+  let rowId: string | undefined;
+  try {
+    const tenantWritten = await setTenantCss(tenantCss);
+    checks.push(["the tenant stylesheet is set", tenantWritten.status === 200]);
+
+    const created = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Styled",
+        kind: "public",
+        redirect_uris: ["http://localhost:5173/bff/callback"],
+        scopes: ["openid", "profile"],
+      }),
+    });
+    const createdRowId = (created.body as { id?: unknown } | undefined)?.id;
+    if (typeof createdRowId === "string") rowId = createdRowId;
+    checks.push([
+      "POST /v1/clients starts without an application stylesheet",
+      created.status === 201 && clientCss(created.body) === null,
+    ]);
+    if (rowId === undefined) {
+      return {
+        step: "43",
+        title: "application custom CSS",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /v1/clients → ${created.status} ${text(created.body)}`,
+      };
+    }
+
+    const styled = await call(`${base}/v1/clients/${rowId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ custom_css: applicationCss }),
+    });
+    checks.push([
+      "PATCH stores the application stylesheet",
+      styled.status === 200 && clientCss(styled.body) === applicationCss,
+    ]);
+
+    const scoped = await publicRead(`?client_id=${encodeURIComponent(clientId)}`);
+    checks.push([
+      "the client-scoped public read serves the application stylesheet",
+      scoped.status === 200 && brandingCss(scoped.body) === applicationCss,
+    ]);
+
+    const tenantRead = await publicRead("");
+    checks.push([
+      "without client_id the public read keeps the tenant stylesheet",
+      tenantRead.status === 200 && brandingCss(tenantRead.body) === tenantCss,
+    ]);
+
+    const unknown = await publicRead(`?client_id=unknown-${runId}`);
+    checks.push([
+      "an unknown client_id falls back to the tenant stylesheet",
+      unknown.status === 200 && brandingCss(unknown.body) === tenantCss,
+    ]);
+
+    const tooLong = await call(`${base}/v1/clients/${rowId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ custom_css: "x".repeat(20_001) }),
+    });
+    checks.push(["a stylesheet over 20,000 characters is 400", tooLong.status === 400]);
+
+    const cleared = await call(`${base}/v1/clients/${rowId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ custom_css: "" }),
+    });
+    checks.push([
+      "an empty string clears the application stylesheet",
+      cleared.status === 200 && clientCss(cleared.body) === null,
+    ]);
+
+    const fallen = await publicRead(`?client_id=${encodeURIComponent(clientId)}`);
+    checks.push([
+      "after clearing, the client-scoped read falls back to the tenant stylesheet",
+      fallen.status === 200 && brandingCss(fallen.body) === tenantCss,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (rowId !== undefined) {
+      await call(`${base}/v1/clients/${rowId}`, { method: "DELETE", headers }).catch(() => undefined);
+    }
+    await setTenantCss("").catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "43",
+    title: "application custom CSS",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: tenant set → create → PATCH → scoped/tenant/unknown reads → 20,001 is 400 → cleared → fallback`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -8699,6 +8845,7 @@ async function main(): Promise<number> {
   push(await customCssFlow(base, adminToken));
   push(await passwordRejectionsFlow(base, adminToken));
   push(await passwordWordListFlow(base, adminToken));
+  push(await applicationCssFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

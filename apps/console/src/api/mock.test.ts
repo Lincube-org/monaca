@@ -272,9 +272,38 @@ describe("applications", () => {
     expect(updated.redirect_uris).toEqual(["https://after.example/cb"]);
     expect(updated.post_logout_redirect_uris).toEqual([]);
     expect(updated.scopes).toEqual(["openid", "profile"]);
+    // An absent CSS field leaves the stored value alone.
+    expect(updated.custom_css).toBeNull();
 
     const audit = await mockApi.listAudit(ORG, { action: "client.updated", limit: 200 });
     expect(audit.items.some((event) => event.payload["client_id"] === clientId)).toBe(true);
+  });
+
+  it("sets, trims and clears an application's custom CSS, and refuses one that is too long", async () => {
+    const clientId = await freshClientId("css");
+    const created = await mockApi.createClient({
+      client_id: clientId,
+      name: "Styled",
+      kind: "public",
+      redirect_uris: ["https://styled.example/cb"],
+      post_logout_redirect_uris: [],
+      scopes: ["openid"],
+      is_third_party: false,
+    });
+    expect(created.custom_css).toBeNull();
+
+    const styled = await mockApi.updateClient(created.id, {
+      custom_css: "  :root { --accent: #4f46e5; }  ",
+    });
+    expect(styled.custom_css).toBe(":root { --accent: #4f46e5; }");
+    const listed = (await mockApi.listClients()).items.find((client) => client.id === created.id);
+    expect(listed?.custom_css).toBe(":root { --accent: #4f46e5; }");
+
+    const cleared = await mockApi.updateClient(created.id, { custom_css: "   " });
+    expect(cleared.custom_css).toBeNull();
+
+    const tooLong = "x".repeat(20_001);
+    await expect(mockApi.updateClient(created.id, { custom_css: tooLong })).rejects.toThrow(/20000/);
   });
 
   it("deletes an application and refuses the second delete", async () => {
