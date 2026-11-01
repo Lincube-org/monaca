@@ -25,6 +25,7 @@ mod resources;
 mod routes;
 mod session;
 mod social;
+mod sso;
 mod state;
 
 #[cfg(test)]

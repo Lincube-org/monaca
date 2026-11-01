@@ -170,6 +170,18 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             "/t/{tenant}/connectors/{connector}/callback",
             get(crate::social::connector_callback),
         )
+        .route(
+            "/t/{tenant}/sso-connectors",
+            get(crate::sso::list_public_sso_connectors),
+        )
+        .route(
+            "/t/{tenant}/sso/{connector}/authorize",
+            get(crate::sso::sso_authorize),
+        )
+        .route(
+            "/t/{tenant}/sso/{connector}/callback",
+            get(crate::sso::sso_callback),
+        )
 }
 
 /// The signed-in account's own security settings — §6.1 `mfa`.
@@ -354,6 +366,14 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/connectors/{connector}",
             delete(crate::social::delete_connector),
+        )
+        .route(
+            "/v1/sso-connectors",
+            get(crate::sso::list_sso_connectors).post(crate::sso::create_sso_connector),
+        )
+        .route(
+            "/v1/sso-connectors/{connector}",
+            delete(crate::sso::delete_sso_connector),
         )
         .route(
             "/v1/clients",

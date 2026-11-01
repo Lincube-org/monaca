@@ -308,6 +308,18 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "revoked invitation is gone from the list, and that account's sign-in is 403 " +
       "MONACA_INSUFFICIENT_SCOPE",
   },
+  {
+    step: "31",
+    title: "enterprise SSO",
+    assertion:
+      "POST /v1/sso-connectors registers an OIDC provider with an email domain (201; a duplicate " +
+      "slug is 409 MONACA_SSO_CONNECTOR_EXISTS, a claimed domain is 409 MONACA_SSO_DOMAIN_TAKEN, " +
+      "a malformed domain or relative URL is 400) and GET /t/demo/sso-connectors?email= finds it; " +
+      "an authorize naming the org starts sso/{connector}/authorize, the provider round-trip " +
+      "creates the account and joins the org (302 → code → token with the org), while an asserted " +
+      "address outside the connector's domains is 403 MONACA_SSO_DOMAIN_MISMATCH; DELETE is 204, " +
+      "the lookup is empty, and deleting it again is 404",
+  },
 ];
 
 interface StepResult {
@@ -6283,6 +6295,296 @@ async function orgInvitationFlow(base: string, adminToken: string): Promise<Step
   };
 }
 
+/**
+ * Step 31 — enterprise SSO (OIDC federation) (§6.1).
+ *
+ * A tenant-level connector owns an email domain; the sign-in page routes that address to the
+ * provider, and the callback asserts it. The provider itself is the same single-account mock the
+ * social step uses, so the round-trip is a real authorization code exchange.
+ */
+async function ssoFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `sso-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const clientId = `e2e-sso-${runId}`;
+  const connectorId = `okta-${runId}`;
+  const mismatchConnectorId = `other-${runId}`;
+  const domain = `sso-${runId}.example.com`;
+  const ownedDomain = `owned-${runId}.example.com`;
+  const email = `user@${domain}`;
+  const intruderEmail = `intruder@${domain}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const provider = startMockProvider();
+
+  const fail = (why: string): StepResult => ({
+    step: "31",
+    title: "enterprise SSO",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** An authorize URL naming the org, with a PKCE challenge. */
+  const authorize = async (tag: string): Promise<{ url: string; verifier: string }> => {
+    const verifier = `d-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: slug,
+    })}`;
+    return { url, verifier };
+  };
+
+  /** Open an interaction, then run the connector round-trip and return its final response. */
+  const roundTrip = async (
+    tag: string,
+    connector: string,
+  ): Promise<{ status: number; body: unknown; location: string | null; verifier: string }> => {
+    const request = await authorize(tag);
+    const started = await call(request.url, { redirect: "manual" });
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) {
+      throw new Error(`authorize(${tag}) → ${started.status} ${text(started.body)}`);
+    }
+    const ssoStart = await call(
+      `${base}/t/${TENANT}/sso/${connector}/authorize?interaction=${encodeURIComponent(interaction)}`,
+      { redirect: "manual" },
+    );
+    if (ssoStart.status !== 302) {
+      throw new Error(`sso authorize(${connector}) → ${ssoStart.status} ${text(ssoStart.body)}`);
+    }
+    const atProvider = await call(new URL(ssoStart.headers.get("location") ?? "", base).toString(), {
+      redirect: "manual",
+    });
+    if (atProvider.status !== 302) {
+      throw new Error(`provider authorize → ${atProvider.status} ${text(atProvider.body)}`);
+    }
+    const callback = await call(atProvider.headers.get("location") ?? "", { redirect: "manual" });
+    return {
+      status: callback.status,
+      body: callback.body,
+      location: callback.headers.get("location"),
+      verifier: request.verifier,
+    };
+  };
+
+  try {
+    const created = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug }),
+    });
+    const orgId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof orgId !== "string") {
+      return fail(`POST /v1/orgs → ${created.status} ${text(created.body)}`);
+    }
+
+    const client = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E SSO App",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+      }),
+    });
+    if (client.status !== 201) {
+      return fail(`POST /v1/clients → ${client.status} ${text(client.body)}`);
+    }
+
+    // --- registering the connector -------------------------------------------------------------
+    const body = {
+      display_name: "Acme Okta",
+      issuer: "https://acme.okta.example",
+      authorize_url: `${provider.url}/authorize?sub=sub-${runId}&email=${encodeURIComponent(email)}&verified=1&name=SSO+User`,
+      token_url: `${provider.url}/token`,
+      userinfo_url: `${provider.url}/userinfo`,
+      client_id: "okta-client",
+      client_secret: `secret-${runId}`,
+      scopes: [],
+      email_domains: [` ${domain.toUpperCase()} `],
+    };
+    const registered = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ connector_id: connectorId, ...body }),
+    });
+    const sso = registered.body as { email_domains?: unknown; client_secret?: unknown; scopes?: unknown };
+    checks.push([
+      "POST registers the connector with normalised domains and default scopes",
+      registered.status === 201 &&
+        Array.isArray(sso.email_domains) &&
+        sso.email_domains.includes(domain) &&
+        Array.isArray(sso.scopes) &&
+        sso.scopes.join(" ") === "openid profile email" &&
+        sso.client_secret === undefined,
+    ]);
+
+    const duplicate = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ connector_id: connectorId, ...body }),
+    });
+    checks.push([
+      "a duplicate slug is 409 MONACA_SSO_CONNECTOR_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_SSO_CONNECTOR_EXISTS",
+    ]);
+
+    const claimed = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ connector_id: mismatchConnectorId, ...body }),
+    });
+    checks.push([
+      "a domain another connector owns is 409 MONACA_SSO_DOMAIN_TAKEN",
+      claimed.status === 409 &&
+        (claimed.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_SSO_DOMAIN_TAKEN",
+    ]);
+
+    const invalidDomain = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connector_id: `bad-${runId}`,
+        ...body,
+        email_domains: ["not a domain"],
+      }),
+    });
+    checks.push(["a malformed domain is 400", invalidDomain.status === 400]);
+
+    const relative = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ connector_id: `bad-${runId}`, ...body, issuer: "not-a-url" }),
+    });
+    checks.push(["a relative issuer is 400", relative.status === 400]);
+
+    // --- the public domain lookup --------------------------------------------------------------
+    const lookup = await call(
+      `${base}/t/${TENANT}/sso-connectors?email=${encodeURIComponent(` User@${domain.toUpperCase()} `)}`,
+    );
+    checks.push([
+      "GET ?email finds the connector that owns the domain",
+      lookup.status === 200 && JSON.stringify(lookup.body).includes(connectorId),
+    ]);
+    const unknown = await call(
+      `${base}/t/${TENANT}/sso-connectors?email=${encodeURIComponent(`user@nobody-${runId}.example.com`)}`,
+    );
+    checks.push([
+      "a domain no connector owns returns no connector",
+      unknown.status === 200 && (unknown.body as { items?: unknown[] })?.items?.length === 0,
+    ]);
+
+    // --- the federated sign-in ----------------------------------------------------------------
+    const finished = await roundTrip("sso", connectorId);
+    const redirectTo = finished.location;
+    checks.push([
+      "the provider round-trip signs in",
+      finished.status === 302 && typeof redirectTo === "string",
+    ]);
+    if (finished.status !== 302 || typeof redirectTo !== "string") {
+      return fail(`sso round-trip → ${finished.status} ${text(finished.body)}`);
+    }
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const verifier = finished.verifier;
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: verifier,
+    });
+    const claims = jwtClaims((token.body as { access_token?: unknown })?.access_token);
+    checks.push([
+      "the federated token carries the org",
+      token.status === 200 && claims !== undefined && claims.org === orgId,
+    ]);
+
+    const members = await call(`${base}/v1/orgs/${slug}/members`, { headers });
+    checks.push([
+      "the first SSO sign-in created the account and joined the org",
+      members.status === 200 && JSON.stringify(members.body).includes(email),
+    ]);
+
+    // --- an address outside the connector's domains is refused ----------------------------------
+    const mismatch = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connector_id: mismatchConnectorId,
+        ...body,
+        authorize_url: `${provider.url}/authorize?sub=mismatch-${runId}&email=${encodeURIComponent(intruderEmail)}&verified=1`,
+        email_domains: [ownedDomain],
+      }),
+    });
+    checks.push(["the second connector registers", mismatch.status === 201]);
+    const refused = await roundTrip("mismatch", mismatchConnectorId);
+    checks.push([
+      "an asserted address outside the connector's domains is 403 MONACA_SSO_DOMAIN_MISMATCH",
+      refused.status === 403 &&
+        (refused.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_SSO_DOMAIN_MISMATCH",
+    ]);
+
+    // --- removal --------------------------------------------------------------------------------
+    for (const connector of [connectorId, mismatchConnectorId]) {
+      const removed = await call(`${base}/v1/sso-connectors/${connector}`, {
+        method: "DELETE",
+        headers,
+      });
+      checks.push([`DELETE ${connector} is 204`, removed.status === 204]);
+    }
+    const after = await call(
+      `${base}/t/${TENANT}/sso-connectors?email=${encodeURIComponent(email)}`,
+    );
+    checks.push([
+      "the removed connector no longer routes its domain",
+      after.status === 200 && (after.body as { items?: unknown[] })?.items?.length === 0,
+    ]);
+    const removedAgain = await call(`${base}/v1/sso-connectors/${connectorId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["deleting it again is 404", removedAgain.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    provider.stop();
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "31",
+    title: "enterprise SSO",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: register → duplicate 409 → domain 409 → invalid 400 → lookup → SSO sign-in → token org → member → mismatch 403 → delete 204 → lookup empty → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -6542,6 +6844,7 @@ async function main(): Promise<number> {
   push(await orgDomainFlow(base, adminToken));
   push(await orgRoleFlow(base, adminToken));
   push(await orgInvitationFlow(base, adminToken));
+  push(await ssoFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

@@ -97,6 +97,8 @@ export const M0_ACTIONS = [
   "interaction.sign_in.failed",
   "connector.created",
   "connector.deleted",
+  "sso_connector.created",
+  "sso_connector.deleted",
   "client.created",
   "client.updated",
   "client.secret_rotated",

@@ -104,6 +104,44 @@ pub struct SocialStateRow {
     pub account_id: Option<Uuid>,
 }
 
+/// An enterprise SSO (OIDC) connector in `tenant.sso_connectors` (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct SsoConnectorRow {
+    /// Row id.
+    pub id: Uuid,
+    /// The slug the protocol and the page use, unique within the tenant.
+    pub connector_id: String,
+    /// Human-readable name shown on the sign-in page.
+    pub display_name: String,
+    /// The provider's issuer identifier, recorded for display and id_token validation.
+    pub issuer: String,
+    /// The provider's authorization endpoint.
+    pub authorize_url: String,
+    /// The provider's token endpoint.
+    pub token_url: String,
+    /// The provider's userinfo endpoint.
+    pub userinfo_url: String,
+    /// The client id the tenant registered at the provider.
+    pub client_id: String,
+    /// The client secret, sealed by the caller (§5.6) — the store never sees plaintext.
+    pub client_secret_enc: Vec<u8>,
+    /// Scopes requested at the provider.
+    pub scopes: Vec<String>,
+    /// The lowercased email domains whose sign-ins route here.
+    pub email_domains: Vec<String>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+/// A pending enterprise SSO `state`, as the callback reads it (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct SsoStateRow {
+    /// The connector the state was minted for.
+    pub connector: String,
+    /// The interaction the provider is authenticating for.
+    pub interaction_id: String,
+}
+
 /// An RBAC role in `tenant.roles` (§6.2).
 #[derive(Debug, Clone, FromRow)]
 pub struct RoleRow {
@@ -1118,6 +1156,170 @@ impl Store {
             "UPDATE tenant.social_states SET consumed_at = now()
              WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
              RETURNING connector, purpose, interaction_id, account_id",
+        )
+        .bind(state_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    // ------------------------------------------------------------- enterprise SSO
+
+    /// Every SSO connector the tenant configured, ordered by slug.
+    pub async fn sso_connectors(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<SsoConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SsoConnectorRow>(
+            "SELECT id, connector_id, display_name, issuer, authorize_url, token_url, userinfo_url,
+                    client_id, client_secret_enc, scopes, email_domains, created_at
+             FROM tenant.sso_connectors ORDER BY connector_id",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One SSO connector by its slug.
+    pub async fn sso_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+    ) -> Result<Option<SsoConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SsoConnectorRow>(
+            "SELECT id, connector_id, display_name, issuer, authorize_url, token_url, userinfo_url,
+                    client_id, client_secret_enc, scopes, email_domains, created_at
+             FROM tenant.sso_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// The connector that owns `domain` — the routing lookup of §6.1.
+    pub async fn sso_connector_for_domain(
+        &self,
+        tenant: &TenantRow,
+        domain: &str,
+    ) -> Result<Option<SsoConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SsoConnectorRow>(
+            "SELECT id, connector_id, display_name, issuer, authorize_url, token_url, userinfo_url,
+                    client_id, client_secret_enc, scopes, email_domains, created_at
+             FROM tenant.sso_connectors WHERE $1 = ANY(email_domains) LIMIT 1",
+        )
+        .bind(domain)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Register an SSO connector; a slug another row holds is `AlreadyExists { entity: "sso
+    /// connector" }`, and a domain another connector owns is `AlreadyExists { entity: "sso email
+    /// domain" }`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_sso_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        display_name: &str,
+        issuer: &str,
+        authorize_url: &str,
+        token_url: &str,
+        userinfo_url: &str,
+        client_id: &str,
+        client_secret_enc: &[u8],
+        scopes: &[String],
+        email_domains: &[String],
+    ) -> Result<SsoConnectorRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        let taken: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.sso_connectors
+             WHERE email_domains && $1 LIMIT 1",
+        )
+        .bind(email_domains)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if taken.is_some() {
+            return Err(StoreError::AlreadyExists {
+                entity: "sso email domain",
+            });
+        }
+        let row = sqlx::query_as::<_, SsoConnectorRow>(
+            "INSERT INTO tenant.sso_connectors
+                (id, connector_id, display_name, issuer, authorize_url, token_url, userinfo_url,
+                 client_id, client_secret_enc, scopes, email_domains)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             RETURNING id, connector_id, display_name, issuer, authorize_url, token_url,
+                       userinfo_url, client_id, client_secret_enc, scopes, email_domains, created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(connector_id)
+        .bind(display_name)
+        .bind(issuer)
+        .bind(authorize_url)
+        .bind(token_url)
+        .bind(userinfo_url)
+        .bind(client_id)
+        .bind(client_secret_enc)
+        .bind(scopes)
+        .bind(email_domains)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| unique_conflict(err, "sso connector"))?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Delete an SSO connector and its pending states; false when it did not exist.
+    pub async fn delete_sso_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.sso_connectors WHERE connector_id = $1")
+            .bind(connector_id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Mint a single-use SSO `state` bound to an interaction; returns the uuid to send.
+    pub async fn insert_sso_state(
+        &self,
+        tenant: &TenantRow,
+        connector: &str,
+        interaction_id: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO tenant.sso_states (id, connector, interaction_id, expires_at)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id)
+        .bind(connector)
+        .bind(interaction_id)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Redeem an SSO `state`: only an unconsumed, unexpired row is returned, and it is consumed in
+    /// the same statement so two callbacks cannot both proceed.
+    pub async fn take_sso_state(
+        &self,
+        tenant: &TenantRow,
+        state_id: Uuid,
+    ) -> Result<Option<SsoStateRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SsoStateRow>(
+            "UPDATE tenant.sso_states SET consumed_at = now()
+             WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
+             RETURNING connector, interaction_id",
         )
         .bind(state_id)
         .fetch_optional(&pool)

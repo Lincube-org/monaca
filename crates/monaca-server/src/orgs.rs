@@ -446,8 +446,9 @@ fn invitation_json(row: &OrgInvitationRow) -> Value {
 /// Trim and lowercase a domain, rejecting anything that is not a plain DNS name.
 ///
 /// The same rule as the `organization_email_domains` CHECK constraint (§5.6), so a malformed value
-/// is a 400 here rather than a constraint violation surfacing as a 500.
-fn normalise_domain(raw: &str) -> Option<String> {
+/// is a 400 here rather than a constraint violation surfacing as a 500. Shared with the SSO
+/// connector configuration, whose email domains obey the same grammar.
+pub(crate) fn normalise_domain(raw: &str) -> Option<String> {
     let domain = raw.trim().to_ascii_lowercase();
     if !(2..=100).contains(&domain.len()) {
         return None;

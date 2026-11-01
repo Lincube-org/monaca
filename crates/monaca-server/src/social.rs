@@ -383,7 +383,16 @@ pub async fn connector_callback(
         .map_err(ApiError::internal)?;
     let secret = String::from_utf8(secret).map_err(ApiError::internal)?;
     let redirect_uri = callback_url(&state, &tenant.slug, &connector_id);
-    let userinfo = exchange_code(&connector, &secret, code, &redirect_uri).await?;
+    let userinfo = exchange_code(
+        &connector.connector_id,
+        &connector.client_id,
+        &connector.token_url,
+        &connector.userinfo_url,
+        &secret,
+        code,
+        &redirect_uri,
+    )
+    .await?;
 
     let Some(subject) = userinfo
         .get("sub")
@@ -646,8 +655,14 @@ async fn join_org_and_audit(
 }
 
 /// Exchange the code and read the provider's userinfo document.
-async fn exchange_code(
-    connector: &SocialConnectorRow,
+///
+/// Shared with enterprise SSO: the round-trip is the ordinary OAuth2 code grant against a
+/// confidential client, and the two connector kinds differ only in where the configuration lives.
+pub(crate) async fn exchange_code(
+    connector_id: &str,
+    client_id: &str,
+    token_url: &str,
+    userinfo_url: &str,
     secret: &str,
     code: &str,
     redirect_uri: &str,
@@ -661,16 +676,16 @@ async fn exchange_code(
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect_uri),
-        ("client_id", connector.client_id.as_str()),
+        ("client_id", client_id),
         ("client_secret", secret),
     ];
     let response = client
-        .post(&connector.token_url)
+        .post(token_url)
         .form(&form)
         .send()
         .await
         .map_err(|err| {
-            tracing::warn!(%err, connector = %connector.connector_id, "social token endpoint unreachable");
+            tracing::warn!(%err, connector = %connector_id, "provider token endpoint unreachable");
             ApiError::problem(
                 kinds::SOCIAL_PROVIDER_ERROR,
                 "the provider's token endpoint could not be reached",
@@ -679,8 +694,8 @@ async fn exchange_code(
     if !response.status().is_success() {
         tracing::warn!(
             status = %response.status(),
-            connector = %connector.connector_id,
-            "social token exchange refused"
+            connector = %connector_id,
+            "provider token exchange refused"
         );
         return Err(ApiError::problem(
             kinds::SOCIAL_PROVIDER_ERROR,
@@ -688,7 +703,7 @@ async fn exchange_code(
         ));
     }
     let body: Value = response.json().await.map_err(|err| {
-        tracing::warn!(%err, connector = %connector.connector_id, "social token response is not JSON");
+        tracing::warn!(%err, connector = %connector_id, "provider token response is not JSON");
         ApiError::problem(
             kinds::SOCIAL_PROVIDER_ERROR,
             "the provider's token response is not usable",
@@ -706,13 +721,13 @@ async fn exchange_code(
     };
 
     let response = client
-        .get(&connector.userinfo_url)
+        .get(userinfo_url)
         .bearer_auth(token)
         .header(header::ACCEPT, "application/json")
         .send()
         .await
         .map_err(|err| {
-            tracing::warn!(%err, connector = %connector.connector_id, "social userinfo endpoint unreachable");
+            tracing::warn!(%err, connector = %connector_id, "provider userinfo endpoint unreachable");
             ApiError::problem(
                 kinds::SOCIAL_PROVIDER_ERROR,
                 "the provider's userinfo endpoint could not be reached",
@@ -721,8 +736,8 @@ async fn exchange_code(
     if !response.status().is_success() {
         tracing::warn!(
             status = %response.status(),
-            connector = %connector.connector_id,
-            "social userinfo refused"
+            connector = %connector_id,
+            "provider userinfo refused"
         );
         return Err(ApiError::problem(
             kinds::SOCIAL_PROVIDER_ERROR,
@@ -730,7 +745,7 @@ async fn exchange_code(
         ));
     }
     response.json().await.map_err(|err| {
-        tracing::warn!(%err, connector = %connector.connector_id, "social userinfo is not JSON");
+        tracing::warn!(%err, connector = %connector_id, "provider userinfo is not JSON");
         ApiError::problem(
             kinds::SOCIAL_PROVIDER_ERROR,
             "the provider's userinfo document is not usable",
@@ -791,7 +806,7 @@ fn invalid_credentials() -> ApiError {
 }
 
 /// A `302`. A header that cannot carry the URL is an internal error, never a silent success.
-fn found(location: &str) -> Response {
+pub(crate) fn found(location: &str) -> Response {
     match HeaderValue::from_str(location) {
         Ok(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
         Err(err) => ApiError::internal(err).into_response(),
@@ -813,7 +828,7 @@ fn connector_json(row: &SocialConnectorRow) -> Value {
 }
 
 /// The slug grammar: lowercase, starts with a letter or digit, 2–32 characters.
-fn check_connector_id(raw: &str) -> Result<String, ApiError> {
+pub(crate) fn check_connector_id(raw: &str) -> Result<String, ApiError> {
     let value = raw.trim().to_ascii_lowercase();
     let mut chars = value.chars();
     let valid = match chars.next() {

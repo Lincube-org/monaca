@@ -163,6 +163,34 @@ pub mod kinds {
         "Invitation exists",
         409,
     );
+    /// An SSO connector slug is already registered in this tenant.
+    pub const SSO_CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
+        "sso_connector_exists",
+        "MONACA_SSO_CONNECTOR_EXISTS",
+        "SSO connector exists",
+        409,
+    );
+    /// An email domain is already routed to another SSO connector.
+    pub const SSO_DOMAIN_TAKEN: ProblemKind = ProblemKind::new(
+        "sso_domain_taken",
+        "MONACA_SSO_DOMAIN_TAKEN",
+        "SSO email domain taken",
+        409,
+    );
+    /// The identity provider asserted no verified email address.
+    pub const SSO_EMAIL_UNVERIFIED: ProblemKind = ProblemKind::new(
+        "sso_email_unverified",
+        "MONACA_SSO_EMAIL_UNVERIFIED",
+        "SSO email unverified",
+        403,
+    );
+    /// The identity provider asserted an address outside the connector's domains.
+    pub const SSO_DOMAIN_MISMATCH: ProblemKind = ProblemKind::new(
+        "sso_domain_mismatch",
+        "MONACA_SSO_DOMAIN_MISMATCH",
+        "SSO email domain mismatch",
+        403,
+    );
     /// A connector slug is already registered in this tenant.
     pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
         "connector_exists",
@@ -301,6 +329,8 @@ impl From<monaca_store::StoreError> for ApiError {
                     "organization" => kinds::ORG_EXISTS,
                     "email domain" => kinds::DOMAIN_EXISTS,
                     "invitation" => kinds::INVITATION_EXISTS,
+                    "sso connector" => kinds::SSO_CONNECTOR_EXISTS,
+                    "sso email domain" => kinds::SSO_DOMAIN_TAKEN,
                     "org role" => kinds::ORG_ROLE_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };
