@@ -56,6 +56,13 @@ pub mod kinds {
         "Email code sign-in disabled",
         403,
     );
+    /// Passwordless passkey sign-in is switched off for this tenant.
+    pub const PASSKEY_SIGN_IN_DISABLED: ProblemKind = ProblemKind::new(
+        "passkey_sign_in_disabled",
+        "MONACA_PASSKEY_SIGN_IN_DISABLED",
+        "Passkey sign-in disabled",
+        403,
+    );
     /// The resource does not exist, or is outside the caller's tenant.
     pub const NOT_FOUND: ProblemKind =
         ProblemKind::new("not_found", "MONACA_NOT_FOUND", "Not found", 404);

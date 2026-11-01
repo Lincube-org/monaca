@@ -421,6 +421,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "that stylesheet; without client_id or for an unknown client_id the tenant's CSS is served; a stylesheet " +
       "over 20,000 characters is 400; an empty string clears it and the client-scoped read falls back",
   },
+  {
+    step: "44",
+    title: "passkey sign-in switch",
+    assertion:
+      "PATCH /v1/sign-in-experience {passkey_sign_in_enabled:false} is 200 and the public read follows; an " +
+      "interaction's POST …/sign-in/passkey/options is 403 MONACA_PASSKEY_SIGN_IN_DISABLED, while after switching " +
+      "it back on the same endpoint returns discoverable-credential options with an empty allowCredentials",
+  },
 ];
 
 interface StepResult {
@@ -8574,6 +8582,168 @@ async function applicationCssFlow(base: string, adminToken: string): Promise<Ste
   };
 }
 
+/**
+ * Step 44: the tenant can switch passwordless passkey sign-in off.
+ *
+ * The gate sits on the shared interaction resolver, so both the options and the verify call are
+ * refused — a browser holding a challenge from before the switch cannot finish either. The flow
+ * needs no authenticator: the options answer itself is the observable effect, and only the switch
+ * is restored afterwards.
+ */
+async function passkeySignInSwitchFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const clientId = `e2e-passkey-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const state = `st-passkey-${runId}`;
+  const nonce = `n-passkey-${runId}`;
+
+  const enabled = (body: unknown): unknown =>
+    (body as { passkey_sign_in_enabled?: unknown } | undefined)?.passkey_sign_in_enabled;
+
+  const setSwitch = (value: boolean): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ passkey_sign_in_enabled: value }),
+    });
+
+  const publicRead = (): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/sign-in-experience`);
+
+  let rowId: string | undefined;
+  try {
+    const off = await setSwitch(false);
+    checks.push([
+      "PATCH turns passkey sign-in off",
+      off.status === 200 && enabled(off.body) === false,
+    ]);
+
+    const publicOff = await publicRead();
+    checks.push([
+      "the public read follows the switch",
+      publicOff.status === 200 && enabled(publicOff.body) === false,
+    ]);
+
+    const created = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Passkey",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+      }),
+    });
+    const createdRowId = (created.body as { id?: unknown } | undefined)?.id;
+    if (typeof createdRowId === "string") rowId = createdRowId;
+    checks.push(["the flow has an application to authorize", created.status === 201]);
+    if (rowId === undefined) {
+      return {
+        step: "44",
+        title: "passkey sign-in switch",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /v1/clients → ${created.status} ${text(created.body)}`,
+      };
+    }
+
+    const verifier = `pk-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        scope: "openid",
+        state,
+        nonce,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(
+      authorize.headers.get("location") ?? "",
+      base,
+    ).searchParams.get("interaction");
+    checks.push([
+      "authorize opens an interaction",
+      authorize.status === 302 && typeof interaction === "string",
+    ]);
+    if (interaction === null) {
+      return {
+        step: "44",
+        title: "passkey sign-in switch",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `authorize → ${authorize.status} ${text(authorize.body)}`,
+      };
+    }
+    const interactionPath = `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}`;
+
+    const refused = await call(`${interactionPath}/sign-in/passkey/options`, { method: "POST" });
+    checks.push([
+      "passkey options is 403 MONACA_PASSKEY_SIGN_IN_DISABLED",
+      refused.status === 403 &&
+        (refused.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_PASSKEY_SIGN_IN_DISABLED",
+    ]);
+
+    const on = await setSwitch(true);
+    checks.push([
+      "PATCH turns passkey sign-in back on",
+      on.status === 200 && enabled(on.body) === true,
+    ]);
+
+    const publicOn = await publicRead();
+    checks.push([
+      "the public read follows it back on",
+      publicOn.status === 200 && enabled(publicOn.body) === true,
+    ]);
+
+    const options = await call(`${interactionPath}/sign-in/passkey/options`, { method: "POST" });
+    const optionBody = options.body as {
+      challenge?: unknown;
+      allowCredentials?: unknown;
+    } | undefined;
+    checks.push([
+      "passkey options offers a discoverable ceremony",
+      options.status === 200 &&
+        typeof optionBody?.challenge === "string" &&
+        Array.isArray(optionBody?.allowCredentials) &&
+        optionBody.allowCredentials.length === 0,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (rowId !== undefined) {
+      await call(`${base}/v1/clients/${rowId}`, { method: "DELETE", headers }).catch(() => undefined);
+    }
+    await setSwitch(true).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "44",
+    title: "passkey sign-in switch",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: off → public read → authorize → 403 options → on → public read → options`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -8846,6 +9016,7 @@ async function main(): Promise<number> {
   push(await passwordRejectionsFlow(base, adminToken));
   push(await passwordWordListFlow(base, adminToken));
   push(await applicationCssFlow(base, adminToken));
+  push(await passkeySignInSwitchFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

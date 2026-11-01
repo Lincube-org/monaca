@@ -107,6 +107,14 @@ const backupCodeAvailable = computed(() => mfaFactors.value.includes("backup_cod
 
 /** Passkey support is a browser fact, resolved once; a browser without it never sees the option. */
 const passkeyAvailable = ref(passkeysSupported());
+/**
+ * The primary-factor passkey option needs the browser to support a ceremony *and* the tenant to
+ * have it switched on. Before the switches load the option stays visible, so a failed read cannot
+ * take away a method the visitor may rely on; the server refuses it either way if it is off.
+ */
+const passkeySignInAvailable = computed(
+  () => passkeyAvailable.value && (experience.value?.passkey_sign_in_enabled ?? true),
+);
 const passkeyBusy = ref(false);
 const passkeyError = ref<PasskeyError | null>(null);
 /** The second-factor answer by passkey, kept apart so it does not overwrite the code form's state. */
@@ -1523,7 +1531,7 @@ async function cancel(): Promise<void> {
             </div>
 
             <!-- A passkey replaces the typed secret; hidden when the browser cannot run a ceremony. -->
-            <div v-if="!awaitingCode && (mode === 'password' || mode === 'code') && passkeyAvailable" class="flex flex-col gap-2">
+            <div v-if="!awaitingCode && (mode === 'password' || mode === 'code') && passkeySignInAvailable" class="flex flex-col gap-2">
               <div class="flex items-center gap-2 text-[11px] text-ink-faint">
                 <span class="h-px flex-1 bg-rule" aria-hidden="true" />
                 {{ t("passkey.or") }}

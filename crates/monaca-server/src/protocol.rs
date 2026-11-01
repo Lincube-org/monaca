@@ -80,6 +80,7 @@ pub async fn sign_in_experience(
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+        "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
@@ -1991,6 +1992,19 @@ async fn passkey_sign_in_interaction(
     iid: &str,
 ) -> Result<(Interaction, TenantRow), ApiError> {
     let (interaction, tenant) = interaction_and_tenant(state, iid).await?;
+    // The tenant's switch gates both halves of the ceremony: a disabled method must not hand the
+    // browser assertion options, and a stale challenge must not still complete a sign-in.
+    if !state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .passkey_sign_in_enabled
+    {
+        return Err(ApiError::problem(
+            kinds::PASSKEY_SIGN_IN_DISABLED,
+            "passkey sign-in is disabled for this tenant",
+        ));
+    }
     let (_, signed_in) = state
         .peek_interaction_state(iid)
         .await

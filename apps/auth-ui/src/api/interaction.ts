@@ -67,6 +67,8 @@ export interface SignInExperience {
   password_sign_in_enabled: boolean;
   /** Whether emailed codes and links are offered. */
   email_code_sign_in_enabled: boolean;
+  /** Whether passwordless passkey sign-in is offered. */
+  passkey_sign_in_enabled: boolean;
   /** Whether second factors are used at all. */
   mfa_enabled: boolean;
   /** `user_controlled` | `mandatory`. */

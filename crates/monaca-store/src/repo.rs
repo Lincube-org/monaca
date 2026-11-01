@@ -51,6 +51,8 @@ pub struct SignInExperienceRow {
     pub password_sign_in_enabled: bool,
     /// Whether emailed sign-in codes and links are offered.
     pub email_code_sign_in_enabled: bool,
+    /// Whether passwordless passkey sign-in is offered.
+    pub passkey_sign_in_enabled: bool,
     /// Whether second factors are used at sign-in at all.
     pub mfa_enabled: bool,
     /// `user_controlled` (an enrolled factor is challenged) | `mandatory` (everyone must enroll).
@@ -817,9 +819,10 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                    mfa_enabled, mfa_policy, password_min_length, password_min_character_types,
-                    password_reject_user_info, password_reject_repetition_and_sequence,
-                    password_rejected_words, session_ttl_secs, refresh_token_ttl_secs, updated_at
+                    passkey_sign_in_enabled, mfa_enabled, mfa_policy, password_min_length,
+                    password_min_character_types, password_reject_user_info,
+                    password_reject_repetition_and_sequence, password_rejected_words,
+                    session_ttl_secs, refresh_token_ttl_secs, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
         .fetch_one(&pool)
@@ -834,6 +837,7 @@ impl Store {
         sign_up_enabled: Option<bool>,
         password_sign_in_enabled: Option<bool>,
         email_code_sign_in_enabled: Option<bool>,
+        passkey_sign_in_enabled: Option<bool>,
         mfa_enabled: Option<bool>,
         mfa_policy: Option<&str>,
         password_min_length: Option<i32>,
@@ -850,27 +854,29 @@ impl Store {
              SET sign_up_enabled = COALESCE($1, sign_up_enabled),
                  password_sign_in_enabled = COALESCE($2, password_sign_in_enabled),
                  email_code_sign_in_enabled = COALESCE($3, email_code_sign_in_enabled),
-                 mfa_enabled = COALESCE($4, mfa_enabled),
-                 mfa_policy = COALESCE($5, mfa_policy),
-                 password_min_length = COALESCE($6, password_min_length),
-                 password_min_character_types = COALESCE($7, password_min_character_types),
-                 password_reject_user_info = COALESCE($8, password_reject_user_info),
+                 passkey_sign_in_enabled = COALESCE($4, passkey_sign_in_enabled),
+                 mfa_enabled = COALESCE($5, mfa_enabled),
+                 mfa_policy = COALESCE($6, mfa_policy),
+                 password_min_length = COALESCE($7, password_min_length),
+                 password_min_character_types = COALESCE($8, password_min_character_types),
+                 password_reject_user_info = COALESCE($9, password_reject_user_info),
                  password_reject_repetition_and_sequence =
-                   COALESCE($9, password_reject_repetition_and_sequence),
-                 password_rejected_words = COALESCE($10, password_rejected_words),
-                 session_ttl_secs = COALESCE($11, session_ttl_secs),
-                 refresh_token_ttl_secs = COALESCE($12, refresh_token_ttl_secs),
+                   COALESCE($10, password_reject_repetition_and_sequence),
+                 password_rejected_words = COALESCE($11, password_rejected_words),
+                 session_ttl_secs = COALESCE($12, session_ttl_secs),
+                 refresh_token_ttl_secs = COALESCE($13, refresh_token_ttl_secs),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                       mfa_enabled, mfa_policy, password_min_length, password_min_character_types,
-                       password_reject_user_info, password_reject_repetition_and_sequence,
-                       password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
-                       updated_at",
+                       passkey_sign_in_enabled, mfa_enabled, mfa_policy, password_min_length,
+                       password_min_character_types, password_reject_user_info,
+                       password_reject_repetition_and_sequence, password_rejected_words,
+                       session_ttl_secs, refresh_token_ttl_secs, updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
         .bind(email_code_sign_in_enabled)
+        .bind(passkey_sign_in_enabled)
         .bind(mfa_enabled)
         .bind(mfa_policy)
         .bind(password_min_length)

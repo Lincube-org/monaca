@@ -179,6 +179,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "application-level custom CSS (M1)",
         include_str!("../migrations/tenant_28.sql"),
     ),
+    (
+        29,
+        "passkey sign-in switch (M1)",
+        include_str!("../migrations/tenant_29.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

@@ -52,6 +52,7 @@ const update = useUpdateSignInExperience();
 const signUp = ref(false);
 const password = ref(true);
 const emailCode = ref(true);
+const passkey = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const passwordMinLength = ref(8);
@@ -129,6 +130,7 @@ interface SwitchForm {
   signUp: boolean;
   password: boolean;
   emailCode: boolean;
+  passkey: boolean;
   mfaEnabled: boolean;
   mfaPolicy: "user_controlled" | "mandatory";
   passwordMinLength: number;
@@ -146,6 +148,7 @@ function formValues(): SwitchForm {
     signUp: signUp.value,
     password: password.value,
     emailCode: emailCode.value,
+    passkey: passkey.value,
     mfaEnabled: mfaEnabled.value,
     mfaPolicy: mfaPolicy.value,
     passwordMinLength: passwordMinLength.value,
@@ -164,6 +167,7 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.sign_up_enabled === form.signUp &&
     value.password_sign_in_enabled === form.password &&
     value.email_code_sign_in_enabled === form.emailCode &&
+    value.passkey_sign_in_enabled === form.passkey &&
     value.mfa_enabled === form.mfaEnabled &&
     value.mfa_policy === form.mfaPolicy &&
     value.password_min_length === form.passwordMinLength &&
@@ -182,6 +186,7 @@ function adopt(value: SignInExperience): void {
   signUp.value = value.sign_up_enabled;
   password.value = value.password_sign_in_enabled;
   emailCode.value = value.email_code_sign_in_enabled;
+  passkey.value = value.passkey_sign_in_enabled;
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
   passwordMinLength.value = value.password_min_length;
@@ -249,11 +254,12 @@ const stats = computed(() => {
 
 const socials = computed(() => connectors.data.value?.items ?? []);
 
-function setSwitch(field: "signUp" | "password" | "emailCode", value: boolean | "indeterminate"): void {
+function setSwitch(field: "signUp" | "password" | "emailCode" | "passkey", value: boolean | "indeterminate"): void {
   const next = value === true;
   if (field === "signUp") signUp.value = next;
   if (field === "password") password.value = next;
   if (field === "emailCode") emailCode.value = next;
+  if (field === "passkey") passkey.value = next;
   formError.value = null;
 }
 
@@ -356,6 +362,7 @@ async function save(): Promise<void> {
   if (signUp.value !== base.sign_up_enabled) body.sign_up_enabled = signUp.value;
   if (password.value !== base.password_sign_in_enabled) body.password_sign_in_enabled = password.value;
   if (emailCode.value !== base.email_code_sign_in_enabled) body.email_code_sign_in_enabled = emailCode.value;
+  if (passkey.value !== base.passkey_sign_in_enabled) body.passkey_sign_in_enabled = passkey.value;
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
   if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
@@ -621,6 +628,23 @@ function formatStamp(at: string): string {
                 </div>
               </div>
 
+              <Separator />
+
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="passkey-sign-in-enabled"
+                  :model-value="passkey"
+                  :disabled="update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => setSwitch('passkey', value)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="passkey-sign-in-enabled">{{ t('signInExperience.passkeyField') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.passkeyFieldHint') }}
+                  </p>
+                </div>
+              </div>
+
               <Alert v-if="noFirstFactor" variant="warn">
                 <TriangleAlert />
                 <AlertDescription>{{ t('signInExperience.invalidMethods') }}</AlertDescription>
@@ -873,6 +897,18 @@ function formatStamp(at: string): string {
                 :class="password ? 'mt-2' : 'mt-3.5'"
               >
                 {{ t('signInExperience.previewEmailCode') }}
+              </Button>
+
+              <Button
+                v-if="passkey"
+                variant="secondary"
+                size="sm"
+                type="button"
+                disabled
+                class="w-full"
+                :class="password || emailCode ? 'mt-2' : 'mt-3.5'"
+              >
+                {{ t('signInExperience.previewPasskey') }}
               </Button>
 
               <p v-if="noFirstFactor" class="mt-3.5 text-[11.5px] leading-snug text-deny">

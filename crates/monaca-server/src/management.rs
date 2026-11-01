@@ -557,6 +557,8 @@ pub struct UpdateSignInExperienceBody {
     pub password_sign_in_enabled: Option<bool>,
     /// Whether emailed codes and links are offered.
     pub email_code_sign_in_enabled: Option<bool>,
+    /// Whether passwordless passkey sign-in is offered.
+    pub passkey_sign_in_enabled: Option<bool>,
     /// Whether second factors are used at sign-in at all.
     pub mfa_enabled: Option<bool>,
     /// `user_controlled` | `mandatory`.
@@ -604,6 +606,7 @@ pub async fn update_sign_in_experience(
     if body.sign_up_enabled.is_none()
         && body.password_sign_in_enabled.is_none()
         && body.email_code_sign_in_enabled.is_none()
+        && body.passkey_sign_in_enabled.is_none()
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
         && body.password_min_length.is_none()
@@ -699,6 +702,7 @@ pub async fn update_sign_in_experience(
             body.sign_up_enabled,
             body.password_sign_in_enabled,
             body.email_code_sign_in_enabled,
+            body.passkey_sign_in_enabled,
             body.mfa_enabled,
             body.mfa_policy.as_deref(),
             body.password_min_length,
@@ -753,6 +757,7 @@ pub async fn update_sign_in_experience(
             "sign_up_enabled": experience.sign_up_enabled,
             "password_sign_in_enabled": experience.password_sign_in_enabled,
             "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+            "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
             "password_min_length": experience.password_min_length,
@@ -778,6 +783,7 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+        "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,

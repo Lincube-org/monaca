@@ -1133,6 +1133,7 @@ describe("sign-in experience", () => {
       sign_up_enabled: false,
       password_sign_in_enabled: true,
       email_code_sign_in_enabled: true,
+      passkey_sign_in_enabled: true,
       mfa_enabled: true,
       mfa_policy: "user_controlled",
       password_min_length: 8,
@@ -1153,6 +1154,20 @@ describe("sign-in experience", () => {
     });
 
     await mockApi.updateSignInExperience({ sign_up_enabled: true });
+  });
+
+  it("toggles passwordless passkey sign-in and records the new value", async () => {
+    const off = await mockApi.updateSignInExperience({ passkey_sign_in_enabled: false });
+    expect(off.passkey_sign_in_enabled).toBe(false);
+    expect(off.password_sign_in_enabled).toBe(true);
+
+    const read = await mockApi.getSignInExperience();
+    expect(read.passkey_sign_in_enabled).toBe(false);
+
+    const audit = await mockApi.listAudit(ORG, { action: "sign_in_experience.updated", limit: 200 });
+    expect(audit.items[0]?.payload["passkey_sign_in_enabled"]).toBe(false);
+
+    await mockApi.updateSignInExperience({ passkey_sign_in_enabled: true });
   });
 
   it("refuses an empty patch and any patch that leaves no first factor", async () => {

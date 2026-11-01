@@ -1265,6 +1265,7 @@ class MockStore {
       body.sign_up_enabled === undefined &&
       body.password_sign_in_enabled === undefined &&
       body.email_code_sign_in_enabled === undefined &&
+      body.passkey_sign_in_enabled === undefined &&
       body.mfa_enabled === undefined &&
       body.mfa_policy === undefined &&
       body.password_min_length === undefined &&
@@ -1351,6 +1352,8 @@ class MockStore {
       sign_up_enabled: body.sign_up_enabled ?? this.experience.sign_up_enabled,
       password_sign_in_enabled: password,
       email_code_sign_in_enabled: emailCode,
+      passkey_sign_in_enabled:
+        body.passkey_sign_in_enabled ?? this.experience.passkey_sign_in_enabled,
       mfa_enabled: mfaEnabled,
       mfa_policy: mfaPolicy,
       password_min_length:
@@ -1382,6 +1385,7 @@ class MockStore {
         sign_up_enabled: updated.sign_up_enabled,
         password_sign_in_enabled: updated.password_sign_in_enabled,
         email_code_sign_in_enabled: updated.email_code_sign_in_enabled,
+        passkey_sign_in_enabled: updated.passkey_sign_in_enabled,
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
         password_min_length: updated.password_min_length,

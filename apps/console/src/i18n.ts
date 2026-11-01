@@ -558,6 +558,9 @@ export const messages = {
       "The email and password form. While it is off, password sign-in answers 403 MONACA_PASSWORD_SIGN_IN_DISABLED.",
     emailCodeField: "Email code sign-in",
     emailCodeFieldHint: "Mails a one-time code or link. It still works while password sign-in is off.",
+    passkeyField: "Passkey sign-in",
+    passkeyFieldHint:
+      "Lets an account sign in with a registered passkey instead of a password. Off answers the passkey endpoints with 403 MONACA_PASSKEY_SIGN_IN_DISABLED.",
     invalidMethods: "Keep password sign-in or email code sign-in enabled.",
     passwordPolicy: "Password policy",
     passwordPolicyHint: "The length and complexity every new password must meet.",
@@ -632,6 +635,7 @@ export const messages = {
     previewPassword: "Password",
     previewSubmit: "Sign in",
     previewEmailCode: "Email me a code",
+    previewPasskey: "Use a passkey",
     previewDivider: "or continue with",
     previewNoSocial: "No social connectors yet. Register one on the Connectors page.",
     previewSocialUnavailable: "Social connectors could not be loaded.",

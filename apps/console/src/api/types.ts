@@ -253,6 +253,8 @@ export interface SignInExperience {
   sign_up_enabled: boolean;
   password_sign_in_enabled: boolean;
   email_code_sign_in_enabled: boolean;
+  /** Whether passwordless passkey sign-in is offered. */
+  passkey_sign_in_enabled: boolean;
   mfa_enabled: boolean;
   mfa_policy: "user_controlled" | "mandatory";
   /** The shortest password every entrance accepts, 8–64 characters. */
@@ -489,6 +491,7 @@ export interface UpdateSignInExperienceRequest {
   sign_up_enabled?: boolean;
   password_sign_in_enabled?: boolean;
   email_code_sign_in_enabled?: boolean;
+  passkey_sign_in_enabled?: boolean;
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
   password_min_length?: number;
