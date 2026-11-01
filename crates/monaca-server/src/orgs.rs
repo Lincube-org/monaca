@@ -36,6 +36,13 @@ pub struct UpdateOrgBody {
     pub state: Option<String>,
 }
 
+/// The body of `POST /v1/orgs/{org}/email-domains`.
+#[derive(Debug, Deserialize)]
+pub struct AddDomainBody {
+    /// A DNS domain name, case-insensitive and stored lowercased.
+    pub domain: String,
+}
+
 /// `POST /v1/orgs` — provision an organization.
 pub async fn create_org(
     State(state): State<Arc<AppState>>,
@@ -170,6 +177,132 @@ pub async fn update_org(
     Ok(Json(org_json(&updated)))
 }
 
+/// `GET /v1/orgs/{org}/email-domains` — the domains that admit their own accounts (§6.2).
+pub async fn list_email_domains(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let rows = state.store.org_email_domains(&tenant, org.org_id()).await?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(domain, created_at)| json!({ "domain": domain, "created_at": ts(created_at) }))
+        .collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `POST /v1/orgs/{org}/email-domains` — register a domain for just-in-time membership.
+pub async fn add_email_domain(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(org): Path<String>,
+    Json(body): Json<AddDomainBody>,
+) -> Result<Response, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let Some(domain) = normalise_domain(&body.domain) else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "domain must be a DNS name of lowercase letters, digits, `-` and `.`",
+        ));
+    };
+    let created_at = state
+        .store
+        .add_org_email_domain(&tenant, org.org_id(), &domain)
+        .await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "org.domain.added".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Org,
+            id: Some(org.org_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "org": org.slug, "domain": domain }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append org.domain.added audit event");
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "domain": domain, "created_at": ts(created_at) })),
+    )
+        .into_response())
+}
+
+/// `DELETE /v1/orgs/{org}/email-domains/{domain}`.
+pub async fn remove_email_domain(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((org, domain)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let Some(domain) = normalise_domain(&domain) else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "domain must be a DNS name of lowercase letters, digits, `-` and `.`",
+        ));
+    };
+    if !state
+        .store
+        .remove_org_email_domain(&tenant, org.org_id(), &domain)
+        .await?
+    {
+        return Err(ApiError::not_found("domain"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "org.domain.removed".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Org,
+            id: Some(org.org_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "org": org.slug, "domain": domain }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append org.domain.removed audit event");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Trim and lowercase a domain, rejecting anything that is not a plain DNS name.
+///
+/// The same rule as the `organization_email_domains` CHECK constraint (§5.6), so a malformed value
+/// is a 400 here rather than a constraint violation surfacing as a 500.
+fn normalise_domain(raw: &str) -> Option<String> {
+    let domain = raw.trim().to_ascii_lowercase();
+    if !(2..=100).contains(&domain.len()) {
+        return None;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    let ok = labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    ok.then_some(domain)
+}
+
 /// Resolve `{org}`: a typed `org_…` id, or a slug, in either state.
 ///
 /// The lifecycle endpoints accept the id so an archived org — which no longer resolves by slug in
@@ -224,6 +357,23 @@ mod tests {
             &"x".repeat(32),
         ] {
             assert!(!valid_slug(bad), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn the_domain_rule_lowercases_and_rejects_junk() {
+        assert_eq!(
+            normalise_domain(" Example.COM "),
+            Some("example.com".to_owned())
+        );
+        assert_eq!(
+            normalise_domain("jit-1.example.com"),
+            Some("jit-1.example.com".to_owned())
+        );
+        for bad in [
+            "", "a", "@", "a@b", "http://x", ".x", "x.", "-x", "x-", "x..y", "x y",
+        ] {
+            assert!(normalise_domain(bad).is_none(), "{bad} must be rejected");
         }
     }
 }

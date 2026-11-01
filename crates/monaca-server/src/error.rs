@@ -142,6 +142,13 @@ pub mod kinds {
         "Organization exists",
         409,
     );
+    /// An organization email domain is already registered in this tenant.
+    pub const DOMAIN_EXISTS: ProblemKind = ProblemKind::new(
+        "domain_exists",
+        "MONACA_DOMAIN_EXISTS",
+        "Domain exists",
+        409,
+    );
     /// A connector slug is already registered in this tenant.
     pub const CONNECTOR_EXISTS: ProblemKind = ProblemKind::new(
         "connector_exists",
@@ -278,6 +285,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "client" => kinds::CLIENT_EXISTS,
                     "api resource" => kinds::RESOURCE_EXISTS,
                     "organization" => kinds::ORG_EXISTS,
+                    "email domain" => kinds::DOMAIN_EXISTS,
                     _ => kinds::USERNAME_TAKEN,
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))

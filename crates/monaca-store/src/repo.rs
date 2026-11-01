@@ -1895,6 +1895,78 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Every email domain registered to an org, oldest first.
+    pub async fn org_email_domains(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+    ) -> Result<Vec<(String, OffsetDateTime)>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as(
+            "SELECT domain, created_at FROM tenant.organization_email_domains
+             WHERE org_id = $1 ORDER BY created_at",
+        )
+        .bind(org_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Register `domain` for an org; a domain another org holds is
+    /// `AlreadyExists { entity: "email domain" }`.
+    pub async fn add_org_email_domain(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        domain: &str,
+    ) -> Result<OffsetDateTime, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query_scalar(
+            "INSERT INTO tenant.organization_email_domains (org_id, domain)
+             VALUES ($1,$2) RETURNING created_at",
+        )
+        .bind(org_id.uuid())
+        .bind(domain)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| unique_conflict(err, "email domain"))
+    }
+
+    /// Remove a domain from an org; `false` when it was not registered there.
+    pub async fn remove_org_email_domain(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        domain: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "DELETE FROM tenant.organization_email_domains WHERE org_id = $1 AND domain = $2",
+        )
+        .bind(org_id.uuid())
+        .bind(domain)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Whether `domain` is registered to `org_id` — the just-in-time predicate (§6.2).
+    pub async fn has_org_email_domain(
+        &self,
+        tenant: &TenantRow,
+        org_id: OrgId,
+        domain: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tenant.organization_email_domains
+             WHERE org_id = $1 AND domain = $2)",
+        )
+        .bind(org_id.uuid())
+        .bind(domain)
+        .fetch_one(&pool)
+        .await?)
+    }
+
     /// The account's default org: `is_default` if it is a member, else its oldest membership.
     pub async fn org_for_account(
         &self,

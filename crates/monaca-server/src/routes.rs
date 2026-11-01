@@ -291,6 +291,14 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             patch(crate::management::update_member).delete(crate::management::remove_member),
         )
         .route(
+            "/v1/orgs/{org}/email-domains",
+            get(crate::orgs::list_email_domains).post(crate::orgs::add_email_domain),
+        )
+        .route(
+            "/v1/orgs/{org}/email-domains/{domain}",
+            delete(crate::orgs::remove_email_domain),
+        )
+        .route(
             "/v1/orgs/{org}/agents",
             get(crate::management::list_agents).post(crate::management::create_agent),
         )

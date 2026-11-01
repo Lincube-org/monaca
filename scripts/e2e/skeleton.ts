@@ -276,6 +276,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "GET /v1/orgs/{org}/members while the account itself survives (GET /v1/accounts/{id} is 200), " +
       "and deleting it again is 404",
   },
+  {
+    step: "28",
+    title: "org email domains",
+    assertion:
+      "POST /v1/orgs/{org}/email-domains registers a domain (201; a duplicate is 409 " +
+      "MONACA_DOMAIN_EXISTS, an invalid name is 400) and GET lists it; an account whose email is at " +
+      "that domain signs in to an authorize naming the org and joins just in time (sign-in → code → " +
+      "token with the org), while an account from another domain is 403 MONACA_INSUFFICIENT_SCOPE; " +
+      "DELETE is 204, the list is empty, and deleting it again is 404",
+  },
 ];
 
 interface StepResult {
@@ -5502,6 +5512,236 @@ async function orgMemberFlow(base: string, adminToken: string): Promise<StepResu
   };
 }
 
+/**
+ * Step 28 — organization email domains and just-in-time membership (§6.2).
+ *
+ * A domain registered to an org admits its own accounts: signing in to an authorize that names the
+ * org joins the account as a `member` instead of answering 403, while an account from another
+ * domain keeps the ordinary refusal.
+ */
+async function orgDomainFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `jit-${runId}`;
+  const domain = `jit-${runId}.example.com`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const clientId = `e2e-jit-${runId}`;
+  const email = `user@${domain}`;
+  const password = `pw-${runId}-jit`;
+  const outsiderEmail = `jit-outsider-${runId}@demo.localhost`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "28",
+    title: "org email domains",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** An authorize URL naming the org, with a PKCE challenge. */
+  const authorize = async (tag: string): Promise<{ url: string; verifier: string }> => {
+    const verifier = `d-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: slug,
+    })}`;
+    return { url, verifier };
+  };
+
+  try {
+    const created = await call(`${base}/v1/orgs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ slug }),
+    });
+    const orgId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof orgId !== "string") {
+      return fail(`POST /v1/orgs → ${created.status} ${text(created.body)}`);
+    }
+
+    const registered = await call(`${base}/v1/orgs/${slug}/email-domains`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ domain: ` JIT-${runId}.Example.COM ` }),
+    });
+    checks.push([
+      "POST registers the domain lowercased",
+      registered.status === 201 && (registered.body as { domain?: unknown })?.domain === domain,
+    ]);
+
+    const duplicate = await call(`${base}/v1/orgs/${slug}/email-domains`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ domain }),
+    });
+    checks.push([
+      "a duplicate domain is 409 MONACA_DOMAIN_EXISTS",
+      duplicate.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_DOMAIN_EXISTS",
+    ]);
+
+    const invalid = await call(`${base}/v1/orgs/${slug}/email-domains`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ domain: "not a domain" }),
+    });
+    checks.push(["an invalid domain is 400", invalid.status === 400]);
+
+    const listed = await call(`${base}/v1/orgs/${slug}/email-domains`, { headers });
+    checks.push([
+      "GET lists the domain",
+      listed.status === 200 && JSON.stringify(listed.body).includes(domain),
+    ]);
+
+    // --- a client and an account at that domain -----------------------------------------------
+    const client = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E JIT App",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+      }),
+    });
+    if (client.status !== 201) {
+      return fail(`POST /v1/clients → ${client.status} ${text(client.body)}`);
+    }
+
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Domain user", password }),
+    });
+    if (account.status !== 201) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+
+    // --- the domain-matched account joins on sign-in -------------------------------------------
+    const join = await authorize("join");
+    const started = await call(join.url, { redirect: "manual" });
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (started.status !== 302 || interaction === null) {
+      return fail(`authorize(join) → ${started.status} ${text(started.body)}`);
+    }
+
+    const signIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      },
+    );
+    const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "the domain-matched account signs in instead of being refused",
+      signIn.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (signIn.status !== 200 || typeof redirectTo !== "string") {
+      return fail(`sign-in (JIT) → ${signIn.status} ${text(signIn.body)}`);
+    }
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: join.verifier,
+    });
+    const claims = jwtClaims((token.body as { access_token?: unknown })?.access_token);
+    checks.push([
+      "the just-in-time token carries the org",
+      token.status === 200 && claims !== undefined && claims.org === orgId,
+    ]);
+
+    const members = await call(`${base}/v1/orgs/${slug}/members`, { headers });
+    checks.push([
+      "the JIT membership is listed",
+      members.status === 200 && JSON.stringify(members.body).includes(email),
+    ]);
+
+    // --- an account from another domain keeps the refusal ---------------------------------------
+    const outsider = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: outsiderEmail, display_name: "Other domain", password }),
+    });
+    if (outsider.status !== 201) {
+      return fail(`POST /v1/accounts (outsider) → ${outsider.status} ${text(outsider.body)}`);
+    }
+    const denied = await authorize("denied");
+    const deniedStart = await call(denied.url, { redirect: "manual" });
+    const deniedInteraction = new URL(deniedStart.headers.get("location") ?? "", base).searchParams.get("interaction");
+    if (deniedStart.status !== 302 || deniedInteraction === null) {
+      return fail(`authorize(denied) → ${deniedStart.status} ${text(deniedStart.body)}`);
+    }
+    const deniedSignIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(deniedInteraction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: outsiderEmail, password }),
+      },
+    );
+    checks.push([
+      "an account from another domain is refused",
+      deniedSignIn.status === 403 &&
+        (deniedSignIn.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_INSUFFICIENT_SCOPE",
+    ]);
+
+    // --- removal stops future joins ---------------------------------------------------------------
+    const removed = await call(`${base}/v1/orgs/${slug}/email-domains/${domain}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["DELETE the domain is 204", removed.status === 204]);
+
+    const after = await call(`${base}/v1/orgs/${slug}/email-domains`, { headers });
+    const items = (after.body as { items?: unknown[] })?.items;
+    checks.push([
+      "the domain list is empty",
+      after.status === 200 && Array.isArray(items) && items.length === 0,
+    ]);
+
+    const removedAgain = await call(`${base}/v1/orgs/${slug}/email-domains/${domain}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["deleting it again is 404", removedAgain.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "28",
+    title: "org email domains",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: register → duplicate 409 → invalid 400 → list → JIT sign-in → token org → member → outsider 403 → remove 204 → empty → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -5758,6 +5998,7 @@ async function main(): Promise<number> {
   push(await apiResourceFlow(base, adminToken));
   push(await organizationFlow(base, adminToken));
   push(await orgMemberFlow(base, adminToken));
+  push(await orgDomainFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

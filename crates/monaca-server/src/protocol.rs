@@ -570,6 +570,16 @@ pub(crate) async fn finish_sign_in(
     complete_sign_in(state, tenant, interaction, iid, headers, account).await
 }
 
+/// The lowercased domain of an email address, or `None` when it has no usable `@domain`.
+///
+/// It only ever gates the just-in-time join of [`complete_sign_in`]: a malformed stored address
+/// simply matches no registered domain.
+fn email_domain(email: &str) -> Option<String> {
+    let (_, domain) = email.rsplit_once('@')?;
+    let domain = domain.trim().to_ascii_lowercase();
+    (!domain.is_empty()).then_some(domain)
+}
+
 /// Sign-in with every factor satisfied: membership check, SSO session, consent pause or code mint.
 ///
 /// Sign-in is only *recorded* here when the client demands consent; otherwise the interaction is
@@ -586,7 +596,10 @@ async fn complete_sign_in(
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
     let org_ctx = org.ctx(&tenant);
 
-    // The account must be a member of the org the flow issues into.
+    // The account must be a member of the org the flow issues into. An organization may admit its
+    // own email domain instead of inviting each account (§6.2): a non-member whose primary email
+    // domain is registered to that org joins just in time, and the audit event records the JIT
+    // decision so the membership is afterwards indistinguishable from an administrator's.
     let mut tx = state.store.begin_org(&org_ctx).await?;
     let role = state
         .store
@@ -594,10 +607,45 @@ async fn complete_sign_in(
         .await?;
     tx.rollback().await?;
     if role.is_none() {
-        return Err(ApiError::problem(
-            kinds::INSUFFICIENT_SCOPE,
-            format!("account is not a member of `{org_slug}`"),
-        ));
+        let admitted = match email_domain(&account.primary_email) {
+            Some(domain) => {
+                state
+                    .store
+                    .has_org_email_domain(&tenant, org.org_id(), &domain)
+                    .await?
+            }
+            None => false,
+        };
+        if !admitted {
+            return Err(ApiError::problem(
+                kinds::INSUFFICIENT_SCOPE,
+                format!("account is not a member of `{org_slug}`"),
+            ));
+        }
+        let mut tx = state.store.begin_org(&org_ctx).await?;
+        state
+            .store
+            .org_member_add(&mut *tx, account.account_id(), "member")
+            .await?;
+        let event = AuditEvent {
+            id: EventId::new(),
+            at: state.now(),
+            action: "org.member.added".into(),
+            actor_chain: vec![AuditActor::account(account.account_id())],
+            subject: AuditSubject {
+                subject_type: AuditActorType::Account,
+                id: Some(account.account_id().to_typed_string()),
+            },
+            decision: AuditDecision::Allow,
+            grant_id: None,
+            jti: None,
+            payload: json!({ "org": org_slug, "role": "member", "jit": true }),
+        };
+        state
+            .store
+            .audit_append(&mut *tx, &org_ctx.schema_name, &event)
+            .await?;
+        tx.commit().await?;
     }
 
     // Establish (or reuse) the cross-application session before the code is minted, so the browser
