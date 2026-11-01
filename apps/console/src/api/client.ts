@@ -4,9 +4,13 @@ import type {
   Agent,
   AuditEvent,
   AuditIntegrity,
+  Client,
+  ClientSecret,
   CreateAgentRequest,
+  CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
@@ -15,6 +19,7 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateClientRequest,
   UpdateOrganizationRequest,
 } from "./types";
 
@@ -100,6 +105,29 @@ export const httpApi: MonacaApi = {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+  },
+
+  listClients(): Promise<Page<Client>> {
+    return request<Page<Client>>("/clients");
+  },
+
+  createClient(body: CreateClientRequest): Promise<CreatedClient> {
+    return request<CreatedClient>("/clients", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  updateClient(clientId: string, body: UpdateClientRequest): Promise<Client> {
+    return request<Client>(`/clients/${encodeURIComponent(clientId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  rotateClientSecret(clientId: string): Promise<ClientSecret> {
+    return request<ClientSecret>(`/clients/${encodeURIComponent(clientId)}/secret`, { method: "POST" });
+  },
+
+  deleteClient(clientId: string): Promise<void> {
+    return request<void>(`/clients/${encodeURIComponent(clientId)}`, { method: "DELETE" });
   },
 
   listMembers(org: string): Promise<Page<Member>> {

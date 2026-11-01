@@ -17,6 +17,7 @@ import {
 } from "@monaca/ui";
 import { useQueryClient } from "@tanstack/vue-query";
 import {
+  AppWindow,
   Bot,
   Building2,
   Check,
@@ -64,6 +65,7 @@ const orgs = computed(() => session.data.value?.orgs ?? []);
 const navItems: { name: string; label: string; icon: Component }[] = [
   { name: "overview", label: t("nav.overview"), icon: LayoutDashboard },
   { name: "organizations", label: t("nav.organizations"), icon: Building2 },
+  { name: "applications", label: t("nav.applications"), icon: AppWindow },
   { name: "members", label: t("nav.members"), icon: Users },
   { name: "agents", label: t("nav.agents"), icon: Bot },
   { name: "grants", label: t("nav.grants"), icon: KeyRound },

@@ -12,10 +12,11 @@ import { cn } from "../../../lib/cn";
 const props = withDefaults(
   defineProps<{
     modelValue?: string;
+    disabled?: boolean;
     invalid?: boolean;
     class?: HTMLAttributes["class"];
   }>(),
-  { invalid: false },
+  { disabled: false, invalid: false },
 );
 
 const emits = defineEmits<{ "update:modelValue": [value: string] }>();
@@ -35,7 +36,7 @@ const classes = computed(() =>
 
 <template>
   <div class="relative">
-    <select v-model="model" :class="classes" :aria-invalid="invalid || undefined">
+    <select v-model="model" :class="classes" :disabled="disabled" :aria-invalid="invalid || undefined">
       <slot />
     </select>
     <ChevronDown

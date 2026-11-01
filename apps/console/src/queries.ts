@@ -8,9 +8,13 @@ import type {
   Agent,
   AuditEvent,
   AuditIntegrity,
+  Client,
+  ClientSecret,
   CreateAgentRequest,
+  CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
@@ -18,6 +22,7 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateClientRequest,
   UpdateOrganizationRequest,
 } from "@/api/types";
 
@@ -78,6 +83,55 @@ export function useUpdateOrganization() {
     mutationFn: ({ organizationId, body }) => api.updateOrganization(organizationId, body),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.organizations() });
+    },
+  });
+}
+
+export function useClients(): UseQueryReturnType<Page<Client>, Error> {
+  return useQuery({
+    queryKey: queryKeys.clients(),
+    queryFn: () => api.listClients(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateClient() {
+  const client = useQueryClient();
+  return useMutation<CreatedClient, Error, CreateClientRequest>({
+    mutationFn: (body) => api.createClient(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.clients() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUpdateClient() {
+  const client = useQueryClient();
+  return useMutation<Client, Error, { clientId: string; body: UpdateClientRequest }>({
+    mutationFn: ({ clientId, body }) => api.updateClient(clientId, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.clients() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useRotateClientSecret() {
+  const client = useQueryClient();
+  return useMutation<ClientSecret, Error, { clientId: string }>({
+    mutationFn: ({ clientId }) => api.rotateClientSecret(clientId),
+    onSuccess: () => invalidateTenantAudit(client),
+  });
+}
+
+export function useDeleteClient() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { clientId: string }>({
+    mutationFn: ({ clientId }) => api.deleteClient(clientId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.clients() });
+      invalidateTenantAudit(client);
     },
   });
 }
@@ -200,4 +254,9 @@ export function useRevokeGrant(org: OrgRef) {
  */
 function invalidateAudit(client: ReturnType<typeof useQueryClient>, org: string): void {
   void client.invalidateQueries({ queryKey: ["audit", org], exact: false });
+}
+
+/** Client writes are tenant-level, so every org's audit view may have gained an entry. */
+function invalidateTenantAudit(client: ReturnType<typeof useQueryClient>): void {
+  void client.invalidateQueries({ queryKey: ["audit"], exact: false });
 }

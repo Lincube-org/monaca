@@ -10,6 +10,7 @@ import {
   buildAuditLog,
   buildGrants,
   seedAccounts,
+  seedClients,
   seedMembers,
   verifyLog,
   type AuditLog,
@@ -19,9 +20,13 @@ import type {
   Agent,
   AuditEvent,
   AuditIntegrity,
+  Client,
+  ClientSecret,
   CreateAgentRequest,
+  CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
@@ -29,6 +34,7 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateClientRequest,
   UpdateOrganizationRequest,
 } from "./types";
 
@@ -53,6 +59,15 @@ import type {
 class MockStore {
   private accounts = seedAccounts();
   private organizations: Organization[] = seedOrganizations();
+  private clients: Client[] = seedClients();
+  /**
+   * Plaintext secrets for confidential clients, keyed by row id.
+   *
+   * A real server keeps only an argon2 hash and can never answer "was this the old secret?" — the
+   * console never asks either. The map exists so the mock can model the one rule a page observes:
+   * a rotation replaces the secret, and the previous value stops being valid.
+   */
+  private clientSecrets = new Map<string, string>();
   private members: Member[] = seedMembers(this.accounts);
   private agents: Agent[] = buildAgents(this.accounts);
   private grants: Grant[] = buildGrants(this.agents, this.accounts);
@@ -162,6 +177,184 @@ class MockStore {
       payload: { slug: org.slug, state: body.state },
     });
     return { ...updated };
+  }
+
+  listClients(): Page<Client> {
+    return { items: this.clients.map((client) => cloneClient(client)), next: null };
+  }
+
+  async createClient(body: CreateClientRequest): Promise<CreatedClient> {
+    const clientId = body.client_id.trim();
+    if (!validClientId(clientId)) {
+      throw new ApiError(
+        "client_id must be 2-32 characters of lowercase letters, digits or `-`, not starting or ending with `-`",
+        { status: 400, code: "MONACA_INVALID_REQUEST" },
+      );
+    }
+    const name = body.name.trim();
+    if (name.length === 0 || name.length > 80) {
+      throw new ApiError("name must be 1-80 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (body.kind !== "public" && body.kind !== "confidential") {
+      throw new ApiError("kind must be `public` or `confidential`", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    // §6.2: the protocol id names the application in every authorize URL, so it is unique per
+    // tenant and a second row with the same value is an honest conflict, not a silent overwrite.
+    if (this.clients.some((client) => client.client_id === clientId)) {
+      throw new ApiError(`An application with the client_id ${clientId} already exists`, {
+        status: 409,
+        code: "MONACA_CLIENT_EXISTS",
+      });
+    }
+
+    const scopes = normaliseScopes(body.scopes);
+    const redirectUris = normaliseUris(body.redirect_uris, "redirect_uris");
+    const postLogout = normaliseUris(body.post_logout_redirect_uris, "post_logout_redirect_uris");
+
+    const client: Client = {
+      id: newId("cli"),
+      client_id: clientId,
+      name,
+      kind: body.kind,
+      token_auth_method: body.kind === "confidential" ? "client_secret_basic" : "none",
+      scopes,
+      redirect_uris: redirectUris,
+      post_logout_redirect_uris: postLogout,
+      is_third_party: body.is_third_party,
+      created_at: new Date().toISOString(),
+    };
+    this.clients = [...this.clients, client];
+
+    // The secret exists only in this response: a later list never carries it, exactly as §6.2 says.
+    let secret: string | undefined;
+    if (body.kind === "confidential") {
+      secret = generateClientSecret();
+      this.clientSecrets.set(client.id, secret);
+    }
+
+    await this.append({
+      action: "client.created",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: {
+        client_id: client.client_id,
+        name: client.name,
+        kind: client.kind,
+        is_third_party: client.is_third_party,
+      },
+    });
+
+    return secret === undefined ? cloneClient(client) : { ...cloneClient(client), client_secret: secret };
+  }
+
+  async updateClient(clientId: string, body: UpdateClientRequest): Promise<Client> {
+    const index = this.clients.findIndex(
+      (candidate) => candidate.id === clientId || candidate.client_id === clientId,
+    );
+    const client = this.clients[index];
+    if (!client) {
+      throw new ApiError(`client ${clientId} not found`, { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    let name = client.name;
+    if (body.name !== undefined) {
+      name = body.name.trim();
+      if (name.length === 0 || name.length > 80) {
+        throw new ApiError("name must be 1-80 characters", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
+    const scopes = body.scopes === undefined ? client.scopes : normaliseScopes(body.scopes);
+    const redirectUris =
+      body.redirect_uris === undefined
+        ? client.redirect_uris
+        : normaliseUris(body.redirect_uris, "redirect_uris");
+    const postLogout =
+      body.post_logout_redirect_uris === undefined
+        ? client.post_logout_redirect_uris
+        : normaliseUris(body.post_logout_redirect_uris, "post_logout_redirect_uris");
+
+    const updated: Client = {
+      ...client,
+      name,
+      scopes,
+      redirect_uris: redirectUris,
+      post_logout_redirect_uris: postLogout,
+    };
+    this.clients = [...this.clients.slice(0, index), updated, ...this.clients.slice(index + 1)];
+
+    await this.append({
+      action: "client.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { client_id: updated.client_id },
+    });
+    return cloneClient(updated);
+  }
+
+  async rotateClientSecret(clientId: string): Promise<ClientSecret> {
+    const index = this.clients.findIndex(
+      (candidate) => candidate.id === clientId || candidate.client_id === clientId,
+    );
+    const client = this.clients[index];
+    if (!client) {
+      throw new ApiError(`client ${clientId} not found`, { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    if (client.kind !== "confidential") {
+      throw new ApiError("a public client has no secret to rotate", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    // Overwriting the map entry is the whole invalidation: the previous secret is no longer stored
+    // anywhere, so there is nothing left for a later authentication to match.
+    const secret = generateClientSecret();
+    this.clientSecrets.set(client.id, secret);
+
+    await this.append({
+      action: "client.secret_rotated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { client_id: client.client_id },
+    });
+    return { client_id: client.client_id, client_secret: secret };
+  }
+
+  async deleteClient(clientId: string): Promise<void> {
+    const index = this.clients.findIndex(
+      (candidate) => candidate.id === clientId || candidate.client_id === clientId,
+    );
+    const client = this.clients[index];
+    if (!client) {
+      throw new ApiError(`client ${clientId} not found`, { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    this.clients = [...this.clients.slice(0, index), ...this.clients.slice(index + 1)];
+    this.clientSecrets.delete(client.id);
+
+    await this.append({
+      action: "client.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { client_id: client.client_id },
+    });
   }
 
   listMembers(): Page<Member> {
@@ -430,6 +623,67 @@ function cloneAgent(agent: Agent): Agent {
   return { ...agent, keys: agent.keys.map((key) => ({ ...key })) };
 }
 
+function cloneClient(client: Client): Client {
+  return {
+    ...client,
+    scopes: [...client.scopes],
+    redirect_uris: [...client.redirect_uris],
+    post_logout_redirect_uris: [...client.post_logout_redirect_uris],
+  };
+}
+
+/** The §6.2 protocol-id rule, identical to the server's `valid_client_id`. */
+function validClientId(value: string): boolean {
+  return (
+    value.length >= 2 &&
+    value.length <= 32 &&
+    /^[a-z0-9-]+$/.test(value) &&
+    !value.startsWith("-") &&
+    !value.endsWith("-")
+  );
+}
+
+/** The scope grammar: `a` or `a:b`, lowercase, dots and dashes allowed inside a segment. */
+function normaliseScopes(raw: readonly string[]): string[] {
+  const scopes: string[] = [];
+  for (const scope of raw) {
+    const trimmed = scope.trim();
+    if (!/^[a-z][a-z0-9_.-]*(:[a-z][a-z0-9_.-]*)*$/.test(trimmed)) {
+      throw new ApiError("scopes must match the scope grammar", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (!scopes.includes(trimmed)) scopes.push(trimmed);
+  }
+  return scopes;
+}
+
+/** Absolute http(s) URLs, de-duplicated in first-seen order — the server's `normalise_uris`. */
+function normaliseUris(raw: readonly string[], field: string): string[] {
+  const uris: string[] = [];
+  for (const uri of raw) {
+    const trimmed = uri.trim();
+    if (!/^https?:\/\/[^\s]+$/.test(trimmed)) {
+      throw new ApiError(`${field} must be absolute http(s) URLs`, {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (!uris.includes(trimmed)) uris.push(trimmed);
+  }
+  return uris;
+}
+
+/** A 256-bit base64url secret, the shape the server's `generate_client_secret` produces. */
+function generateClientSecret(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 /** The tenant starts with the single default org the session signs into. */
 function seedOrganizations(): Organization[] {
   return [
@@ -462,6 +716,26 @@ export const mockApi: MonacaApi = {
   async updateOrganization(organizationId, body) {
     await delay();
     return store.updateOrganization(organizationId, body);
+  },
+  async listClients() {
+    await delay();
+    return store.listClients();
+  },
+  async createClient(body) {
+    await delay();
+    return store.createClient(body);
+  },
+  async updateClient(clientId, body) {
+    await delay();
+    return store.updateClient(clientId, body);
+  },
+  async rotateClientSecret(clientId) {
+    await delay();
+    return store.rotateClientSecret(clientId);
+  },
+  async deleteClient(clientId) {
+    await delay();
+    return store.deleteClient(clientId);
   },
   async listMembers() {
     await delay();

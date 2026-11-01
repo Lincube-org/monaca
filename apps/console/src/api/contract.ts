@@ -3,9 +3,13 @@ import type {
   Agent,
   AuditEvent,
   AuditIntegrity,
+  Client,
+  ClientSecret,
   CreateAgentRequest,
+  CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
@@ -14,6 +18,7 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateClientRequest,
   UpdateOrganizationRequest,
 } from "./types";
 
@@ -39,6 +44,16 @@ export interface MonacaApi {
   listOrganizations(): Promise<Page<Organization>>;
   createOrganization(body: CreateOrganizationRequest): Promise<Organization>;
   updateOrganization(organizationId: string, body: UpdateOrganizationRequest): Promise<Organization>;
+
+  /**
+   * Applications are tenant-level for the same reason organizations are: one `client_id` namespace
+   * serves the whole tenant, and an org switcher must never appear to scope who can sign in.
+   */
+  listClients(): Promise<Page<Client>>;
+  createClient(body: CreateClientRequest): Promise<CreatedClient>;
+  updateClient(clientId: string, body: UpdateClientRequest): Promise<Client>;
+  rotateClientSecret(clientId: string): Promise<ClientSecret>;
+  deleteClient(clientId: string): Promise<void>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;

@@ -8,6 +8,7 @@ import type {
   AuditActor,
   AuditEvent,
   AuditIntegrity,
+  Client,
   Grant,
   Member,
   OrgRole,
@@ -111,6 +112,58 @@ export function seedMembers(accounts: readonly Account[]): Member[] {
     email: account.email,
     role: roles[index] ?? "member",
   }));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Applications
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The tenant's applications.
+ *
+ * Three shapes an administrator actually meets: a first-party browser app (public, PKCE only), a
+ * server-side integration (confidential, secret held by the backend) and a partner app the consent
+ * screen must annotate as third-party. Together they exercise every column the page renders.
+ */
+export function seedClients(): Client[] {
+  return [
+    {
+      id: newId("cli", BASE - 880 * HOUR_MS),
+      client_id: "admin-console",
+      name: "Admin console",
+      kind: "public",
+      token_auth_method: "none",
+      scopes: ["openid", "profile", "email"],
+      redirect_uris: ["https://console.demo.localhost/callback"],
+      post_logout_redirect_uris: ["https://console.demo.localhost/"],
+      is_third_party: false,
+      created_at: at(880 * 60),
+    },
+    {
+      id: newId("cli", BASE - 640 * HOUR_MS),
+      client_id: "notes-service",
+      name: "Notes service",
+      kind: "confidential",
+      token_auth_method: "client_secret_basic",
+      scopes: ["openid", "tools:read"],
+      redirect_uris: ["https://notes.demo.localhost/oauth/callback"],
+      post_logout_redirect_uris: [],
+      is_third_party: false,
+      created_at: at(640 * 60),
+    },
+    {
+      id: newId("cli", BASE - 120 * HOUR_MS),
+      client_id: "partner-portal",
+      name: "Partner portal",
+      kind: "public",
+      token_auth_method: "none",
+      scopes: ["openid", "profile"],
+      redirect_uris: ["https://partner.example.com/sso/callback"],
+      post_logout_redirect_uris: ["https://partner.example.com/signed-out"],
+      is_third_party: true,
+      created_at: at(120 * 60),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------------------------

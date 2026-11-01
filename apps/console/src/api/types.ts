@@ -41,6 +41,36 @@ export interface Organization {
 
 export type OrgRole = "owner" | "admin" | "member";
 
+/**
+ * An application — the protocol `client_id`, its credentials policy and where it may redirect.
+ *
+ * The secret is never part of this object: the server stores an argon2 hash and reveals the
+ * plaintext exactly once, in the response to a create or a rotate (§6.2).
+ */
+export interface Client {
+  id: string;
+  client_id: string;
+  name: string;
+  kind: ClientKind;
+  token_auth_method: "none" | "client_secret_basic";
+  scopes: string[];
+  redirect_uris: string[];
+  post_logout_redirect_uris: string[];
+  is_third_party: boolean;
+  created_at: string;
+}
+
+export type ClientKind = "public" | "confidential";
+
+/** A create response for a confidential client carries the new secret exactly once. */
+export type CreatedClient = Client & { client_secret?: string };
+
+/** The answer to a rotation; the previous secret stops authenticating at once. */
+export interface ClientSecret {
+  client_id: string;
+  client_secret: string;
+}
+
 export interface AgentKey {
   id: string;
   kid: string;
@@ -128,6 +158,24 @@ export interface CreateOrganizationRequest {
 
 export interface UpdateOrganizationRequest {
   state: "active" | "archived";
+}
+
+export interface CreateClientRequest {
+  client_id: string;
+  name: string;
+  kind: ClientKind;
+  redirect_uris: string[];
+  post_logout_redirect_uris: string[];
+  scopes: string[];
+  is_third_party: boolean;
+}
+
+/** Absent fields are left alone; a supplied array replaces the stored set. */
+export interface UpdateClientRequest {
+  name?: string;
+  redirect_uris?: string[];
+  post_logout_redirect_uris?: string[];
+  scopes?: string[];
 }
 
 export interface ListAuditQuery {

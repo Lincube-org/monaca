@@ -115,6 +115,191 @@ describe("organizations", () => {
   });
 });
 
+describe("applications", () => {
+  async function freshClientId(prefix: string): Promise<string> {
+    // The protocol id is capped at 32 characters, so the prefix is truncated and the suffix is a
+    // short base-36 run rather than a full timestamp.
+    return `${prefix.slice(0, 18)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  it("lists the seeded clients without secrets", async () => {
+    const page = await mockApi.listClients();
+    expect(page.next).toBe(null);
+    expect(page.items.length).toBeGreaterThanOrEqual(3);
+    expect(page.items.map((client) => client.client_id)).toContain("admin-console");
+    expect(page.items.map((client) => client.client_id)).toContain("partner-portal");
+
+    for (const client of page.items) {
+      expect(client.id).toMatch(/^cli_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+      expect("client_secret" in client).toBe(false);
+    }
+
+    const confidential = page.items.find((client) => client.client_id === "notes-service");
+    expect(confidential?.kind).toBe("confidential");
+    expect(confidential?.token_auth_method).toBe("client_secret_basic");
+  });
+
+  it("registers a public client with no secret and a confidential one whose secret appears once", async () => {
+    const publicId = await freshClientId("public-app");
+    const publicClient = await mockApi.createClient({
+      client_id: publicId,
+      name: "Public app",
+      kind: "public",
+      redirect_uris: ["https://public.example/callback"],
+      post_logout_redirect_uris: [],
+      scopes: ["openid", "profile"],
+      is_third_party: false,
+    });
+    expect(publicClient.kind).toBe("public");
+    expect(publicClient.client_secret).toBeUndefined();
+    expect(publicClient.redirect_uris).toEqual(["https://public.example/callback"]);
+
+    const confidentialId = await freshClientId("confidential-app");
+    const confidential = await mockApi.createClient({
+      client_id: confidentialId,
+      name: "Confidential app",
+      kind: "confidential",
+      redirect_uris: ["https://server.example/callback"],
+      post_logout_redirect_uris: [],
+      scopes: ["openid", "tools:read"],
+      is_third_party: false,
+    });
+    expect(confidential.kind).toBe("confidential");
+    expect(confidential.token_auth_method).toBe("client_secret_basic");
+    expect(confidential.client_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // The secret exists only in the create response; every later read is without it.
+    const listed = (await mockApi.listClients()).items.find((client) => client.id === confidential.id);
+    expect(listed).toBeDefined();
+    expect("client_secret" in listed!).toBe(false);
+
+    const audit = await mockApi.listAudit(ORG, { action: "client.created", limit: 200 });
+    expect(audit.items.some((event) => event.payload["client_id"] === confidentialId)).toBe(true);
+  });
+
+  it("refuses a duplicate client_id and an invalid protocol id", async () => {
+    const duplicate = await mockApi
+      .createClient({
+        client_id: "admin-console",
+        name: "Copycat",
+        kind: "public",
+        redirect_uris: [],
+        post_logout_redirect_uris: [],
+        scopes: [],
+        is_third_party: false,
+      })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).code).toBe("MONACA_CLIENT_EXISTS");
+    expect((duplicate as ApiError).status).toBe(409);
+
+    const invalid = await mockApi
+      .createClient({
+        client_id: "Bad_App",
+        name: "Invalid",
+        kind: "public",
+        redirect_uris: [],
+        post_logout_redirect_uris: [],
+        scopes: [],
+        is_third_party: false,
+      })
+      .catch((error: unknown) => error);
+    expect((invalid as ApiError).status).toBe(400);
+
+    const relative = await mockApi
+      .createClient({
+        client_id: await freshClientId("relative"),
+        name: "Relative",
+        kind: "public",
+        redirect_uris: ["/callback"],
+        post_logout_redirect_uris: [],
+        scopes: [],
+        is_third_party: false,
+      })
+      .catch((error: unknown) => error);
+    expect((relative as ApiError).status).toBe(400);
+  });
+
+  it("rotates a confidential secret, and a public client has nothing to rotate", async () => {
+    const clientId = await freshClientId("rotate");
+    const created = await mockApi.createClient({
+      client_id: clientId,
+      name: "Rotating app",
+      kind: "confidential",
+      redirect_uris: ["https://rotate.example/callback"],
+      post_logout_redirect_uris: [],
+      scopes: ["openid"],
+      is_third_party: false,
+    });
+    const first = created.client_secret;
+    expect(first).toBeDefined();
+
+    const rotated = await mockApi.rotateClientSecret(created.id);
+    expect(rotated.client_id).toBe(clientId);
+    expect(rotated.client_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(rotated.client_secret).not.toBe(first);
+
+    const audit = await mockApi.listAudit(ORG, { action: "client.secret_rotated", limit: 200 });
+    expect(audit.items.some((event) => event.payload["client_id"] === clientId)).toBe(true);
+
+    const publicFailure = await mockApi.rotateClientSecret("admin-console").catch((error: unknown) => error);
+    expect(publicFailure).toBeInstanceOf(ApiError);
+    expect((publicFailure as ApiError).status).toBe(400);
+  });
+
+  it("edits the name, URIs and scopes but never the client id or kind", async () => {
+    const clientId = await freshClientId("edit");
+    const created = await mockApi.createClient({
+      client_id: clientId,
+      name: "Before",
+      kind: "public",
+      redirect_uris: ["https://before.example/cb"],
+      post_logout_redirect_uris: ["https://before.example/"],
+      scopes: ["openid"],
+      is_third_party: false,
+    });
+
+    const updated = await mockApi.updateClient(created.id, {
+      name: "After",
+      redirect_uris: ["https://after.example/cb", "https://after.example/cb"],
+      post_logout_redirect_uris: [],
+      scopes: ["openid", "profile"],
+    });
+    expect(updated.client_id).toBe(clientId);
+    expect(updated.kind).toBe("public");
+    expect(updated.name).toBe("After");
+    expect(updated.redirect_uris).toEqual(["https://after.example/cb"]);
+    expect(updated.post_logout_redirect_uris).toEqual([]);
+    expect(updated.scopes).toEqual(["openid", "profile"]);
+
+    const audit = await mockApi.listAudit(ORG, { action: "client.updated", limit: 200 });
+    expect(audit.items.some((event) => event.payload["client_id"] === clientId)).toBe(true);
+  });
+
+  it("deletes an application and refuses the second delete", async () => {
+    const clientId = await freshClientId("delete");
+    const created = await mockApi.createClient({
+      client_id: clientId,
+      name: "Temporary",
+      kind: "public",
+      redirect_uris: ["https://temporary.example/cb"],
+      post_logout_redirect_uris: [],
+      scopes: [],
+      is_third_party: false,
+    });
+
+    await mockApi.deleteClient(created.id);
+    expect((await mockApi.listClients()).items.some((client) => client.id === created.id)).toBe(false);
+
+    const second = await mockApi.deleteClient(created.id).catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "client.deleted", limit: 200 });
+    expect(audit.items.some((event) => event.payload["client_id"] === clientId)).toBe(true);
+  });
+});
+
 describe("agents", () => {
   it("lists seeded agents with typed ids and RFC 7638 fingerprints", async () => {
     const page = await mockApi.listAgents(ORG);
