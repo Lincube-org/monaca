@@ -30,6 +30,7 @@ import {
 } from "./fixtures";
 import type {
   AccountRole,
+  AccountSecurity,
   AccountSession,
   AccountWithRoles,
   AddMemberRequest,
@@ -124,6 +125,8 @@ class MockStore {
   private memberRoles = new Map<string, Set<string>>();
   private agents: Agent[] = buildAgents(this.accounts);
   private grants: Grant[] = buildGrants(this.agents, this.accounts);
+  /** Enrolled second factors per account; absent means nothing enrolled. */
+  private accountSecurity = new Map<string, AccountSecurity>();
   private log: AuditLog | null = null;
   /**
    * The fixture is a ~130-link hash chain, and every link costs a canonicalize plus a sha256, so it
@@ -139,6 +142,29 @@ class MockStore {
     });
     this.seedMemberRoles();
     this.seedAccountRoles();
+    this.seedAccountSecurity();
+  }
+
+  /**
+   * One account starts with an authenticator and a passkey, so the security dialog has a state other
+   * than "nothing enrolled" without an account having to run a WebAuthn ceremony in the mock.
+   */
+  private seedAccountSecurity(): void {
+    const account = this.accounts[1];
+    if (!account) return;
+    this.accountSecurity.set(account.id, {
+      account_id: account.id,
+      mfa: { totp: true, backup_codes: 4 },
+      passkeys: [
+        {
+          id: newId("pky"),
+          name: "Laptop",
+          created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+          last_used_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+      ],
+      trusted_devices: 1,
+    });
   }
 
   private seedMemberRoles(): void {
@@ -803,6 +829,69 @@ class MockStore {
       payload: { revoked },
     });
     return { revoked };
+  }
+
+  getAccountSecurity(accountId: string): AccountSecurity {
+    parseAccountId(accountId);
+    if (!this.accounts.some((account) => account.id === accountId)) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const stored = this.accountSecurity.get(accountId);
+    return stored
+      ? cloneAccountSecurity(stored)
+      : {
+          account_id: accountId,
+          mfa: { totp: false, backup_codes: 0 },
+          passkeys: [],
+          trusted_devices: 0,
+        };
+  }
+
+  async resetAccountMfa(accountId: string): Promise<void> {
+    parseAccountId(accountId);
+    if (!this.accounts.some((account) => account.id === accountId)) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    this.accountSecurity.set(accountId, {
+      ...(this.accountSecurity.get(accountId) ?? {
+        account_id: accountId,
+        passkeys: [],
+        trusted_devices: 0,
+      }),
+      mfa: { totp: false, backup_codes: 0 },
+    });
+    await this.append({
+      action: "account.security_changed",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: accountId,
+      decision: "deny",
+      payload: { account_id: accountId, kind: "mfa_reset" },
+    });
+  }
+
+  async deleteAccountPasskey(accountId: string, passkeyId: string): Promise<void> {
+    parseAccountId(accountId);
+    if (!this.accounts.some((account) => account.id === accountId)) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const stored = this.accountSecurity.get(accountId);
+    const index = stored?.passkeys.findIndex((passkey) => passkey.id === passkeyId) ?? -1;
+    if (!stored || index < 0) {
+      throw new ApiError("passkey not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    this.accountSecurity.set(accountId, {
+      ...stored,
+      passkeys: [...stored.passkeys.slice(0, index), ...stored.passkeys.slice(index + 1)],
+    });
+    await this.append({
+      action: "account.security_changed",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: accountId,
+      decision: "deny",
+      payload: { account_id: accountId, kind: "passkey_removed", passkey: passkeyId },
+    });
   }
 
   listConnectors(): Page<Connector> {
@@ -1758,6 +1847,14 @@ function cloneSsoConnector(connector: SsoConnector): SsoConnector {
   };
 }
 
+function cloneAccountSecurity(security: AccountSecurity): AccountSecurity {
+  return {
+    ...security,
+    mfa: { ...security.mfa },
+    passkeys: security.passkeys.map((passkey) => ({ ...passkey })),
+  };
+}
+
 /** The server's `RoleId::parse`: a typed `rol_…` id, nothing else. */
 function parseRoleId(roleId: string): void {
   if (!/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(roleId)) {
@@ -1971,6 +2068,18 @@ export const mockApi: MonacaApi = {
   async revokeAccountSessions(accountId) {
     await delay();
     return store.revokeAccountSessions(accountId);
+  },
+  async getAccountSecurity(accountId) {
+    await delay();
+    return store.getAccountSecurity(accountId);
+  },
+  async resetAccountMfa(accountId) {
+    await delay();
+    return store.resetAccountMfa(accountId);
+  },
+  async deleteAccountPasskey(accountId, passkeyId) {
+    await delay();
+    return store.deleteAccountPasskey(accountId, passkeyId);
   },
   async listConnectors() {
     await delay();

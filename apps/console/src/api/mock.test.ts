@@ -5,6 +5,7 @@ import { jwkThumbprintHex, publicEcJwk } from "@monaca/ui";
 import { ApiError } from "./contract";
 import { appendToChain, verifyLog, type AuditLog } from "./fixtures";
 import { mockApi, setMockLatency } from "./mock";
+import type { AccountWithRoles } from "./types";
 import { GENESIS_HASH, canonicalize } from "@/lib/jcs";
 import { newId } from "@/lib/typed-id";
 
@@ -1634,5 +1635,79 @@ describe("account sessions", () => {
       .revokeAccountSession(admin.id, "ses_not-a-typed-id")
       .catch((error: unknown) => error);
     expect((malformed as ApiError).status).toBe(400);
+  });
+});
+
+describe("account security", () => {
+  async function account(email: string): Promise<AccountWithRoles> {
+    const page = await mockApi.listAccounts();
+    const found = page.items.find((candidate) => candidate.email === email);
+    if (!found) throw new Error(`${email} is missing from the fixture`);
+    return found;
+  }
+
+  it("reports the seeded authenticator and passkey", async () => {
+    const wei = await account("wei.zhang@demo.localhost");
+    const security = await mockApi.getAccountSecurity(wei.id);
+    expect(security.mfa.totp).toBe(true);
+    expect(security.mfa.backup_codes).toBe(4);
+    expect(security.passkeys).toHaveLength(1);
+    expect(security.passkeys[0]?.id.startsWith("pky_")).toBe(true);
+    expect(security.trusted_devices).toBe(1);
+  });
+
+  it("reports nothing enrolled for a fresh account", async () => {
+    const sam = await account("sam.oduya@demo.localhost");
+    const security = await mockApi.getAccountSecurity(sam.id);
+    expect(security.mfa).toEqual({ totp: false, backup_codes: 0 });
+    expect(security.passkeys).toEqual([]);
+    expect(security.trusted_devices).toBe(0);
+  });
+
+  it("resets the authenticator and appends account.security_changed", async () => {
+    const wei = await account("wei.zhang@demo.localhost");
+    await mockApi.resetAccountMfa(wei.id);
+
+    const security = await mockApi.getAccountSecurity(wei.id);
+    expect(security.mfa).toEqual({ totp: false, backup_codes: 0 });
+    // Passkeys are separate credentials and survive the reset.
+    expect(security.passkeys).toHaveLength(1);
+
+    const audit = await mockApi.listAudit(ORG, { action: "account.security_changed", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ account_id: wei.id, kind: "mfa_reset" });
+    expect(audit.items[0]?.decision).toBe("deny");
+  });
+
+  it("removes one passkey and refuses one it does not have", async () => {
+    const wei = await account("wei.zhang@demo.localhost");
+    const passkey = (await mockApi.getAccountSecurity(wei.id)).passkeys[0];
+    if (!passkey) throw new Error("the seeded passkey is missing");
+
+    await mockApi.deleteAccountPasskey(wei.id, passkey.id);
+    expect((await mockApi.getAccountSecurity(wei.id)).passkeys).toEqual([]);
+
+    const second = await mockApi
+      .deleteAccountPasskey(wei.id, passkey.id)
+      .catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "account.security_changed", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({
+      account_id: wei.id,
+      kind: "passkey_removed",
+      passkey: passkey.id,
+    });
+  });
+
+  it("an unknown account is a 404 and a missing passkey is a 404", async () => {
+    const missing = await mockApi.getAccountSecurity(newId("acc")).catch((error: unknown) => error);
+    expect((missing as ApiError).status).toBe(404);
+
+    const sam = await account("sam.oduya@demo.localhost");
+    const noPasskey = await mockApi
+      .deleteAccountPasskey(sam.id, newId("pky"))
+      .catch((error: unknown) => error);
+    expect((noPasskey as ApiError).status).toBe(404);
   });
 });

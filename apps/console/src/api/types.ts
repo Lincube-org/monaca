@@ -53,6 +53,22 @@ export interface RevokedSessions {
   revoked: number;
 }
 
+/** One enrolled passkey, as the account-security read reports it. */
+export interface AccountPasskey {
+  id: string;
+  name: string | null;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** The account's enrolled factors (§6.2). Secrets are never part of this object. */
+export interface AccountSecurity {
+  account_id: string;
+  mfa: { totp: boolean; backup_codes: number };
+  passkeys: AccountPasskey[];
+  trusted_devices: number;
+}
+
 /**
  * A tenant role (§6.2) — a named permission set an account holds in every organization.
  *

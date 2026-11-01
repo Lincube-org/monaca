@@ -22,6 +22,8 @@ export const queryKeys = {
 
   accountSessions: (accountId: string) => ["account-sessions", accountId] as const,
 
+  accountSecurity: (accountId: string) => ["account-security", accountId] as const,
+
   connectors: () => ["connectors"] as const,
 
   ssoConnectors: () => ["sso-connectors"] as const,

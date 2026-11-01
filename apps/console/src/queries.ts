@@ -5,6 +5,7 @@ import { api } from "@/api";
 import { queryKeys } from "@/api/keys";
 import type {
   AccountSession,
+  AccountSecurity,
   AccountWithRoles,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
@@ -414,6 +415,44 @@ export function useRevokeAccountSessions() {
     onSuccess: (_result, variables) => {
       void client.invalidateQueries({
         queryKey: queryKeys.accountSessions(variables.accountId),
+      });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+/** The enrolled second factors, fetched only while an account's security dialog is open. */
+export function useAccountSecurity(
+  accountId: MaybeRefOrGetter<string | null>,
+): UseQueryReturnType<AccountSecurity, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.accountSecurity(toValue(accountId) ?? "")),
+    queryFn: () => api.getAccountSecurity(toValue(accountId) ?? ""),
+    enabled: computed(() => toValue(accountId) !== null),
+    staleTime: STALE.fast,
+  });
+}
+
+export function useResetAccountMfa() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string }>({
+    mutationFn: ({ accountId }) => api.resetAccountMfa(accountId),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({
+        queryKey: queryKeys.accountSecurity(variables.accountId),
+      });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteAccountPasskey() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string; passkeyId: string }>({
+    mutationFn: ({ accountId, passkeyId }) => api.deleteAccountPasskey(accountId, passkeyId),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({
+        queryKey: queryKeys.accountSecurity(variables.accountId),
       });
       invalidateTenantAudit(client);
     },

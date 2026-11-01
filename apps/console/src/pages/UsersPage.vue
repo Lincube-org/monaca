@@ -25,15 +25,18 @@ import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
 import { describeError } from "@/api/contract";
-import type { AccountRole, AccountSession, AccountWithRoles } from "@/api/types";
+import type { AccountPasskey, AccountRole, AccountSession, AccountWithRoles } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
 import {
+  useAccountSecurity,
   useAccountSessions,
   useAccounts,
   useAssignAccountRole,
   useCreateAccount,
+  useDeleteAccountPasskey,
+  useResetAccountMfa,
   useRevokeAccountSession,
   useRevokeAccountSessions,
   useTenantRoles,
@@ -328,6 +331,69 @@ async function confirmRevokeAll(): Promise<void> {
   }
 }
 
+/**
+ * Enrolled second factors.
+ *
+ * The administrator sees presence, never a secret: whether an authenticator exists, how much of the
+ * recovery-code set is left, and the passkeys with their labels. Resetting the authenticator is
+ * destructive enough to be confirmed; removing one passkey is undone by enrolling another.
+ */
+const securityOpen = ref(false);
+const securityTarget = ref<AccountWithRoles | null>(null);
+const securityError = ref<string | null>(null);
+
+const security = useAccountSecurity(computed(() => securityTarget.value?.id ?? null));
+const resetMfa = useResetAccountMfa();
+const deletePasskey = useDeleteAccountPasskey();
+const resetMfaOpen = ref(false);
+
+function openSecurity(account: AccountWithRoles): void {
+  securityTarget.value = account;
+  securityError.value = null;
+  securityOpen.value = true;
+}
+
+function openResetMfa(): void {
+  if (!securityTarget.value) return;
+  securityError.value = null;
+  resetMfaOpen.value = true;
+}
+
+async function confirmResetMfa(): Promise<void> {
+  const account = securityTarget.value;
+  if (!account) return;
+  securityError.value = null;
+  try {
+    await resetMfa.mutateAsync({ accountId: account.id });
+    resetMfaOpen.value = false;
+    toast({
+      title: t("users.mfaReset"),
+      description: t("users.mfaResetDescription", { email: account.email }),
+      variant: "success",
+    });
+  } catch (error) {
+    securityError.value = describeError(error).title;
+  }
+}
+
+async function removePasskey(passkey: AccountPasskey): Promise<void> {
+  const account = securityTarget.value;
+  if (!account) return;
+  securityError.value = null;
+  try {
+    await deletePasskey.mutateAsync({ accountId: account.id, passkeyId: passkey.id });
+    toast({
+      title: t("users.passkeyRemoved"),
+      description: t("users.passkeyRemovedDescription", {
+        name: passkey.name ?? t("users.passkeyFallback"),
+      }),
+      variant: "success",
+    });
+  } catch (error) {
+    securityError.value = describeError(error).title;
+  }
+}
+
 function formatDateTime(at: string): string {
   const parsed = new Date(at);
   return Number.isNaN(parsed.getTime())
@@ -426,6 +492,9 @@ function formatDateTime(at: string): string {
                 </Button>
                 <Button variant="secondary" size="xs" @click="openSessions(account)">
                   {{ t('users.sessions') }}
+                </Button>
+                <Button variant="secondary" size="xs" @click="openSecurity(account)">
+                  {{ t('users.security') }}
                 </Button>
                 <Button
                   v-if="account.state === 'active'"
@@ -594,6 +663,112 @@ function formatDateTime(at: string): string {
 
         <DialogFooter>
           <Button variant="ghost" type="button" @click="rolesOpen = false">{{ t('common.close') }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="securityOpen">
+      <DialogContent class="max-w-[560px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('users.securityTitle', { email: securityTarget?.email ?? '' }) }}</DialogTitle>
+          <DialogDescription>
+            {{ t('users.securityDescription', { email: securityTarget?.email ?? '' }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="flex flex-col gap-3">
+          <p v-if="security.isPending.value" class="text-[12.5px] text-ink-faint">
+            {{ t('common.loading') }}
+          </p>
+          <p v-else-if="security.error.value" class="text-[12.5px] text-deny">
+            {{ describeError(security.error.value).title }}
+          </p>
+          <div v-else-if="security.data.value" class="flex flex-col gap-3">
+            <div class="rounded-md border border-rule px-3 py-2.5">
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-[12.5px] font-medium text-ink">{{ t('users.mfaTotp') }}</span>
+                <Badge :variant="security.data.value.mfa.totp ? 'allow' : 'muted'">
+                  {{ security.data.value.mfa.totp ? t('users.mfaOn') : t('users.mfaOff') }}
+                </Badge>
+              </div>
+              <p class="mt-1 text-[11.5px] leading-snug text-ink-faint">
+                {{ t('users.mfaBackupCodes', { count: security.data.value.mfa.backup_codes }) }}
+                ·
+                {{ t('users.trustedDevices', { count: security.data.value.trusted_devices }) }}
+              </p>
+              <p class="mt-1.5 text-[11.5px] leading-snug text-ink-faint">{{ t('users.mfaResetHint') }}</p>
+              <Button
+                variant="secondary"
+                size="xs"
+                class="mt-2"
+                :disabled="!security.data.value.mfa.totp || resetMfa.isPending.value"
+                @click="openResetMfa"
+              >
+                {{ t('users.mfaReset') }}
+              </Button>
+            </div>
+
+            <div class="flex flex-col gap-1.5">
+              <span class="text-[12.5px] font-medium text-ink">{{ t('users.passkeys') }}</span>
+              <p v-if="security.data.value.passkeys.length === 0" class="text-[11.5px] text-ink-faint">
+                {{ t('users.passkeysEmpty') }}
+              </p>
+              <div v-else class="divide-y divide-rule rounded-md border border-rule">
+                <div
+                  v-for="passkey in security.data.value.passkeys"
+                  :key="passkey.id"
+                  class="flex items-start gap-3 px-2.5 py-2"
+                >
+                  <div class="min-w-0 flex-1">
+                    <span class="block truncate text-[12px] font-medium text-ink">
+                      {{ passkey.name ?? t('users.passkeyFallback') }}
+                    </span>
+                    <span class="mt-0.5 flex flex-wrap gap-x-3 text-[11px] text-ink-faint">
+                      <span>{{ t('users.passkeyCreated') }} {{ formatDateTime(passkey.created_at) }}</span>
+                      <span v-if="passkey.last_used_at">
+                        {{ t('users.passkeyLastUsed') }} {{ formatDateTime(passkey.last_used_at) }}
+                      </span>
+                    </span>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="xs"
+                    :disabled="deletePasskey.isPending.value"
+                    @click="removePasskey(passkey)"
+                  >
+                    {{ t('users.passkeyRemove') }}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p v-if="securityError" class="text-[12.5px] text-deny">{{ securityError }}</p>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="securityOpen = false">{{ t('common.close') }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="resetMfaOpen">
+      <DialogContent class="max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>
+            {{ t('users.mfaResetTitle', { email: securityTarget?.email ?? '' }) }}
+          </DialogTitle>
+          <DialogDescription>
+            {{ t('users.mfaResetConfirmDescription', { email: securityTarget?.email ?? '' }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <p v-if="securityError" class="text-[12.5px] text-deny">{{ securityError }}</p>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="resetMfaOpen = false">{{ t('common.cancel') }}</Button>
+          <Button variant="danger" type="button" :disabled="resetMfa.isPending.value" @click="confirmResetMfa">
+            {{ resetMfa.isPending.value ? t('common.saving') : t('users.mfaReset') }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

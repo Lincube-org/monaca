@@ -1,6 +1,7 @@
 import type {
   AccountWithRoles,
   AccountSession,
+  AccountSecurity,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
   Agent,
@@ -112,6 +113,14 @@ export interface MonacaApi {
   listAccountSessions(accountId: string): Promise<Page<AccountSession>>;
   revokeAccountSession(accountId: string, sessionId: string): Promise<void>;
   revokeAccountSessions(accountId: string): Promise<RevokedSessions>;
+
+  /**
+   * The account's enrolled second factors. An administrator may read the metadata and reset the
+   * authenticator, but never a secret; passkeys are removed one at a time.
+   */
+  getAccountSecurity(accountId: string): Promise<AccountSecurity>;
+  resetAccountMfa(accountId: string): Promise<void>;
+  deleteAccountPasskey(accountId: string, passkeyId: string): Promise<void>;
 
   /** Social sign-in providers, tenant-level; deleting one also drops every identity it linked. */
   listConnectors(): Promise<Page<Connector>>;

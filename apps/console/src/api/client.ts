@@ -2,6 +2,7 @@ import { ApiError, type MonacaApi } from "./contract";
 import type {
   AccountWithRoles,
   AccountSession,
+  AccountSecurity,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
   Agent,
@@ -232,6 +233,23 @@ export const httpApi: MonacaApi = {
     return request<RevokedSessions>(`/accounts/${encodeURIComponent(accountId)}/sessions`, {
       method: "DELETE",
     });
+  },
+
+  getAccountSecurity(accountId: string): Promise<AccountSecurity> {
+    return request<AccountSecurity>(`/accounts/${encodeURIComponent(accountId)}/security`);
+  },
+
+  resetAccountMfa(accountId: string): Promise<void> {
+    return request<void>(`/accounts/${encodeURIComponent(accountId)}/mfa`, {
+      method: "DELETE",
+    });
+  },
+
+  deleteAccountPasskey(accountId: string, passkeyId: string): Promise<void> {
+    return request<void>(
+      `/accounts/${encodeURIComponent(accountId)}/passkeys/${encodeURIComponent(passkeyId)}`,
+      { method: "DELETE" },
+    );
   },
 
   listConnectors(): Promise<Page<Connector>> {
