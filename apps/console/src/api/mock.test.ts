@@ -808,6 +808,102 @@ describe("audit", () => {
   });
 });
 
+describe("users", () => {
+  async function freshEmail(prefix: string): Promise<string> {
+    return `${prefix}-${Math.random().toString(36).slice(2, 8)}@example.com`;
+  }
+
+  it("lists the tenant directory newest first with typed ids and an empty tenant-role set", async () => {
+    const page = await mockApi.listAccounts();
+    expect(page.next).toBe(null);
+    expect(page.items.length).toBeGreaterThanOrEqual(5);
+
+    const created = page.items.map((account) => account.created_at);
+    expect(created).toEqual([...created].sort((left, right) => right.localeCompare(left)));
+
+    for (const account of page.items) {
+      expect(account.id).toMatch(/^acc_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+      expect(Array.isArray(account.roles)).toBe(true);
+    }
+    expect(page.items.some((account) => account.state === "disabled")).toBe(true);
+  });
+
+  it("searches by email or display name, case-insensitively", async () => {
+    const byEmail = await mockApi.listAccounts({ query: "ADMIN@DEMO" });
+    expect(byEmail.items.length).toBeGreaterThan(0);
+    expect(byEmail.items.every((account) => account.email.toLowerCase().includes("admin@demo"))).toBe(true);
+
+    const byName = await mockApi.listAccounts({ query: "zhang" });
+    expect(byName.items.some((account) => account.display_name.includes("Zhang"))).toBe(true);
+
+    const limited = await mockApi.listAccounts({ limit: 2 });
+    expect(limited.items.length).toBe(2);
+  });
+
+  it("creates a user, refuses a duplicate email, and appends account.created", async () => {
+    const email = await freshEmail("ada");
+    const created = await mockApi.createAccount({
+      email,
+      display_name: "Ada Lovelace",
+      password: "correct horse",
+    });
+    expect(created.email).toBe(email);
+    expect(created.state).toBe("active");
+    expect(created.roles).toEqual([]);
+
+    // Newest first, so the row the administrator just made is at the top of the directory.
+    const page = await mockApi.listAccounts();
+    expect(page.items[0]?.id).toBe(created.id);
+
+    const audit = await mockApi.listAudit(ORG, { action: "account.created", limit: 200 });
+    expect(audit.items.some((event) => event.subject.id === created.id)).toBe(true);
+
+    const duplicate = await mockApi
+      .createAccount({ email, display_name: "Copy", password: "x" })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).code).toBe("MONACA_EMAIL_TAKEN");
+    expect((duplicate as ApiError).status).toBe(409);
+
+    const invalid = await mockApi
+      .createAccount({ email: "not-an-address", display_name: "", password: "" })
+      .catch((error: unknown) => error);
+    expect((invalid as ApiError).status).toBe(400);
+  });
+
+  it("suspends and reactivates an account, recording one event per real change", async () => {
+    const email = await freshEmail("grace");
+    const account = await mockApi.createAccount({
+      email,
+      display_name: "Grace Hopper",
+      password: "x",
+    });
+
+    const suspended = await mockApi.updateAccount(account.id, { state: "disabled" });
+    expect(suspended.state).toBe("disabled");
+
+    // Repeating the current state is a no-op and must not write a second audit event.
+    await mockApi.updateAccount(account.id, { state: "disabled" });
+    const suspendedEvents = await mockApi.listAudit(ORG, { action: "account.suspended", limit: 200 });
+    expect(suspendedEvents.items.filter((event) => event.subject.id === account.id)).toHaveLength(1);
+
+    const reactivated = await mockApi.updateAccount(account.id, { state: "active" });
+    expect(reactivated.state).toBe("active");
+    const reactivatedEvents = await mockApi.listAudit(ORG, { action: "account.reactivated", limit: 200 });
+    expect(reactivatedEvents.items.some((event) => event.subject.id === account.id)).toBe(true);
+
+    const unknown = await mockApi
+      .updateAccount(newId("acc"), { state: "disabled" })
+      .catch((error: unknown) => error);
+    expect((unknown as ApiError).status).toBe(404);
+
+    const malformed = await mockApi
+      .updateAccount("acc_not-a-typed-id", { state: "disabled" })
+      .catch((error: unknown) => error);
+    expect((malformed as ApiError).status).toBe(400);
+  });
+});
+
 describe("members", () => {
   it("adding an existing member is refused, and the audit trail records the new one", async () => {
     const existing = (await mockApi.listMembers(ORG)).items[0]!;

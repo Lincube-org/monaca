@@ -1,5 +1,6 @@
 import { ApiError, type MonacaApi } from "./contract";
 import type {
+  AccountWithRoles,
   AddMemberRequest,
   Agent,
   ApiResource,
@@ -8,6 +9,7 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
@@ -16,6 +18,7 @@ import type {
   CreateOrgRoleRequest,
   CreatedClient,
   Grant,
+  ListAccountsQuery,
   ListAuditQuery,
   Member,
   Organization,
@@ -24,6 +27,7 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
@@ -154,6 +158,23 @@ export const httpApi: MonacaApi = {
 
   deleteResource(resourceId: string): Promise<void> {
     return request<void>(`/resources/${encodeURIComponent(resourceId)}`, { method: "DELETE" });
+  },
+
+  listAccounts(params: ListAccountsQuery = {}): Promise<Page<AccountWithRoles>> {
+    return request<Page<AccountWithRoles>>(
+      `/accounts${query({ query: params.query, limit: params.limit })}`,
+    );
+  },
+
+  createAccount(body: CreateAccountRequest): Promise<AccountWithRoles> {
+    return request<AccountWithRoles>("/accounts", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles> {
+    return request<AccountWithRoles>(`/accounts/${encodeURIComponent(accountId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
   },
 
   listMembers(org: string): Promise<Page<Member>> {

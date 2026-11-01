@@ -19,6 +19,7 @@ import {
   type AuditLog,
 } from "./fixtures";
 import type {
+  AccountWithRoles,
   AddMemberRequest,
   Agent,
   ApiResource,
@@ -27,6 +28,7 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
@@ -35,6 +37,7 @@ import type {
   CreateOrgRoleRequest,
   CreatedClient,
   Grant,
+  ListAccountsQuery,
   ListAuditQuery,
   Member,
   Organization,
@@ -42,6 +45,7 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
@@ -502,6 +506,86 @@ class MockStore {
       throw new ApiError("resource not found", { status: 404, code: "MONACA_NOT_FOUND" });
     }
     return resource;
+  }
+
+  listAccounts(params: ListAccountsQuery = {}): Page<AccountWithRoles> {
+    const needle = params.query?.trim().toLowerCase() ?? "";
+    const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
+    // Newest first, matching `ORDER BY created_at DESC, id DESC`.
+    const items = [...this.accounts]
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      .filter(
+        (account) =>
+          needle.length === 0 ||
+          account.email.toLowerCase().includes(needle) ||
+          account.display_name.toLowerCase().includes(needle),
+      )
+      .slice(0, limit)
+      .map((account) => ({ ...account, roles: [] }));
+    return { items, next: null };
+  }
+
+  async createAccount(body: CreateAccountRequest): Promise<AccountWithRoles> {
+    const email = body.email.trim();
+    if (email.length === 0 || !email.includes("@")) {
+      throw new ApiError("email must be an address", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (this.accounts.some((account) => account.email === email)) {
+      throw new ApiError(`email is already taken`, { status: 409, code: "MONACA_EMAIL_TAKEN" });
+    }
+
+    const account = {
+      id: newId("acc"),
+      email,
+      display_name: body.display_name.trim(),
+      state: "active" as const,
+      created_at: new Date().toISOString(),
+    };
+    this.accounts = [...this.accounts, account];
+
+    await this.append({
+      action: "account.created",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: account.id,
+      decision: "info",
+      payload: { email: account.email },
+    });
+    return { ...account, roles: [] };
+  }
+
+  async updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles> {
+    if (!/^acc_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(accountId)) {
+      throw new ApiError("not an account id", { status: 400, code: "MONACA_INVALID_REQUEST" });
+    }
+    if (body.state !== "active" && body.state !== "disabled") {
+      throw new ApiError("state must be `active` or `disabled`", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const index = this.accounts.findIndex((account) => account.id === accountId);
+    const account = this.accounts[index];
+    if (!account) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    if (account.state === body.state) return { ...account, roles: [] };
+
+    const updated = { ...account, state: body.state };
+    this.accounts = [...this.accounts.slice(0, index), updated, ...this.accounts.slice(index + 1)];
+
+    await this.append({
+      action: body.state === "disabled" ? "account.suspended" : "account.reactivated",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: account.id,
+      decision: "info",
+      payload: { email: account.email },
+    });
+    return { ...updated, roles: [] };
   }
 
   listMembers(): Page<Member> {
@@ -1095,6 +1179,18 @@ export const mockApi: MonacaApi = {
   async deleteResource(resourceId) {
     await delay();
     return store.deleteResource(resourceId);
+  },
+  async listAccounts(query) {
+    await delay();
+    return store.listAccounts(query);
+  },
+  async createAccount(body) {
+    await delay();
+    return store.createAccount(body);
+  },
+  async updateAccount(accountId, body) {
+    await delay();
+    return store.updateAccount(accountId, body);
   },
   async listMembers() {
     await delay();

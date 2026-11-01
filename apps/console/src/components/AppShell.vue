@@ -32,6 +32,7 @@ import {
   Settings,
   ShieldCheck,
   Sun,
+  UserRound,
   Users,
 } from "lucide-vue-next";
 import { computed, onMounted, type Component } from "vue";
@@ -69,6 +70,7 @@ const navItems: { name: string; label: string; icon: Component }[] = [
   { name: "organizations", label: t("nav.organizations"), icon: Building2 },
   { name: "applications", label: t("nav.applications"), icon: AppWindow },
   { name: "resources", label: t("nav.resources"), icon: Boxes },
+  { name: "users", label: t("nav.users"), icon: UserRound },
   { name: "members", label: t("nav.members"), icon: Users },
   { name: "roles", label: t("nav.roles"), icon: ShieldCheck },
   { name: "agents", label: t("nav.agents"), icon: Bot },

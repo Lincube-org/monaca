@@ -1,4 +1,5 @@
 import type {
+  AccountWithRoles,
   AddMemberRequest,
   Agent,
   ApiResource,
@@ -7,6 +8,7 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
@@ -15,6 +17,7 @@ import type {
   CreateOrgRoleRequest,
   CreatedClient,
   Grant,
+  ListAccountsQuery,
   ListAuditQuery,
   Member,
   Organization,
@@ -23,6 +26,7 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
@@ -70,6 +74,11 @@ export interface MonacaApi {
   createResource(body: CreateApiResourceRequest): Promise<ApiResource>;
   updateResource(resourceId: string, body: UpdateApiResourceRequest): Promise<ApiResource>;
   deleteResource(resourceId: string): Promise<void>;
+
+  /** The tenant-wide account directory; organization membership is a separate concept. */
+  listAccounts(query?: ListAccountsQuery): Promise<Page<AccountWithRoles>>;
+  createAccount(body: CreateAccountRequest): Promise<AccountWithRoles>;
+  updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountWithRoles>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;

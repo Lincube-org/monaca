@@ -4,6 +4,7 @@ import { computed, toValue, type MaybeRefOrGetter } from "vue";
 import { api } from "@/api";
 import { queryKeys } from "@/api/keys";
 import type {
+  AccountWithRoles,
   AddMemberRequest,
   Agent,
   ApiResource,
@@ -12,6 +13,7 @@ import type {
   AuditIntegrity,
   Client,
   ClientSecret,
+  CreateAccountRequest,
   CreateAgentRequest,
   CreateApiResourceRequest,
   CreateClientRequest,
@@ -27,6 +29,7 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
@@ -189,6 +192,45 @@ export function useMembers(org: OrgRef): UseQueryReturnType<Page<Member>, Error>
     queryKey: computed(() => queryKeys.members(orgValue(org))),
     queryFn: () => api.listMembers(orgValue(org)),
     staleTime: STALE.slow,
+  });
+}
+
+/**
+ * The tenant-wide account directory.
+ *
+ * The search term is part of the cache key, so switching searches does not show the previous
+ * result set while the new one loads.
+ */
+export function useAccounts(
+  search: MaybeRefOrGetter<string> = "",
+): UseQueryReturnType<Page<AccountWithRoles>, Error> {
+  const term = computed(() => toValue(search).trim());
+  return useQuery({
+    queryKey: computed(() => queryKeys.accounts(term.value)),
+    queryFn: () => api.listAccounts({ query: term.value || undefined }),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateAccount() {
+  const client = useQueryClient();
+  return useMutation<AccountWithRoles, Error, CreateAccountRequest>({
+    mutationFn: (body) => api.createAccount(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUpdateAccount() {
+  const client = useQueryClient();
+  return useMutation<AccountWithRoles, Error, { accountId: string; body: UpdateAccountRequest }>({
+    mutationFn: ({ accountId, body }) => api.updateAccount(accountId, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+      invalidateTenantAudit(client);
+    },
   });
 }
 

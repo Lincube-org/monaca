@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "API resources" },
   },
   {
+    path: "/users",
+    name: "users",
+    component: () => import("@/pages/UsersPage.vue"),
+    meta: { title: "Users" },
+  },
+  {
     path: "/members",
     name: "members",
     component: () => import("@/pages/MembersPage.vue"),

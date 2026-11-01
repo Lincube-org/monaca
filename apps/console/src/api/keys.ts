@@ -16,6 +16,8 @@ export const queryKeys = {
 
   resources: () => ["resources"] as const,
 
+  accounts: (query: string) => ["accounts", query] as const,
+
   members: (org: string) => ["members", org] as const,
 
   orgRoles: (org: string) => ["org-roles", org] as const,

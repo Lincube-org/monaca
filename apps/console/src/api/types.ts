@@ -24,6 +24,22 @@ export interface Account {
   created_at: string;
 }
 
+/** A tenant-role reference carried by an account row; the role itself is `/v1/roles`. */
+export interface AccountRole {
+  id: string;
+  name: string;
+}
+
+/**
+ * An account as `/v1/accounts` returns it: the identity plus the tenant roles it holds.
+ *
+ * Org membership and org roles are separate — this list is the tenant-wide directory, not one
+ * organization's members.
+ */
+export interface AccountWithRoles extends Account {
+  roles: AccountRole[];
+}
+
 export interface Member {
   account_id: string;
   email: string;
@@ -216,6 +232,22 @@ export interface CreateApiResourceRequest {
 export interface UpdateApiResourceRequest {
   name?: string;
   scopes?: string[];
+}
+
+export interface ListAccountsQuery {
+  /** Case-insensitive substring of the email or display name. */
+  query?: string;
+  limit?: number;
+}
+
+export interface CreateAccountRequest {
+  email: string;
+  display_name: string;
+  password: string;
+}
+
+export interface UpdateAccountRequest {
+  state: "active" | "disabled";
 }
 
 export interface CreateClientRequest {
