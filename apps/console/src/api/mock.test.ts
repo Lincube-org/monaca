@@ -925,6 +925,70 @@ describe("connectors", () => {
   });
 });
 
+describe("sign-in experience", () => {
+  it("reads the seeded switches, all methods on", async () => {
+    const experience = await mockApi.getSignInExperience();
+    expect(experience.sign_up_enabled).toBe(true);
+    expect(experience.password_sign_in_enabled).toBe(true);
+    expect(experience.email_code_sign_in_enabled).toBe(true);
+    expect(Number.isNaN(Date.parse(experience.updated_at))).toBe(false);
+  });
+
+  it("applies a partial patch and appends sign_in_experience.updated", async () => {
+    const before = await mockApi.getSignInExperience();
+    const updated = await mockApi.updateSignInExperience({ sign_up_enabled: false });
+    expect(updated.sign_up_enabled).toBe(false);
+    expect(updated.password_sign_in_enabled).toBe(before.password_sign_in_enabled);
+    expect(updated.email_code_sign_in_enabled).toBe(before.email_code_sign_in_enabled);
+    expect(Date.parse(updated.updated_at)).toBeGreaterThan(Date.parse(before.updated_at));
+
+    const audit = await mockApi.listAudit(ORG, { action: "sign_in_experience.updated", limit: 200 });
+    const newest = audit.items[0];
+    expect(newest?.subject.type).toBe("tenant");
+    expect(newest?.decision).toBe("allow");
+    expect(newest?.payload).toEqual({
+      sign_up_enabled: false,
+      password_sign_in_enabled: true,
+      email_code_sign_in_enabled: true,
+    });
+
+    await mockApi.updateSignInExperience({ sign_up_enabled: true });
+  });
+
+  it("refuses an empty patch and any patch that leaves no first factor", async () => {
+    const empty = await mockApi.updateSignInExperience({}).catch((error: unknown) => error);
+    expect(empty).toBeInstanceOf(ApiError);
+    expect((empty as ApiError).status).toBe(400);
+    expect((empty as ApiError).code).toBe("MONACA_INVALID_REQUEST");
+
+    // The server checks the *result* of the patch, not the patch alone.
+    await mockApi.updateSignInExperience({ password_sign_in_enabled: false });
+    const noFactor = await mockApi
+      .updateSignInExperience({ email_code_sign_in_enabled: false })
+      .catch((error: unknown) => error);
+    expect(noFactor).toBeInstanceOf(ApiError);
+    expect((noFactor as ApiError).status).toBe(400);
+
+    // A refused patch changes nothing.
+    const current = await mockApi.getSignInExperience();
+    expect(current.password_sign_in_enabled).toBe(false);
+    expect(current.email_code_sign_in_enabled).toBe(true);
+
+    await mockApi.updateSignInExperience({ password_sign_in_enabled: true });
+  });
+
+  it("returns copies, so a caller cannot mutate the stored switches", async () => {
+    const snapshot = await mockApi.getSignInExperience();
+    snapshot.sign_up_enabled = false;
+    expect((await mockApi.getSignInExperience()).sign_up_enabled).toBe(true);
+  });
+
+  it("keeps the chain verifiable after the writes", async () => {
+    const report = await mockApi.verifyAudit(ORG);
+    expect(report.valid).toBe(true);
+  });
+});
+
 describe("users", () => {
   async function freshEmail(prefix: string): Promise<string> {
     return `${prefix}-${Math.random().toString(36).slice(2, 8)}@example.com`;

@@ -15,6 +15,7 @@ import type {
   Member,
   OrgRole,
   OrgRoleDetail,
+  SignInExperience,
 } from "./types";
 
 /**
@@ -225,6 +226,25 @@ export function seedConnectors(): Connector[] {
       created_at: at(360 * 60),
     },
   ];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sign-in experience
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The hosted sign-in switches as the migration seeds them: every method on.
+ *
+ * `updated_at` is the tenant's provisioning time, not "now" — a freshly provisioned tenant has not
+ * been configured yet, and the page should be able to say how long the switches have stood.
+ */
+export function seedSignInExperience(): SignInExperience {
+  return {
+    sign_up_enabled: true,
+    password_sign_in_enabled: true,
+    email_code_sign_in_enabled: true,
+    updated_at: at(900 * 60),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------

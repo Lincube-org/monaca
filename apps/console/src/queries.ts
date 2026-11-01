@@ -31,11 +31,13 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  SignInExperience,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInExperienceRequest,
 } from "@/api/types";
 
 /**
@@ -261,6 +263,31 @@ export function useDeleteConnector() {
     mutationFn: ({ connectorId }) => api.deleteConnector(connectorId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.connectors() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useSignInExperience(): UseQueryReturnType<SignInExperience, Error> {
+  return useQuery({
+    queryKey: queryKeys.signInExperience(),
+    queryFn: () => api.getSignInExperience(),
+    staleTime: STALE.slow,
+  });
+}
+
+/**
+ * The patch is the answer, so it is written straight into the cache.
+ *
+ * A refetch would return the same object one round trip later; writing it now keeps every mounted
+ * view of the switches consistent with what the server just accepted.
+ */
+export function useUpdateSignInExperience() {
+  const client = useQueryClient();
+  return useMutation<SignInExperience, Error, UpdateSignInExperienceRequest>({
+    mutationFn: (body) => api.updateSignInExperience(body),
+    onSuccess: (updated) => {
+      client.setQueryData(queryKeys.signInExperience(), updated);
       invalidateTenantAudit(client);
     },
   });

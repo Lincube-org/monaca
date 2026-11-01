@@ -28,11 +28,13 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  SignInExperience,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInExperienceRequest,
 } from "./types";
 
 /**
@@ -86,6 +88,13 @@ export interface MonacaApi {
   listConnectors(): Promise<Page<Connector>>;
   createConnector(body: CreateConnectorRequest): Promise<Connector>;
   deleteConnector(connectorId: string): Promise<void>;
+
+  /**
+   * The hosted sign-in switches — the one tenant-level screen that changes what every application's
+   * sign-in page offers. The public page reads the same values without a token.
+   */
+  getSignInExperience(): Promise<SignInExperience>;
+  updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;

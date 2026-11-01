@@ -124,6 +124,20 @@ export interface Connector {
   created_at: string;
 }
 
+/**
+ * The tenant's hosted sign-in switches (§6.2).
+ *
+ * The public page reads the same three booleans from `/t/{tenant}/sign-in-experience`; `updated_at`
+ * is only on the management read. The server refuses a state where both password sign-in and email
+ * codes are off, because that would leave no way to sign in at all.
+ */
+export interface SignInExperience {
+  sign_up_enabled: boolean;
+  password_sign_in_enabled: boolean;
+  email_code_sign_in_enabled: boolean;
+  updated_at: string;
+}
+
 /** A create response for a confidential client carries the new secret exactly once. */
 export type CreatedClient = Client & { client_secret?: string };
 
@@ -249,6 +263,17 @@ export interface CreateApiResourceRequest {
 export interface UpdateApiResourceRequest {
   name?: string;
   scopes?: string[];
+}
+
+/**
+ * Absent switches keep their value, so a page sends only what the user changed.
+ *
+ * The server rejects an empty patch, and any patch whose result turns both first-factor methods off.
+ */
+export interface UpdateSignInExperienceRequest {
+  sign_up_enabled?: boolean;
+  password_sign_in_enabled?: boolean;
+  email_code_sign_in_enabled?: boolean;
 }
 
 export interface CreateConnectorRequest {

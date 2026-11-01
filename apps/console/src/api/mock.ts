@@ -16,6 +16,7 @@ import {
   seedMembers,
   seedOrgRoles,
   seedResources,
+  seedSignInExperience,
   verifyLog,
   type AuditLog,
 } from "./fixtures";
@@ -48,11 +49,13 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  SignInExperience,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInExperienceRequest,
 } from "./types";
 
 /**
@@ -87,6 +90,7 @@ class MockStore {
   private clientSecrets = new Map<string, string>();
   private resources: ApiResource[] = seedResources();
   private connectors: Connector[] = seedConnectors();
+  private experience: SignInExperience = seedSignInExperience();
   private members: Member[] = seedMembers(this.accounts);
   private orgRoles: OrgRoleDetail[] = seedOrgRoles();
   /** account id → role ids held in this org. A role may be held by many members. */
@@ -692,6 +696,56 @@ class MockStore {
       decision: "info",
       payload: { connector_id: connector.connector_id },
     });
+  }
+
+  getSignInExperience(): SignInExperience {
+    return { ...this.experience };
+  }
+
+  async updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience> {
+    // §6.2: an empty patch is a mistake, not a no-op — it says the caller meant to change something.
+    if (
+      body.sign_up_enabled === undefined &&
+      body.password_sign_in_enabled === undefined &&
+      body.email_code_sign_in_enabled === undefined
+    ) {
+      throw new ApiError("at least one switch must be present", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    const password = body.password_sign_in_enabled ?? this.experience.password_sign_in_enabled;
+    const emailCode = body.email_code_sign_in_enabled ?? this.experience.email_code_sign_in_enabled;
+    // Checked against the *resulting* state, so a one-field patch cannot silently leave no method on.
+    if (!password && !emailCode) {
+      throw new ApiError("password sign-in or email code sign-in must stay enabled", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    const updated: SignInExperience = {
+      sign_up_enabled: body.sign_up_enabled ?? this.experience.sign_up_enabled,
+      password_sign_in_enabled: password,
+      email_code_sign_in_enabled: emailCode,
+      updated_at: new Date().toISOString(),
+    };
+    this.experience = updated;
+
+    await this.append({
+      action: "sign_in_experience.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: {
+        sign_up_enabled: updated.sign_up_enabled,
+        password_sign_in_enabled: updated.password_sign_in_enabled,
+        email_code_sign_in_enabled: updated.email_code_sign_in_enabled,
+      },
+    });
+    return { ...updated };
   }
 
   listMembers(): Page<Member> {
@@ -1313,6 +1367,14 @@ export const mockApi: MonacaApi = {
   async deleteConnector(connectorId) {
     await delay();
     return store.deleteConnector(connectorId);
+  },
+  async getSignInExperience() {
+    await delay();
+    return store.getSignInExperience();
+  },
+  async updateSignInExperience(body) {
+    await delay();
+    return store.updateSignInExperience(body);
   },
   async listMembers() {
     await delay();

@@ -54,6 +54,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Roles" },
   },
   {
+    path: "/sign-in-experience",
+    name: "sign-in-experience",
+    component: () => import("@/pages/SignInExperiencePage.vue"),
+    meta: { title: "Sign-in experience" },
+  },
+  {
     path: "/connectors",
     name: "connectors",
     component: () => import("@/pages/ConnectorsPage.vue"),

@@ -29,11 +29,13 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  SignInExperience,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInExperienceRequest,
 } from "./types";
 
 /**
@@ -189,6 +191,17 @@ export const httpApi: MonacaApi = {
 
   deleteConnector(connectorId: string): Promise<void> {
     return request<void>(`/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" });
+  },
+
+  getSignInExperience(): Promise<SignInExperience> {
+    return request<SignInExperience>("/sign-in-experience");
+  },
+
+  updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience> {
+    return request<SignInExperience>("/sign-in-experience", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
   },
 
   listMembers(org: string): Promise<Page<Member>> {

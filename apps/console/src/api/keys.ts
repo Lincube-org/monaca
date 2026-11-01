@@ -20,6 +20,8 @@ export const queryKeys = {
 
   connectors: () => ["connectors"] as const,
 
+  signInExperience: () => ["sign-in-experience"] as const,
+
   members: (org: string) => ["members", org] as const,
 
   orgRoles: (org: string) => ["org-roles", org] as const,
