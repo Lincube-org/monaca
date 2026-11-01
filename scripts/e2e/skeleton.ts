@@ -6771,7 +6771,11 @@ async function accountSecurityFlow(base: string, adminToken: string): Promise<St
  * setup step, proves its new authenticator, finishes the sign-in, and is challenged normally the
  * next time. The policy is restored in `finally`, so a failure cannot change later runs.
  */
-async function mandatoryMfaFlow(base: string, adminToken: string): Promise<StepResult> {
+async function mandatoryMfaFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
   const t = performance.now();
   const runId = Date.now().toString(36);
   const redirectUri = "http://localhost:5173/bff/callback";
@@ -6908,14 +6912,21 @@ async function mandatoryMfaFlow(base: string, adminToken: string): Promise<StepR
       return fail(`mfa/enroll/verify → ${confirmed.status} ${text(confirmed.body)}`);
     }
     const code = new URL(redirectTo).searchParams.get("code") ?? "";
-    const token = await tokenCall(base, {
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      client_id: "monaca-console",
-      code_verifier: start.verifier,
-    });
-    checks.push(["the token exchange succeeds", token.status === 200]);
+    const token = await tokenCall(
+      base,
+      {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        client_id: "monaca-console",
+        code_verifier: start.verifier,
+      },
+      btoa(`monaca-console:${consoleSecret}`),
+    );
+    if (token.status !== 200) {
+      return fail(`token exchange → ${token.status} ${text(token.body)}`);
+    }
+    checks.push(["the token exchange succeeds", true]);
 
     // --- the next sign-in challenges the new factor -------------------------------------------
     const again = await beginSignIn("challenge");
@@ -7236,7 +7247,7 @@ async function main(): Promise<number> {
   push(await orgInvitationFlow(base, adminToken));
   push(await ssoFlow(base, adminToken));
   push(await accountSecurityFlow(base, adminToken));
-  push(await mandatoryMfaFlow(base, adminToken));
+  push(await mandatoryMfaFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

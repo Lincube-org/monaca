@@ -567,7 +567,11 @@ pub(crate) async fn finish_sign_in(
         .map_err(ApiError::Interaction)?;
     if experience.mfa_enabled && !satisfied {
         let factors = mfa_factors(&state, &tenant, account.id).await?;
-        if !factors.is_empty() {
+        // The pause is driven by an authenticator app, as it always was: a passkey is offered as an
+        // alternative second factor when one exists, but an account whose only credential is a
+        // passkey already proved possession of it and is not asked for a second step.
+        let challenge = factors.iter().any(|factor| *factor == "totp");
+        if challenge {
             // A browser this account chose to remember skips the second factor until it is revoked
             // or expires (§6.1 `mfa`). The cookie is per tenant and the row names the account, so a
             // stale trust from another account does nothing.
@@ -595,7 +599,7 @@ pub(crate) async fn finish_sign_in(
             }))
             .into_response());
         }
-        if experience.mfa_policy == "mandatory" {
+        if experience.mfa_policy == "mandatory" && factors.is_empty() {
             // No factor is enrolled and the tenant requires one: the flow pauses on a setup step
             // instead of silently letting a weaker sign-in through.
             state
