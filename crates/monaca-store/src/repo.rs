@@ -1233,6 +1233,19 @@ impl Store {
     ) -> Result<SsoConnectorRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
+        // The slug is checked before the domains so re-posting an existing connector reports the
+        // connector, even when its body also repeats the domains that connector already owns.
+        let existing: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.sso_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_some() {
+            return Err(StoreError::AlreadyExists {
+                entity: "sso connector",
+            });
+        }
         let taken: Option<(String,)> = sqlx::query_as(
             "SELECT connector_id FROM tenant.sso_connectors
              WHERE email_domains && $1 LIMIT 1",
