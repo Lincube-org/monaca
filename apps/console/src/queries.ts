@@ -10,12 +10,15 @@ import type {
   AuditIntegrity,
   CreateAgentRequest,
   CreateGrantRequest,
+  CreateOrganizationRequest,
   Grant,
   ListAuditQuery,
   Member,
+  Organization,
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateOrganizationRequest,
 } from "@/api/types";
 
 /**
@@ -46,6 +49,36 @@ export function useSession(): UseQueryReturnType<SessionInfo, Error> {
     queryFn: () => api.getSession(),
     staleTime: STALE.slow,
     retry: false,
+  });
+}
+
+export function useOrganizations(): UseQueryReturnType<Page<Organization>, Error> {
+  return useQuery({
+    queryKey: queryKeys.organizations(),
+    queryFn: () => api.listOrganizations(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateOrganization() {
+  const client = useQueryClient();
+  return useMutation<Organization, Error, CreateOrganizationRequest>({
+    mutationFn: (body) => api.createOrganization(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.organizations() });
+      // A new org is not a membership yet, but the session's org list is what the header offers.
+      void client.invalidateQueries({ queryKey: queryKeys.session() });
+    },
+  });
+}
+
+export function useUpdateOrganization() {
+  const client = useQueryClient();
+  return useMutation<Organization, Error, { organizationId: string; body: UpdateOrganizationRequest }>({
+    mutationFn: ({ organizationId, body }) => api.updateOrganization(organizationId, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.organizations() });
+    },
   });
 }
 

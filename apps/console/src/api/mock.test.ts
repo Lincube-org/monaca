@@ -56,6 +56,65 @@ describe("session", () => {
   });
 });
 
+describe("organizations", () => {
+  it("lists the tenant's default org as active", async () => {
+    const page = await mockApi.listOrganizations();
+    expect(page.next).toBe(null);
+    const acme = page.items.find((org) => org.slug === ORG);
+    expect(acme?.is_default).toBe(true);
+    expect(acme?.state).toBe("active");
+    for (const org of page.items) expect(org.id).toMatch(/^org_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+  });
+
+  it("creating an org makes it visible and appends org.created", async () => {
+    const slug = `team-${Date.now()}`;
+    const created = await mockApi.createOrganization({ slug });
+    expect(created.slug).toBe(slug);
+    expect(created.is_default).toBe(false);
+    expect(created.state).toBe("active");
+
+    const page = await mockApi.listOrganizations();
+    expect(page.items.map((org) => org.slug)).toContain(slug);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.created", limit: 200 });
+    expect(audit.items.some((event) => event.subject.id === created.id)).toBe(true);
+  });
+
+  it("refuses a duplicate slug and an invalid one", async () => {
+    const duplicate = await mockApi.createOrganization({ slug: ORG }).catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).code).toBe("MONACA_ORG_EXISTS");
+    expect((duplicate as ApiError).status).toBe(409);
+
+    const invalid = await mockApi.createOrganization({ slug: "Bad Team" }).catch((error: unknown) => error);
+    expect((invalid as ApiError).status).toBe(400);
+  });
+
+  it("archives and reactivates, and refuses to archive the default org", async () => {
+    const slug = `archive-${Date.now()}`;
+    const org = await mockApi.createOrganization({ slug });
+
+    expect((await mockApi.updateOrganization(org.id, { state: "archived" })).state).toBe("archived");
+    expect((await mockApi.updateOrganization(org.id, { state: "archived" })).state).toBe("archived");
+    expect((await mockApi.updateOrganization(org.id, { state: "active" })).state).toBe("active");
+
+    const defaultOrg = (await mockApi.listOrganizations()).items.find((candidate) => candidate.is_default)!;
+    const failure = await mockApi
+      .updateOrganization(defaultOrg.id, { state: "archived" })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(400);
+  });
+
+  it("an unknown organization is a 404", async () => {
+    const failure = await mockApi
+      .updateOrganization(newId("org"), { state: "archived" })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(404);
+  });
+});
+
 describe("agents", () => {
   it("lists seeded agents with typed ids and RFC 7638 fingerprints", async () => {
     const page = await mockApi.listAgents(ORG);

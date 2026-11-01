@@ -63,10 +63,24 @@ export interface AuditIntegrity {
   } | null;
 }
 
-/** The M0 action set (§8.1). Anything outside it is shown verbatim but flagged as unexpected. */
+/**
+ * The M0 action set (§8.1), kept in the same order as `M0_ACTIONS` in `monaca-server`.
+ * Anything outside it is shown verbatim but flagged as unexpected.
+ */
 export const M0_ACTIONS = [
   "account.created",
+  "org.created",
+  "org.archived",
+  "org.reactivated",
   "org.member.added",
+  "org.member.role_changed",
+  "org.member.removed",
+  "org.member.roles_changed",
+  "org.domain.added",
+  "org.domain.removed",
+  "org.role.created",
+  "org.role.updated",
+  "org.role.deleted",
   "agent.created",
   "agent.key.registered",
   "agent.key.revoked",
@@ -79,6 +93,22 @@ export const M0_ACTIONS = [
   "tool.denied",
   "interaction.sign_in.succeeded",
   "interaction.sign_in.failed",
+  "connector.created",
+  "connector.deleted",
+  "client.created",
+  "client.updated",
+  "client.secret_rotated",
+  "client.deleted",
+  "account.deleted",
+  "account.suspended",
+  "account.reactivated",
+  "role.created",
+  "role.deleted",
+  "session.logout",
+  "sign_in_experience.updated",
+  "resource.created",
+  "resource.updated",
+  "resource.deleted",
 ] as const;
 
 export function isKnownAction(action: string): boolean {

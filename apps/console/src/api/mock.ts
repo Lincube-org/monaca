@@ -21,12 +21,15 @@ import type {
   AuditIntegrity,
   CreateAgentRequest,
   CreateGrantRequest,
+  CreateOrganizationRequest,
   Grant,
   ListAuditQuery,
   Member,
+  Organization,
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateOrganizationRequest,
 } from "./types";
 
 /**
@@ -49,6 +52,7 @@ import type {
 
 class MockStore {
   private accounts = seedAccounts();
+  private organizations: Organization[] = seedOrganizations();
   private members: Member[] = seedMembers(this.accounts);
   private agents: Agent[] = buildAgents(this.accounts);
   private grants: Grant[] = buildGrants(this.agents, this.accounts);
@@ -83,6 +87,81 @@ class MockStore {
       tenant: TENANT,
       orgs: [{ slug: DEFAULT_ORG, role: "owner" }],
     };
+  }
+
+  listOrganizations(): Page<Organization> {
+    return { items: this.organizations.map((org) => ({ ...org })), next: null };
+  }
+
+  async createOrganization(body: CreateOrganizationRequest): Promise<Organization> {
+    const slug = body.slug.trim();
+    // §6.2's slug rule, enforced here so the console never learns it from a 400 in production.
+    if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(slug)) {
+      throw new ApiError("A slug is 2–31 lowercase letters, digits or dashes", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (this.organizations.some((org) => org.slug === slug)) {
+      throw new ApiError(`An organization with the slug ${slug} already exists`, {
+        status: 409,
+        code: "MONACA_ORG_EXISTS",
+      });
+    }
+
+    const org: Organization = {
+      id: newId("org"),
+      slug,
+      state: "active",
+      is_default: false,
+      created_at: new Date().toISOString(),
+    };
+    this.organizations = [...this.organizations, org];
+    await this.append({
+      action: "org.created",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: org.id,
+      decision: "info",
+      payload: { slug: org.slug, is_default: org.is_default },
+    });
+    return { ...org };
+  }
+
+  async updateOrganization(
+    organizationId: string,
+    body: UpdateOrganizationRequest,
+  ): Promise<Organization> {
+    const index = this.organizations.findIndex(
+      (candidate) => candidate.id === organizationId || candidate.slug === organizationId,
+    );
+    const org = this.organizations[index];
+    if (!org) {
+      throw new ApiError("No such organization in this tenant", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    if (org.state === body.state) return { ...org };
+    if (body.state === "archived" && org.is_default) {
+      throw new ApiError("The tenant's default organization cannot be archived", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    const updated: Organization = { ...org, state: body.state };
+    this.organizations = [
+      ...this.organizations.slice(0, index),
+      updated,
+      ...this.organizations.slice(index + 1),
+    ];
+    await this.append({
+      action: body.state === "archived" ? "org.archived" : "org.reactivated",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: org.id,
+      decision: "info",
+      payload: { slug: org.slug, state: body.state },
+    });
+    return { ...updated };
   }
 
   listMembers(): Page<Member> {
@@ -351,6 +430,19 @@ function cloneAgent(agent: Agent): Agent {
   return { ...agent, keys: agent.keys.map((key) => ({ ...key })) };
 }
 
+/** The tenant starts with the single default org the session signs into. */
+function seedOrganizations(): Organization[] {
+  return [
+    {
+      id: newId("org"),
+      slug: DEFAULT_ORG,
+      state: "active",
+      is_default: true,
+      created_at: new Date().toISOString(),
+    },
+  ];
+}
+
 /** One store per tab. Module scope, so navigating between pages keeps writes. */
 const store = new MockStore();
 
@@ -358,6 +450,18 @@ export const mockApi: MonacaApi = {
   async getSession() {
     await delay();
     return store.session();
+  },
+  async listOrganizations() {
+    await delay();
+    return store.listOrganizations();
+  },
+  async createOrganization(body) {
+    await delay();
+    return store.createOrganization(body);
+  },
+  async updateOrganization(organizationId, body) {
+    await delay();
+    return store.updateOrganization(organizationId, body);
   },
   async listMembers() {
     await delay();

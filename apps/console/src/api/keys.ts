@@ -10,6 +10,8 @@ import type { ListAuditQuery } from "./types";
 export const queryKeys = {
   session: () => ["session"] as const,
 
+  organizations: () => ["organizations"] as const,
+
   members: (org: string) => ["members", org] as const,
 
   agents: (org: string) => ["agents", org] as const,

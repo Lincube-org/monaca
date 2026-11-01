@@ -6,13 +6,16 @@ import type {
   AuditIntegrity,
   CreateAgentRequest,
   CreateGrantRequest,
+  CreateOrganizationRequest,
   Grant,
   ListAuditQuery,
   Member,
+  Organization,
   Page,
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateOrganizationRequest,
 } from "./types";
 
 /**
@@ -82,6 +85,21 @@ function query(params: Record<string, string | number | undefined>): string {
 export const httpApi: MonacaApi = {
   getSession(): Promise<SessionInfo> {
     return request<SessionInfo>("/session");
+  },
+
+  listOrganizations(): Promise<Page<Organization>> {
+    return request<Page<Organization>>("/orgs");
+  },
+
+  createOrganization(body: CreateOrganizationRequest): Promise<Organization> {
+    return request<Organization>("/orgs", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  updateOrganization(organizationId: string, body: UpdateOrganizationRequest): Promise<Organization> {
+    return request<Organization>(`/orgs/${encodeURIComponent(organizationId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
   },
 
   listMembers(org: string): Promise<Page<Member>> {

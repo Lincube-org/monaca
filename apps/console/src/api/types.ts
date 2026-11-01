@@ -30,6 +30,15 @@ export interface Member {
   role: OrgRole;
 }
 
+/** An organization row (§6.2). Archived orgs stay listed; their slug stops resolving. */
+export interface Organization {
+  id: string;
+  slug: string;
+  state: "active" | "archived";
+  is_default: boolean;
+  created_at: string;
+}
+
 export type OrgRole = "owner" | "admin" | "member";
 
 export interface AgentKey {
@@ -111,6 +120,14 @@ export interface CreateGrantRequest {
 export interface AddMemberRequest {
   account_id: string;
   role: OrgRole;
+}
+
+export interface CreateOrganizationRequest {
+  slug: string;
+}
+
+export interface UpdateOrganizationRequest {
+  state: "active" | "archived";
 }
 
 export interface ListAuditQuery {

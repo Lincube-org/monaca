@@ -5,13 +5,16 @@ import type {
   AuditIntegrity,
   CreateAgentRequest,
   CreateGrantRequest,
+  CreateOrganizationRequest,
   Grant,
   ListAuditQuery,
   Member,
+  Organization,
   Page,
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateOrganizationRequest,
 } from "./types";
 
 /**
@@ -28,6 +31,14 @@ import type {
  */
 export interface MonacaApi {
   getSession(): Promise<SessionInfo>;
+
+  /**
+   * Organizations are tenant-level: unlike the pages below they are not scoped to the org switcher,
+   * because this is the page that defines the orgs the switcher offers.
+   */
+  listOrganizations(): Promise<Page<Organization>>;
+  createOrganization(body: CreateOrganizationRequest): Promise<Organization>;
+  updateOrganization(organizationId: string, body: UpdateOrganizationRequest): Promise<Organization>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;
