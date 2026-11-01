@@ -287,6 +287,18 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             delete(crate::management::revoke_account_session),
         )
         .route(
+            "/v1/accounts/{id}/security",
+            get(crate::management::get_account_security),
+        )
+        .route(
+            "/v1/accounts/{id}/mfa",
+            delete(crate::management::reset_account_mfa),
+        )
+        .route(
+            "/v1/accounts/{id}/passkeys/{passkey}",
+            delete(crate::management::delete_account_passkey),
+        )
+        .route(
             "/v1/orgs",
             get(crate::orgs::list_orgs).post(crate::orgs::create_org),
         )

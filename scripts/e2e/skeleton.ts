@@ -320,6 +320,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "address outside the connector's domains is 403 MONACA_SSO_DOMAIN_MISMATCH; DELETE is 204, " +
       "the lookup is empty, and deleting it again is 404",
   },
+  {
+    step: "32",
+    title: "account security",
+    assertion:
+      "an account enrolls TOTP through its own session; GET /v1/accounts/{id}/security reports " +
+      "mfa.totp=true, the recovery-code count and its (empty) passkey list; DELETE " +
+      "/v1/accounts/{id}/mfa is 204 and the next GET reports mfa.totp=false, after which a fresh " +
+      "sign-in completes without a second-factor challenge; an unknown passkey or account is 404",
+  },
 ];
 
 interface StepResult {
@@ -6585,6 +6594,166 @@ async function ssoFlow(base: string, adminToken: string): Promise<StepResult> {
   };
 }
 
+/**
+ * Step 32 — administrator account-security management (§6.2).
+ *
+ * An account enrolls TOTP through its own session; the administrator then reads the enrolled
+ * factors, resets the authenticator, and the next sign-in is single-factor again. Passkeys are
+ * separate credentials and are only removed one at a time.
+ */
+async function accountSecurityFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const email = `security-${runId}@demo.localhost`;
+  const password = `pw-${runId}-security`;
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "32",
+    title: "account security",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  const auth = (cookie: string): Record<string, string> => ({ cookie: `monaca_session=${cookie}` });
+
+  /** A fresh authorize → interaction → password sign-in; the response carries the SSO cookie. */
+  const signIn = async (
+    tag: string,
+  ): Promise<{ status: number; body: unknown; cookie?: string } | undefined> => {
+    const verifier = `s-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-${tag}-${runId}`,
+        nonce: `n-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(
+      response.headers.get("set-cookie") ?? "",
+    )?.[1];
+    return { status: response.status, body: response.body, cookie };
+  };
+
+  try {
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Security", password }),
+    });
+    const accountId = (account.body as { id?: string })?.id;
+    if (account.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    // --- enroll TOTP through the account's own session ----------------------------------------
+    const first = await signIn("enroll");
+    if (first?.cookie === undefined) return fail("the first sign-in did not set a session cookie");
+    const enrollment = await call(`${base}/t/${TENANT}/account/mfa/totp`, {
+      method: "POST",
+      headers: auth(first.cookie),
+    });
+    const secret = (enrollment.body as { secret?: unknown })?.secret;
+    if (enrollment.status !== 200 || typeof secret !== "string") {
+      return fail(`POST /account/mfa/totp → ${enrollment.status} ${text(enrollment.body)}`);
+    }
+    const confirmed = await call(`${base}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: { ...auth(first.cookie), "content-type": "application/json" },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push(["the account confirms its authenticator", confirmed.status === 200]);
+
+    // --- the administrator reads the enrolled factors ------------------------------------------
+    const security = await call(`${base}/v1/accounts/${accountId}/security`, { headers });
+    const mfa = (security.body as { mfa?: { totp?: unknown; backup_codes?: unknown } })?.mfa;
+    const passkeys = (security.body as { passkeys?: unknown[] })?.passkeys;
+    checks.push([
+      "GET security reports the authenticator and its metadata",
+      security.status === 200 &&
+        mfa?.totp === true &&
+        mfa.backup_codes === 0 &&
+        Array.isArray(passkeys) &&
+        passkeys.length === 0,
+    ]);
+
+    // --- reset, and the next sign-in is single-factor again ------------------------------------
+    const reset = await call(`${base}/v1/accounts/${accountId}/mfa`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["DELETE the account MFA is 204", reset.status === 204]);
+
+    const after = await call(`${base}/v1/accounts/${accountId}/security`, { headers });
+    checks.push([
+      "the reset removed the authenticator",
+      after.status === 200 && (after.body as { mfa?: { totp?: unknown } })?.mfa?.totp === false,
+    ]);
+
+    const second = await signIn("after-reset");
+    checks.push([
+      "a fresh sign-in no longer challenges for a second factor",
+      second?.status === 200 && typeof (second.body as { redirect_to?: unknown })?.redirect_to === "string",
+    ]);
+
+    // --- the levers are scoped ----------------------------------------------------------------
+    const missingPasskey = await call(
+      `${base}/v1/accounts/${accountId}/passkeys/pky_01h455vb4pex5vsknk084sn02q`,
+      { method: "DELETE", headers },
+    );
+    checks.push(["a passkey the account does not have is 404", missingPasskey.status === 404]);
+
+    const unknownAccount = await call(
+      `${base}/v1/accounts/acc_01h455vb4pex5vsknk084sn02q/security`,
+      { headers },
+    );
+    checks.push(["an unknown account is 404", unknownAccount.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "32",
+    title: "account security",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: member → enroll → security read → reset 204 → no authenticator → sign-in single-factor → passkey 404 → unknown account 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -6845,6 +7014,7 @@ async function main(): Promise<number> {
   push(await orgRoleFlow(base, adminToken));
   push(await orgInvitationFlow(base, adminToken));
   push(await ssoFlow(base, adminToken));
+  push(await accountSecurityFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

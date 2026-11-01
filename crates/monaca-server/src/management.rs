@@ -18,7 +18,8 @@ use monaca_store::{
     TenantRow,
 };
 use monaca_types::{
-    AccountId, AgentId, AgentKeyId, EventId, GrantId, RoleId, SessionId, TenantId, TypedId,
+    AccountId, AgentId, AgentKeyId, EventId, GrantId, PasskeyId, RoleId, SessionId, TenantId,
+    TypedId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -806,6 +807,153 @@ pub async fn revoke_account_sessions(
 pub(crate) fn parse_account(raw: &str) -> Result<AccountId, ApiError> {
     AccountId::parse(raw)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))
+}
+
+/// `GET /v1/accounts/{id}/security` — what the account has enrolled, as the console shows it.
+///
+/// The administrator sees presence and metadata, never a secret: whether an authenticator exists,
+/// how many recovery codes remain, and the passkeys with their labels. Reading it is not a
+/// credential, so the response is the same shape a user would see in the account centre.
+pub async fn get_account_security(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    if state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("account"));
+    }
+
+    let totp = state.store.totp_secret(&tenant, account_id).await?.is_some();
+    let backup_codes = state
+        .store
+        .backup_code_count(&tenant, account_id)
+        .await?;
+    let passkeys = state.store.passkeys(&tenant, account_id).await?;
+    let trusted_devices = state
+        .store
+        .trusted_devices(&tenant, account_id)
+        .await?
+        .len();
+    let keys: Vec<Value> = passkeys
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.passkey_id().to_typed_string(),
+                "name": row.name,
+                "created_at": ts(row.created_at),
+                "last_used_at": row.last_used_at.map(ts),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "account_id": account_id.to_typed_string(),
+        "mfa": { "totp": totp, "backup_codes": backup_codes },
+        "passkeys": keys,
+        "trusted_devices": trusted_devices,
+    })))
+}
+
+/// `DELETE /v1/accounts/{id}/mfa` — reset the account's authenticator and recovery codes.
+///
+/// Passkeys are separate credentials and stay: removing them is a per-key decision, and deleting an
+/// account's only second factor without being asked is a destructive surprise.
+pub async fn reset_account_mfa(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    if state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("account"));
+    }
+
+    state.store.delete_totp_secret(&tenant, account_id).await?;
+    state.store.delete_backup_codes(&tenant, account_id).await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "account.security_changed".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Deny,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "account_id": account_id.to_typed_string(), "kind": "mfa_reset" }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append account.security_changed audit event");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/accounts/{id}/passkeys/{passkey}` — remove one enrolled passkey.
+pub async fn delete_account_passkey(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, raw)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    let passkey = PasskeyId::parse(&raw)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a passkey id"))?;
+    if state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("account"));
+    }
+    if !state
+        .store
+        .delete_passkey(&tenant, account_id, passkey.uuid())
+        .await?
+    {
+        return Err(ApiError::not_found("passkey"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "account.security_changed".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Deny,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "account_id": account_id.to_typed_string(),
+            "kind": "passkey_removed",
+            "passkey": passkey.to_typed_string(),
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append account.security_changed audit event");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /v1/orgs/{org}/members`.

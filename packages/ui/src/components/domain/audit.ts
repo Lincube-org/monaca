@@ -106,6 +106,7 @@ export const M0_ACTIONS = [
   "account.deleted",
   "account.suspended",
   "account.reactivated",
+  "account.security_changed",
   "role.created",
   "role.deleted",
   "session.logout",
