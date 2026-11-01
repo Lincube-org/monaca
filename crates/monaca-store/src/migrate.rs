@@ -129,6 +129,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "enterprise SSO (OIDC federation) connectors and their states (M1)",
         include_str!("../migrations/tenant_18.sql"),
     ),
+    (
+        19,
+        "tenant MFA policy: enable second factors and require enrollment (M1)",
+        include_str!("../migrations/tenant_19.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

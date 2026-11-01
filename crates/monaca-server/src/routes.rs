@@ -147,6 +147,14 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             post(crate::protocol::mfa_verify),
         )
         .route(
+            "/t/{tenant}/interaction/{iid}/mfa/enroll",
+            post(crate::protocol::mfa_enroll_start),
+        )
+        .route(
+            "/t/{tenant}/interaction/{iid}/mfa/enroll/verify",
+            post(crate::protocol::mfa_enroll_verify),
+        )
+        .route(
             "/t/{tenant}/interaction/{iid}/consent",
             post(crate::protocol::consent),
         )

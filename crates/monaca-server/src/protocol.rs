@@ -10,8 +10,8 @@ use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
     DEFAULT_CODE_DIGITS, assertion_user_verified, generate_challenge, generate_numeric_code,
-    hash_password, hash_secret, normalize_backup_code, open, verify_assertion, verify_password,
-    verify_secret, verify_totp,
+    generate_totp_secret, hash_password, hash_secret, normalize_backup_code, open, seal,
+    totp_base32, totp_otpauth_url, verify_assertion, verify_password, verify_secret, verify_totp,
 };
 use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
@@ -60,6 +60,8 @@ pub async fn sign_in_experience(
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+        "mfa_enabled": experience.mfa_enabled,
+        "mfa_policy": experience.mfa_policy,
     })))
 }
 
@@ -347,6 +349,13 @@ pub async fn interaction_details(
         .map_err(ApiError::Interaction)?;
     let mut body = interaction.to_public_json(signed_in.is_some());
     body["mfa_required"] = json!(pending.is_some());
+    // A mandatory policy parks the flow on an enrollment step instead; the page needs to know
+    // which of the two it is rendering.
+    let enrollment = state
+        .mfa_enrollment_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    body["mfa_enrollment_required"] = json!(enrollment.is_some());
     // A reload resumes the second-factor step, so the page needs to know which factor forms to offer
     // without asking the account endpoint (which the browser may not be signed in to yet).
     let factors = match pending {
@@ -548,39 +557,57 @@ pub(crate) async fn finish_sign_in(
         .org_by_slug(&tenant, &interaction.organization)
         .await?;
     check_scope_grants(&state, &tenant, &account, &org, &interaction.scopes).await?;
-    if state
-        .store
-        .totp_secret(&tenant, account.account_id())
-        .await?
-        .is_some()
-    {
-        // A browser this account chose to remember skips the second factor until it is revoked or
-        // expires (§6.1 `mfa`). The cookie is per tenant and the row names the account, so a stale
-        // trust from another account does nothing.
-        if let Some(token) = session::trusted_device_token(headers)
-            && let Some(device) = state
-                .store
-                .trusted_device(&tenant, &hash_secret(&token))
-                .await?
-            && device.account_id == account.id
-        {
-            state
-                .store
-                .touch_trusted_device(&tenant, device.id, state.now())
-                .await?;
-            return complete_sign_in(state, tenant, interaction, iid, headers, account).await;
-        }
 
-        state
-            .mark_mfa_pending(iid, account.id)
-            .await
-            .map_err(ApiError::Interaction)?;
+    // The tenant's policy decides what happens after the first factor. MFA switched off means an
+    // enrolled authenticator is not demanded either — the administrator turned the step off.
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    let satisfied = state
+        .mfa_satisfied(iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    if experience.mfa_enabled && !satisfied {
         let factors = mfa_factors(&state, &tenant, account.id).await?;
-        return Ok(Json(json!({
-            "mfa_required": true,
-            "factors": factors,
-        }))
-        .into_response());
+        if !factors.is_empty() {
+            // A browser this account chose to remember skips the second factor until it is revoked
+            // or expires (§6.1 `mfa`). The cookie is per tenant and the row names the account, so a
+            // stale trust from another account does nothing.
+            if let Some(token) = session::trusted_device_token(headers)
+                && let Some(device) = state
+                    .store
+                    .trusted_device(&tenant, &hash_secret(&token))
+                    .await?
+                && device.account_id == account.id
+            {
+                state
+                    .store
+                    .touch_trusted_device(&tenant, device.id, state.now())
+                    .await?;
+                return complete_sign_in(state, tenant, interaction, iid, headers, account).await;
+            }
+
+            state
+                .mark_mfa_pending(iid, account.id)
+                .await
+                .map_err(ApiError::Interaction)?;
+            return Ok(Json(json!({
+                "mfa_required": true,
+                "factors": factors,
+            }))
+            .into_response());
+        }
+        if experience.mfa_policy == "mandatory" {
+            // No factor is enrolled and the tenant requires one: the flow pauses on a setup step
+            // instead of silently letting a weaker sign-in through.
+            state
+                .mark_mfa_enrollment(iid, account.id)
+                .await
+                .map_err(ApiError::Interaction)?;
+            return Ok(Json(json!({
+                "mfa_enrollment_required": true,
+                "factors": ["totp"],
+            }))
+            .into_response());
+        }
     }
     complete_sign_in(state, tenant, interaction, iid, headers, account).await
 }
@@ -782,6 +809,9 @@ const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
 /// Wrong TOTP codes an interaction survives before the challenge is refused (§6.1 `mfa`).
 const MAX_MFA_ATTEMPTS: u32 = 5;
+
+/// How long an enrollment started from a sign-in may stay unconfirmed.
+const MFA_ENROLLMENT_TTL_SECS: i64 = 600;
 
 /// The shortest accepted password, in characters. Shared with the account centre's change-password
 /// endpoint so both entrances enforce the same rule.
@@ -1635,6 +1665,133 @@ pub async fn mfa_verify(
         response.headers_mut().append(header::SET_COOKIE, cookie);
     }
     Ok(response)
+}
+
+/// The body of `POST …/mfa/enroll/verify`.
+#[derive(Debug, Deserialize)]
+pub struct MfaEnrollmentBody {
+    /// The six-digit code from the authenticator.
+    pub code: String,
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/mfa/enroll` — start the setup a mandatory policy demands.
+///
+/// The secret is held unconfirmed in the same in-memory map the account centre uses, keyed by the
+/// account this interaction is parked on. It is written to `credentials` only by the verify step.
+pub async fn mfa_enroll_start(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let Some(account_id) = state
+        .mfa_enrollment_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is not waiting for an enrollment",
+        ));
+    };
+    let Some(account) = state
+        .store
+        .account_by_id(&tenant, AccountId::from_uuid(account_id))
+        .await?
+    else {
+        return Err(ApiError::problem(kinds::INVALID_CREDENTIALS, "this account cannot sign in"));
+    };
+    if state
+        .store
+        .totp_secret(&tenant, account.account_id())
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::MFA_ALREADY_ENABLED,
+            "an authenticator app is already enrolled",
+        ));
+    }
+
+    let secret = generate_totp_secret();
+    state
+        .put_totp_enrollment(
+            account.id,
+            secret.clone(),
+            state.now() + Duration::seconds(MFA_ENROLLMENT_TTL_SECS),
+        )
+        .await;
+    Ok(Json(json!({
+        "secret": totp_base32(&secret),
+        "otpauth_url": totp_otpauth_url(crate::account::ISSUER, &account.primary_email, &secret),
+        "expires_in": MFA_ENROLLMENT_TTL_SECS,
+    })))
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/mfa/enroll/verify` — prove the app and finish the sign-in.
+///
+/// The freshly verified factor counts as satisfied for this interaction only: the account signs in
+/// once, and every later sign-in is challenged normally.
+pub async fn mfa_enroll_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<MfaEnrollmentBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let Some(account_id) = state
+        .mfa_enrollment_pending(&iid)
+        .await
+        .map_err(ApiError::Interaction)?
+    else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this interaction is not waiting for an enrollment",
+        ));
+    };
+    let Some(secret) = state.totp_enrollment(account_id).await else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "no enrollment is pending; start again",
+        ));
+    };
+    if !verify_totp(&secret, &body.code, state.now()) {
+        return Err(ApiError::problem(
+            kinds::INVALID_VERIFICATION_CODE,
+            "the code is incorrect or expired",
+        ));
+    }
+    let account_id = AccountId::from_uuid(account_id);
+    if state
+        .store
+        .totp_secret(&tenant, account_id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::MFA_ALREADY_ENABLED,
+            "an authenticator app is already enrolled",
+        ));
+    }
+
+    let sealed = seal(&state.tenant_dek(&tenant)?, &secret)
+        .map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
+    state
+        .store
+        .set_totp_secret(&tenant, account_id, &sealed)
+        .await?;
+    state.drop_totp_enrollment(account_id.uuid()).await;
+    state
+        .mark_mfa_satisfied(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+
+    let Some(account) = state.store.account_by_id(&tenant, account_id).await? else {
+        return Err(ApiError::problem(kinds::INVALID_CREDENTIALS, "this account cannot sign in"));
+    };
+    if account.state != "active" {
+        return Err(ApiError::problem(kinds::INVALID_CREDENTIALS, "this account cannot sign in"));
+    }
+    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
 
 /// Record a rejected passkey sign-in.

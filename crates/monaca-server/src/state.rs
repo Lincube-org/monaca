@@ -29,6 +29,10 @@ pub struct StoredInteraction {
     pub session_id: Option<Uuid>,
     /// The account that passed the primary factor and still owes a TOTP code (§6.1 `mfa`).
     pub mfa_account: Option<Uuid>,
+    /// The account that must enroll a second factor before the sign-in can finish (§6.1 `mfa`).
+    pub mfa_enrollment: Option<Uuid>,
+    /// Set when an enrollment proved itself, so completion does not challenge again.
+    pub mfa_satisfied: bool,
     /// Wrong TOTP codes tried on this interaction; five ends it.
     pub mfa_attempts: u32,
 }
@@ -181,6 +185,8 @@ impl AppState {
                 signed_in_account: None,
                 session_id: None,
                 mfa_account: None,
+                mfa_enrollment: None,
+                mfa_satisfied: false,
                 mfa_attempts: 0,
             },
         );
@@ -302,7 +308,49 @@ impl AppState {
             stored.mfa_attempts = 0;
         }
         stored.mfa_account = Some(account);
+        stored.mfa_enrollment = None;
         Ok(())
+    }
+
+    /// Park the interaction on an enrollment step: the account has no factor and the tenant's
+    /// policy requires one before the sign-in may finish.
+    pub async fn mark_mfa_enrollment(
+        &self,
+        id: &str,
+        account: Uuid,
+    ) -> Result<(), monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        stored.mfa_account = None;
+        stored.mfa_enrollment = Some(account);
+        stored.mfa_satisfied = false;
+        Ok(())
+    }
+
+    /// The account an enrollment step belongs to, if the interaction is parked on one.
+    pub async fn mfa_enrollment_pending(
+        &self,
+        id: &str,
+    ) -> Result<Option<Uuid>, monaca_oidc::InteractionError> {
+        let now = self.now();
+        let map = self.interactions.lock().await;
+        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        Ok(stored.mfa_enrollment)
     }
 
     /// The account waiting for a TOTP code on this interaction, if any.
@@ -355,6 +403,40 @@ impl AppState {
         stored.mfa_account = None;
         stored.mfa_attempts = 0;
         Ok(())
+    }
+
+    /// Mark this interaction's second factor as satisfied by a completed enrollment.
+    pub async fn mark_mfa_satisfied(&self, id: &str) -> Result<(), monaca_oidc::InteractionError> {
+        let now = self.now();
+        let mut map = self.interactions.lock().await;
+        let stored = map
+            .get_mut(id)
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        stored.mfa_account = None;
+        stored.mfa_enrollment = None;
+        stored.mfa_attempts = 0;
+        stored.mfa_satisfied = true;
+        Ok(())
+    }
+
+    /// Whether a completed enrollment has already satisfied this interaction's second factor.
+    pub async fn mfa_satisfied(&self, id: &str) -> Result<bool, monaca_oidc::InteractionError> {
+        let now = self.now();
+        let map = self.interactions.lock().await;
+        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
+        if stored.interaction.is_expired(now) {
+            return Err(monaca_oidc::InteractionError::Expired);
+        }
+        if stored.consumed {
+            return Err(monaca_oidc::InteractionError::Consumed);
+        }
+        Ok(stored.mfa_satisfied)
     }
 
     /// Hold the unconfirmed secret of a TOTP setup until the user proves the app works.

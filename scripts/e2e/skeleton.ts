@@ -329,6 +329,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "/v1/accounts/{id}/mfa is 204 and the next GET reports mfa.totp=false, after which a fresh " +
       "sign-in completes without a second-factor challenge; an unknown passkey or account is 404",
   },
+  {
+    step: "33",
+    title: "mandatory MFA",
+    assertion:
+      "PATCH /v1/sign-in-experience {mfa_enabled:true,mfa_policy:mandatory} is 200 (mfa_enabled=false " +
+      "with a mandatory policy is 400); an account with no factor signs in and is answered " +
+      "{mfa_enrollment_required:true}; POST …/mfa/enroll returns a secret and otpauth URL, " +
+      "POST …/mfa/enroll/verify with a computed code finishes the flow, and the next sign-in is " +
+      "challenged with mfa_required and factors=[totp]; restoring user_controlled succeeds",
+  },
 ];
 
 interface StepResult {
@@ -6754,6 +6764,217 @@ async function accountSecurityFlow(base: string, adminToken: string): Promise<St
   };
 }
 
+/**
+ * Step 33 — a mandatory MFA policy and the enrollment it demands (§6.1 `mfa`).
+ *
+ * The tenant turns MFA on with the mandatory policy; an account with no factor is stopped on a
+ * setup step, proves its new authenticator, finishes the sign-in, and is challenged normally the
+ * next time. The policy is restored in `finally`, so a failure cannot change later runs.
+ */
+async function mandatoryMfaFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const email = `mandatory-${runId}@demo.localhost`;
+  const password = `pw-${runId}-mandatory`;
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "33",
+    title: "mandatory MFA",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  /** A fresh authorize → interaction → password sign-in. */
+  const beginSignIn = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string; status: number; body: unknown } | undefined> => {
+    const verifier = `m-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-${tag}-${runId}`,
+        nonce: `n-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    const signedIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      },
+    );
+    return {
+      interaction,
+      verifier,
+      status: signedIn.status,
+      body: signedIn.body,
+    };
+  };
+
+  try {
+    const enabled = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ mfa_enabled: true, mfa_policy: "mandatory" }),
+    });
+    checks.push([
+      "PATCH enables a mandatory policy",
+      enabled.status === 200 &&
+        (enabled.body as { mfa_enabled?: unknown })?.mfa_enabled === true &&
+        (enabled.body as { mfa_policy?: unknown })?.mfa_policy === "mandatory",
+    ]);
+
+    const impossible = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ mfa_enabled: false, mfa_policy: "mandatory" }),
+    });
+    checks.push(["MFA cannot be off while the policy is mandatory", impossible.status === 400]);
+
+    const account = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Mandatory", password }),
+    });
+    const accountId = (account.body as { id?: string })?.id;
+    if (account.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${account.status} ${text(account.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    // --- the sign-in stops on enrollment ------------------------------------------------------
+    const start = await beginSignIn("enroll");
+    if (start === undefined) return fail("authorize did not open an interaction");
+    checks.push([
+      "an account with no factor is asked to enroll",
+      start.status === 200 &&
+        (start.body as { mfa_enrollment_required?: unknown })?.mfa_enrollment_required === true,
+    ]);
+
+    const enrollment = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(start.interaction)}/mfa/enroll`,
+      { method: "POST" },
+    );
+    const secret = (enrollment.body as { secret?: unknown })?.secret;
+    checks.push([
+      "the enrollment returns a secret and an otpauth URL",
+      enrollment.status === 200 &&
+        typeof secret === "string" &&
+        typeof (enrollment.body as { otpauth_url?: unknown })?.otpauth_url === "string",
+    ]);
+    if (enrollment.status !== 200 || typeof secret !== "string") {
+      return fail(`mfa/enroll → ${enrollment.status} ${text(enrollment.body)}`);
+    }
+
+    const confirmed = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(start.interaction)}/mfa/enroll/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: totpFromBase32(secret) }),
+      },
+    );
+    const redirectTo = (confirmed.body as { redirect_to?: unknown })?.redirect_to;
+    checks.push([
+      "a confirmed enrollment finishes the sign-in",
+      confirmed.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (confirmed.status !== 200 || typeof redirectTo !== "string") {
+      return fail(`mfa/enroll/verify → ${confirmed.status} ${text(confirmed.body)}`);
+    }
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: "monaca-console",
+      code_verifier: start.verifier,
+    });
+    checks.push(["the token exchange succeeds", token.status === 200]);
+
+    // --- the next sign-in challenges the new factor -------------------------------------------
+    const again = await beginSignIn("challenge");
+    if (again === undefined) return fail("the second authorize did not open an interaction");
+    const factors = (again.body as { factors?: unknown })?.factors;
+    checks.push([
+      "the next sign-in requires the new factor",
+      again.status === 200 &&
+        (again.body as { mfa_required?: unknown })?.mfa_required === true &&
+        Array.isArray(factors) &&
+        factors.includes("totp"),
+    ]);
+    const verified = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(again.interaction)}/mfa/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: totpFromBase32(secret) }),
+      },
+    );
+    checks.push([
+      "the newly enrolled factor completes the challenge",
+      verified.status === 200 &&
+        typeof (verified.body as { redirect_to?: unknown })?.redirect_to === "string",
+    ]);
+
+    const restored = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ mfa_policy: "user_controlled" }),
+    });
+    checks.push([
+      "the policy is restored to user_controlled",
+      restored.status === 200 &&
+        (restored.body as { mfa_policy?: unknown })?.mfa_policy === "user_controlled",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ mfa_policy: "user_controlled" }),
+    }).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "33",
+    title: "mandatory MFA",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: enable → invalid pair 400 → no factor enroll → secret → verify → token → next challenge → verify → restore`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -7015,6 +7236,7 @@ async function main(): Promise<number> {
   push(await orgInvitationFlow(base, adminToken));
   push(await ssoFlow(base, adminToken));
   push(await accountSecurityFlow(base, adminToken));
+  push(await mandatoryMfaFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

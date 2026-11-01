@@ -51,6 +51,10 @@ pub struct SignInExperienceRow {
     pub password_sign_in_enabled: bool,
     /// Whether emailed sign-in codes and links are offered.
     pub email_code_sign_in_enabled: bool,
+    /// Whether second factors are used at sign-in at all.
+    pub mfa_enabled: bool,
+    /// `user_controlled` (an enrolled factor is challenged) | `mandatory` (everyone must enroll).
+    pub mfa_policy: String,
     /// When the switches last changed.
     pub updated_at: OffsetDateTime,
 }
@@ -738,7 +742,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                    updated_at
+                    mfa_enabled, mfa_policy, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
         .fetch_one(&pool)
@@ -746,12 +750,15 @@ impl Store {
     }
 
     /// Change only the switches the caller named; the others keep their value.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_sign_in_experience(
         &self,
         tenant: &TenantRow,
         sign_up_enabled: Option<bool>,
         password_sign_in_enabled: Option<bool>,
         email_code_sign_in_enabled: Option<bool>,
+        mfa_enabled: Option<bool>,
+        mfa_policy: Option<&str>,
     ) -> Result<SignInExperienceRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
@@ -759,14 +766,18 @@ impl Store {
              SET sign_up_enabled = COALESCE($1, sign_up_enabled),
                  password_sign_in_enabled = COALESCE($2, password_sign_in_enabled),
                  email_code_sign_in_enabled = COALESCE($3, email_code_sign_in_enabled),
+                 mfa_enabled = COALESCE($4, mfa_enabled),
+                 mfa_policy = COALESCE($5, mfa_policy),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                       updated_at",
+                       mfa_enabled, mfa_policy, updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
         .bind(email_code_sign_in_enabled)
+        .bind(mfa_enabled)
+        .bind(mfa_policy)
         .fetch_one(&pool)
         .await?)
     }

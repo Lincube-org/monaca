@@ -435,6 +435,10 @@ pub struct UpdateSignInExperienceBody {
     pub password_sign_in_enabled: Option<bool>,
     /// Whether emailed codes and links are offered.
     pub email_code_sign_in_enabled: Option<bool>,
+    /// Whether second factors are used at sign-in at all.
+    pub mfa_enabled: Option<bool>,
+    /// `user_controlled` | `mandatory`.
+    pub mfa_policy: Option<String>,
 }
 
 /// `GET /v1/sign-in-experience` — the tenant's hosted sign-in switches (§6.2).
@@ -461,10 +465,20 @@ pub async fn update_sign_in_experience(
     if body.sign_up_enabled.is_none()
         && body.password_sign_in_enabled.is_none()
         && body.email_code_sign_in_enabled.is_none()
+        && body.mfa_enabled.is_none()
+        && body.mfa_policy.is_none()
     {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "at least one switch must be present",
+        ));
+    }
+    if let Some(policy) = body.mfa_policy.as_deref()
+        && !matches!(policy, "user_controlled" | "mandatory")
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "mfa_policy must be user_controlled or mandatory",
         ));
     }
 
@@ -481,6 +495,19 @@ pub async fn update_sign_in_experience(
             "password sign-in or email code sign-in must stay enabled",
         ));
     }
+    // A mandatory policy with MFA switched off would demand an enrollment no page offers, so the
+    // resulting pair is checked before the write just like the first-factor pair above.
+    let mfa_enabled = body.mfa_enabled.unwrap_or(current.mfa_enabled);
+    let mfa_policy = body
+        .mfa_policy
+        .as_deref()
+        .unwrap_or(current.mfa_policy.as_str());
+    if !mfa_enabled && mfa_policy == "mandatory" {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "mfa_policy cannot be mandatory while MFA is disabled",
+        ));
+    }
 
     let experience = state
         .store
@@ -489,6 +516,8 @@ pub async fn update_sign_in_experience(
             body.sign_up_enabled,
             body.password_sign_in_enabled,
             body.email_code_sign_in_enabled,
+            body.mfa_enabled,
+            body.mfa_policy.as_deref(),
         )
         .await?;
 
@@ -508,6 +537,8 @@ pub async fn update_sign_in_experience(
             "sign_up_enabled": experience.sign_up_enabled,
             "password_sign_in_enabled": experience.password_sign_in_enabled,
             "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+            "mfa_enabled": experience.mfa_enabled,
+            "mfa_policy": experience.mfa_policy,
         }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
@@ -522,6 +553,8 @@ fn sign_in_experience_json(experience: &SignInExperienceRow) -> Value {
         "sign_up_enabled": experience.sign_up_enabled,
         "password_sign_in_enabled": experience.password_sign_in_enabled,
         "email_code_sign_in_enabled": experience.email_code_sign_in_enabled,
+        "mfa_enabled": experience.mfa_enabled,
+        "mfa_policy": experience.mfa_policy,
         "updated_at": ts(experience.updated_at),
     })
 }
