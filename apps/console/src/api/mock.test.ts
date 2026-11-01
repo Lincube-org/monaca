@@ -300,6 +300,132 @@ describe("applications", () => {
   });
 });
 
+describe("org roles", () => {
+  async function freshRoleName(prefix: string): Promise<string> {
+    return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  it("lists seeded roles with typed ids and their scopes", async () => {
+    const page = await mockApi.listOrgRoles(ORG);
+    expect(page.next).toBe(null);
+    expect(page.items.map((role) => role.name)).toContain("support");
+    for (const role of page.items) {
+      expect(role.id).toMatch(/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+      expect(Array.isArray(role.scopes)).toBe(true);
+    }
+  });
+
+  it("creates a role, refuses a duplicate name, and appends org.role.created", async () => {
+    const name = await freshRoleName("reviewer");
+    const created = await mockApi.createOrgRole(ORG, {
+      name,
+      description: "Review tool output.",
+      scopes: ["tools:read"],
+    });
+    expect(created.name).toBe(name);
+    expect(created.scopes).toEqual(["tools:read"]);
+    expect((await mockApi.listOrgRoles(ORG)).items.map((role) => role.name)).toContain(name);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.role.created", limit: 200 });
+    expect(audit.items.some((event) => event.payload["role"] === name)).toBe(true);
+
+    const duplicate = await mockApi
+      .createOrgRole(ORG, { name, description: "", scopes: [] })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).code).toBe("MONACA_ORG_ROLE_EXISTS");
+    expect((duplicate as ApiError).status).toBe(409);
+
+    const invalid = await mockApi
+      .createOrgRole(ORG, { name: "", description: "", scopes: [] })
+      .catch((error: unknown) => error);
+    expect((invalid as ApiError).status).toBe(400);
+  });
+
+  it("updates name, description and scopes, and refuses an invalid scope", async () => {
+    const name = await freshRoleName("editor");
+    const created = await mockApi.createOrgRole(ORG, {
+      name,
+      description: "Before.",
+      scopes: ["tools:read"],
+    });
+
+    const updated = await mockApi.updateOrgRole(ORG, created.id, {
+      name: `${name}-v2`,
+      description: "After.",
+      scopes: ["tools:read", "tools:write"],
+    });
+    expect(updated.name).toBe(`${name}-v2`);
+    expect(updated.description).toBe("After.");
+    expect(updated.scopes).toEqual(["tools:read", "tools:write"]);
+
+    await expect(mockApi.updateOrgRole(ORG, created.id, { scopes: ["bad scope"] })).rejects.toThrow(
+      /scope grammar/,
+    );
+
+    const emptyPatch = await mockApi.updateOrgRole(ORG, created.id, {}).catch((error: unknown) => error);
+    expect((emptyPatch as ApiError).status).toBe(400);
+  });
+
+  it("assigns a role idempotently and records the before/after set", async () => {
+    const role = await mockApi.createOrgRole(ORG, {
+      name: await freshRoleName("assignee"),
+      description: "",
+      scopes: ["tools:read"],
+    });
+    const member = (await mockApi.listMembers(ORG)).items[0]!;
+
+    await mockApi.assignMemberRole(ORG, member.account_id, { role_id: role.id });
+    await mockApi.assignMemberRole(ORG, member.account_id, { role_id: role.id }); // no-op
+
+    const listed = await mockApi.listMemberRoles(ORG, member.account_id);
+    expect(listed.items.map((assigned) => assigned.id)).toContain(role.id);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.member.roles_changed", limit: 200 });
+    const event = audit.items.find((candidate) => candidate.subject.id === member.account_id);
+    expect(event).toBeDefined();
+    expect(event!.payload["to"]).toContain(role.name);
+    // The second assign changed nothing, so exactly one event carries this account.
+    const forMember = audit.items.filter((candidate) => candidate.subject.id === member.account_id);
+    expect(forMember.length).toBe(1);
+
+    const unknownRole = await mockApi
+      .assignMemberRole(ORG, member.account_id, { role_id: newId("rol") })
+      .catch((error: unknown) => error);
+    expect((unknownRole as ApiError).status).toBe(404);
+
+    const unknownMember = await mockApi
+      .assignMemberRole(ORG, newId("acc"), { role_id: role.id })
+      .catch((error: unknown) => error);
+    expect((unknownMember as ApiError).status).toBe(404);
+
+    await mockApi.unassignMemberRole(ORG, member.account_id, role.id);
+    expect((await mockApi.listMemberRoles(ORG, member.account_id)).items).toEqual([]);
+
+    const again = await mockApi
+      .unassignMemberRole(ORG, member.account_id, role.id)
+      .catch((error: unknown) => error);
+    expect((again as ApiError).status).toBe(404);
+  });
+
+  it("deleting a role removes every assignment of it", async () => {
+    const role = await mockApi.createOrgRole(ORG, {
+      name: await freshRoleName("doomed"),
+      description: "",
+      scopes: [],
+    });
+    const member = (await mockApi.listMembers(ORG)).items[0]!;
+    await mockApi.assignMemberRole(ORG, member.account_id, { role_id: role.id });
+
+    await mockApi.deleteOrgRole(ORG, role.id);
+    expect((await mockApi.listOrgRoles(ORG)).items.some((candidate) => candidate.id === role.id)).toBe(false);
+    expect((await mockApi.listMemberRoles(ORG, member.account_id)).items.some((candidate) => candidate.id === role.id)).toBe(false);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.role.deleted", limit: 200 });
+    expect(audit.items.some((event) => event.payload["role"] === role.name)).toBe(true);
+  });
+});
+
 describe("agents", () => {
   it("lists seeded agents with typed ids and RFC 7638 fingerprints", async () => {
     const page = await mockApi.listAgents(ORG);

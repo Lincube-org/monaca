@@ -12,6 +12,7 @@ import type {
   Grant,
   Member,
   OrgRole,
+  OrgRoleDetail,
 } from "./types";
 
 /**
@@ -112,6 +113,53 @@ export function seedMembers(accounts: readonly Account[]): Member[] {
     email: account.email,
     role: roles[index] ?? "member",
   }));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Organization roles
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Roles defined inside the demo org.
+ *
+ * Names and scope sets are deliberately operational rather than decorative: `support` can read
+ * tools, `release-manager` can also write, and `auditor` is read-only — the three shapes an
+ * administrator distinguishes when reading a role table.
+ */
+export function seedOrgRoles(): OrgRoleDetail[] {
+  return [
+    {
+      id: newId("rol", BASE - 300 * HOUR_MS),
+      name: "support",
+      description: "Read tool results and ticket data during the support rotation.",
+      scopes: ["tools:read"],
+      created_at: at(300 * 60),
+    },
+    {
+      id: newId("rol", BASE - 240 * HOUR_MS),
+      name: "release-manager",
+      description: "Read and write build and release data.",
+      scopes: ["tools:read", "tools:write"],
+      created_at: at(240 * 60),
+    },
+    {
+      id: newId("rol", BASE - 120 * HOUR_MS),
+      name: "auditor",
+      description: "Read-only access for compliance reviews.",
+      scopes: ["tools:read"],
+      created_at: at(120 * 60),
+    },
+  ];
+}
+
+/**
+ * Which seeded account holds which seeded role, by account index.
+ *
+ * Kept out of the account fixture so the two concerns stay separate: an account exists whether or
+ * not it has been granted anything.
+ */
+export function seedMemberRoleIndexes(): Record<number, number[]> {
+  return { 1: [0], 2: [1], 3: [2] };
 }
 
 // ---------------------------------------------------------------------------------------------

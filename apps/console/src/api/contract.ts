@@ -1,6 +1,7 @@
 import type {
   AddMemberRequest,
   Agent,
+  AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
@@ -9,17 +10,20 @@ import type {
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgRoleRequest,
   CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
   Organization,
+  OrgRoleDetail,
   Page,
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
   UpdateClientRequest,
   UpdateOrganizationRequest,
+  UpdateOrgRoleRequest,
 } from "./types";
 
 /**
@@ -57,6 +61,19 @@ export interface MonacaApi {
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;
+
+  /**
+   * Org roles are scoped to the org in the path; the same member may hold different roles, and so
+   * different scopes, in each organization. The membership rank is a separate concept.
+   */
+  listOrgRoles(org: string): Promise<Page<OrgRoleDetail>>;
+  createOrgRole(org: string, body: CreateOrgRoleRequest): Promise<OrgRoleDetail>;
+  updateOrgRole(org: string, roleId: string, body: UpdateOrgRoleRequest): Promise<OrgRoleDetail>;
+  deleteOrgRole(org: string, roleId: string): Promise<void>;
+
+  listMemberRoles(org: string, accountId: string): Promise<Page<OrgRoleDetail>>;
+  assignMemberRole(org: string, accountId: string, body: AssignOrgRoleRequest): Promise<void>;
+  unassignMemberRole(org: string, accountId: string, roleId: string): Promise<void>;
 
   listAgents(org: string): Promise<Page<Agent>>;
   createAgent(org: string, body: CreateAgentRequest): Promise<Agent>;

@@ -11,13 +11,16 @@ import {
   buildGrants,
   seedAccounts,
   seedClients,
+  seedMemberRoleIndexes,
   seedMembers,
+  seedOrgRoles,
   verifyLog,
   type AuditLog,
 } from "./fixtures";
 import type {
   AddMemberRequest,
   Agent,
+  AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
@@ -26,16 +29,19 @@ import type {
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgRoleRequest,
   CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
   Organization,
+  OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
   UpdateClientRequest,
   UpdateOrganizationRequest,
+  UpdateOrgRoleRequest,
 } from "./types";
 
 /**
@@ -69,6 +75,9 @@ class MockStore {
    */
   private clientSecrets = new Map<string, string>();
   private members: Member[] = seedMembers(this.accounts);
+  private orgRoles: OrgRoleDetail[] = seedOrgRoles();
+  /** account id → role ids held in this org. A role may be held by many members. */
+  private memberRoles = new Map<string, Set<string>>();
   private agents: Agent[] = buildAgents(this.accounts);
   private grants: Grant[] = buildGrants(this.agents, this.accounts);
   private log: AuditLog | null = null;
@@ -84,6 +93,19 @@ class MockStore {
     this.ready = buildAuditLog(this.accounts, this.agents, this.grants).then((log) => {
       this.log = log;
     });
+    this.seedMemberRoles();
+  }
+
+  private seedMemberRoles(): void {
+    const indexes = seedMemberRoleIndexes();
+    for (const [accountIndex, roleIndexes] of Object.entries(indexes)) {
+      const account = this.accounts[Number(accountIndex)];
+      if (!account) continue;
+      const ids = roleIndexes
+        .map((index) => this.orgRoles[index]?.id)
+        .filter((id): id is string => id !== undefined);
+      if (ids.length > 0) this.memberRoles.set(account.id, new Set(ids));
+    }
   }
 
   private async audit(): Promise<AuditLog> {
@@ -388,6 +410,187 @@ class MockStore {
     return member;
   }
 
+  listOrgRoles(): Page<OrgRoleDetail> {
+    return { items: this.orgRoles.map(cloneRole), next: null };
+  }
+
+  async createOrgRole(body: CreateOrgRoleRequest): Promise<OrgRoleDetail> {
+    const name = body.name.trim();
+    if (name.length === 0 || name.length > 80) {
+      throw new ApiError("name must be 1-80 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    // A role name is unique inside its org, and the schema's unique index is what says so.
+    if (this.orgRoles.some((role) => role.name === name)) {
+      throw new ApiError(`A role named ${name} already exists`, {
+        status: 409,
+        code: "MONACA_ORG_ROLE_EXISTS",
+      });
+    }
+
+    const role: OrgRoleDetail = {
+      id: newId("rol"),
+      name,
+      description: body.description.trim(),
+      scopes: normaliseScopes(body.scopes),
+      created_at: new Date().toISOString(),
+    };
+    this.orgRoles = [...this.orgRoles, role];
+
+    await this.append({
+      action: "org.role.created",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: DEFAULT_ORG,
+      decision: "info",
+      payload: { org: DEFAULT_ORG, role: role.name, scopes: role.scopes },
+    });
+    return cloneRole(role);
+  }
+
+  async updateOrgRole(roleId: string, body: UpdateOrgRoleRequest): Promise<OrgRoleDetail> {
+    if (body.name === undefined && body.description === undefined && body.scopes === undefined) {
+      throw new ApiError("at least one field must be present", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const role = this.requireRole(roleId);
+
+    let name = role.name;
+    if (body.name !== undefined) {
+      name = body.name.trim();
+      if (name.length === 0 || name.length > 80) {
+        throw new ApiError("name must be 1-80 characters", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      if (this.orgRoles.some((candidate) => candidate.id !== role.id && candidate.name === name)) {
+        throw new ApiError(`A role named ${name} already exists`, {
+          status: 409,
+          code: "MONACA_ORG_ROLE_EXISTS",
+        });
+      }
+    }
+
+    const updated: OrgRoleDetail = {
+      ...role,
+      name,
+      description: body.description === undefined ? role.description : body.description.trim(),
+      scopes: body.scopes === undefined ? role.scopes : normaliseScopes(body.scopes),
+    };
+    this.replaceRole(updated);
+
+    await this.append({
+      action: "org.role.updated",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: DEFAULT_ORG,
+      decision: "info",
+      payload: { org: DEFAULT_ORG, role: updated.name, scopes: updated.scopes },
+    });
+    return cloneRole(updated);
+  }
+
+  async deleteOrgRole(roleId: string): Promise<void> {
+    const role = this.requireRole(roleId);
+    this.orgRoles = this.orgRoles.filter((candidate) => candidate.id !== role.id);
+    // Every assignment goes with the role, so no member keeps a dangling reference.
+    for (const [accountId, ids] of this.memberRoles) {
+      if (!ids.has(role.id)) continue;
+      ids.delete(role.id);
+      if (ids.size === 0) this.memberRoles.delete(accountId);
+    }
+
+    await this.append({
+      action: "org.role.deleted",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: DEFAULT_ORG,
+      decision: "info",
+      payload: { org: DEFAULT_ORG, role: role.name },
+    });
+  }
+
+  listMemberRoles(accountId: string): Page<OrgRoleDetail> {
+    this.requireMember(accountId);
+    const ids = this.memberRoles.get(accountId) ?? new Set<string>();
+    const items = [...ids]
+      .map((id) => this.orgRoles.find((role) => role.id === id))
+      .filter((role): role is OrgRoleDetail => role !== undefined);
+    return { items: items.map(cloneRole), next: null };
+  }
+
+  async assignMemberRole(accountId: string, body: AssignOrgRoleRequest): Promise<void> {
+    this.requireMember(accountId);
+    const role = this.requireRole(body.role_id);
+
+    const before = this.roleNamesOf(accountId);
+    const ids = new Set(this.memberRoles.get(accountId) ?? []);
+    if (ids.has(role.id)) return; // idempotent: repeating an assignment is a no-op, as the server says
+    ids.add(role.id);
+    this.memberRoles.set(accountId, ids);
+
+    await this.appendRolesChanged(accountId, before, this.roleNamesOf(accountId));
+  }
+
+  async unassignMemberRole(accountId: string, roleId: string): Promise<void> {
+    this.requireMember(accountId);
+    parseRoleId(roleId);
+
+    const ids = new Set(this.memberRoles.get(accountId) ?? []);
+    if (!ids.has(roleId)) {
+      throw new ApiError("role assignment not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const before = this.roleNamesOf(accountId);
+    ids.delete(roleId);
+    if (ids.size === 0) this.memberRoles.delete(accountId);
+    else this.memberRoles.set(accountId, ids);
+
+    await this.appendRolesChanged(accountId, before, this.roleNamesOf(accountId));
+  }
+
+  private requireMember(accountId: string): void {
+    if (!this.members.some((member) => member.account_id === accountId)) {
+      throw new ApiError("member not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+  }
+
+  private requireRole(roleId: string): OrgRoleDetail {
+    parseRoleId(roleId);
+    const role = this.orgRoles.find((candidate) => candidate.id === roleId);
+    if (!role) {
+      throw new ApiError("role not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    return role;
+  }
+
+  private replaceRole(role: OrgRoleDetail): void {
+    const index = this.orgRoles.findIndex((candidate) => candidate.id === role.id);
+    this.orgRoles = [...this.orgRoles.slice(0, index), role, ...this.orgRoles.slice(index + 1)];
+  }
+
+  private roleNamesOf(accountId: string): string[] {
+    const ids = this.memberRoles.get(accountId) ?? new Set<string>();
+    return [...ids]
+      .map((id) => this.orgRoles.find((role) => role.id === id)?.name)
+      .filter((name): name is string => name !== undefined);
+  }
+
+  private async appendRolesChanged(accountId: string, from: string[], to: string[]): Promise<void> {
+    await this.append({
+      action: "org.member.roles_changed",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: accountId,
+      decision: "info",
+      payload: { org: DEFAULT_ORG, from, to },
+    });
+  }
+
   listAgents(): Page<Agent> {
     return { items: this.agents.map(cloneAgent), next: null };
   }
@@ -632,6 +835,17 @@ function cloneClient(client: Client): Client {
   };
 }
 
+function cloneRole(role: OrgRoleDetail): OrgRoleDetail {
+  return { ...role, scopes: [...role.scopes] };
+}
+
+/** The server's `RoleId::parse`: a typed `rol_…` id, nothing else. */
+function parseRoleId(roleId: string): void {
+  if (!/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(roleId)) {
+    throw new ApiError("not a role id", { status: 400, code: "MONACA_INVALID_REQUEST" });
+  }
+}
+
 /** The §6.2 protocol-id rule, identical to the server's `valid_client_id`. */
 function validClientId(value: string): boolean {
   return (
@@ -744,6 +958,34 @@ export const mockApi: MonacaApi = {
   async addMember(_org, body) {
     await delay();
     return store.addMember(body);
+  },
+  async listOrgRoles() {
+    await delay();
+    return store.listOrgRoles();
+  },
+  async createOrgRole(_org, body) {
+    await delay();
+    return store.createOrgRole(body);
+  },
+  async updateOrgRole(_org, roleId, body) {
+    await delay();
+    return store.updateOrgRole(roleId, body);
+  },
+  async deleteOrgRole(_org, roleId) {
+    await delay();
+    return store.deleteOrgRole(roleId);
+  },
+  async listMemberRoles(_org, accountId) {
+    await delay();
+    return store.listMemberRoles(accountId);
+  },
+  async assignMemberRole(_org, accountId, body) {
+    await delay();
+    return store.assignMemberRole(accountId, body);
+  },
+  async unassignMemberRole(_org, accountId, roleId) {
+    await delay();
+    return store.unassignMemberRole(accountId, roleId);
   },
   async listAgents() {
     await delay();

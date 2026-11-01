@@ -2,6 +2,7 @@ import { ApiError, type MonacaApi } from "./contract";
 import type {
   AddMemberRequest,
   Agent,
+  AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
@@ -10,17 +11,20 @@ import type {
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgRoleRequest,
   CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
   Organization,
+  OrgRoleDetail,
   Page,
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
   UpdateClientRequest,
   UpdateOrganizationRequest,
+  UpdateOrgRoleRequest,
 } from "./types";
 
 /**
@@ -139,6 +143,50 @@ export const httpApi: MonacaApi = {
       method: "POST",
       body: JSON.stringify(body),
     });
+  },
+
+  listOrgRoles(org: string): Promise<Page<OrgRoleDetail>> {
+    return request<Page<OrgRoleDetail>>(`/orgs/${encodeURIComponent(org)}/roles`);
+  },
+
+  createOrgRole(org: string, body: CreateOrgRoleRequest): Promise<OrgRoleDetail> {
+    return request<OrgRoleDetail>(`/orgs/${encodeURIComponent(org)}/roles`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  updateOrgRole(org: string, roleId: string, body: UpdateOrgRoleRequest): Promise<OrgRoleDetail> {
+    return request<OrgRoleDetail>(
+      `/orgs/${encodeURIComponent(org)}/roles/${encodeURIComponent(roleId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    );
+  },
+
+  deleteOrgRole(org: string, roleId: string): Promise<void> {
+    return request<void>(`/orgs/${encodeURIComponent(org)}/roles/${encodeURIComponent(roleId)}`, {
+      method: "DELETE",
+    });
+  },
+
+  listMemberRoles(org: string, accountId: string): Promise<Page<OrgRoleDetail>> {
+    return request<Page<OrgRoleDetail>>(
+      `/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(accountId)}/roles`,
+    );
+  },
+
+  assignMemberRole(org: string, accountId: string, body: AssignOrgRoleRequest): Promise<void> {
+    return request<void>(
+      `/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(accountId)}/roles`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  },
+
+  unassignMemberRole(org: string, accountId: string, roleId: string): Promise<void> {
+    return request<void>(
+      `/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(accountId)}/roles/${encodeURIComponent(roleId)}`,
+      { method: "DELETE" },
+    );
   },
 
   listAgents(org: string): Promise<Page<Agent>> {

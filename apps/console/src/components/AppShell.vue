@@ -29,6 +29,7 @@ import {
   Moon,
   ScrollText,
   Settings,
+  ShieldCheck,
   Sun,
   Users,
 } from "lucide-vue-next";
@@ -67,6 +68,7 @@ const navItems: { name: string; label: string; icon: Component }[] = [
   { name: "organizations", label: t("nav.organizations"), icon: Building2 },
   { name: "applications", label: t("nav.applications"), icon: AppWindow },
   { name: "members", label: t("nav.members"), icon: Users },
+  { name: "roles", label: t("nav.roles"), icon: ShieldCheck },
   { name: "agents", label: t("nav.agents"), icon: Bot },
   { name: "grants", label: t("nav.grants"), icon: KeyRound },
   { name: "audit", label: t("nav.audit"), icon: ScrollText },

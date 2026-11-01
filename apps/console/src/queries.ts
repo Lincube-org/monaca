@@ -6,6 +6,7 @@ import { queryKeys } from "@/api/keys";
 import type {
   AddMemberRequest,
   Agent,
+  AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
@@ -14,16 +15,19 @@ import type {
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
+  CreateOrgRoleRequest,
   CreatedClient,
   Grant,
   ListAuditQuery,
   Member,
   Organization,
+  OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
   UpdateClientRequest,
   UpdateOrganizationRequest,
+  UpdateOrgRoleRequest,
 } from "@/api/types";
 
 /**
@@ -188,6 +192,96 @@ export function useAddMember(org: OrgRef) {
     mutationFn: (body) => api.addMember(orgValue(org), body),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.members(orgValue(org)) });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+export function useOrgRoles(org: OrgRef): UseQueryReturnType<Page<OrgRoleDetail>, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.orgRoles(orgValue(org))),
+    queryFn: () => api.listOrgRoles(orgValue(org)),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateOrgRole(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<OrgRoleDetail, Error, CreateOrgRoleRequest>({
+    mutationFn: (body) => api.createOrgRole(orgValue(org), body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgRoles(orgValue(org)) });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+export function useUpdateOrgRole(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<OrgRoleDetail, Error, { roleId: string; body: UpdateOrgRoleRequest }>({
+    mutationFn: ({ roleId, body }) => api.updateOrgRole(orgValue(org), roleId, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgRoles(orgValue(org)) });
+      // The member dialog renders names and scopes from the same rows, so it is stale too.
+      void client.invalidateQueries({ queryKey: ["member-roles", orgValue(org)], exact: false });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+export function useDeleteOrgRole(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<void, Error, { roleId: string }>({
+    mutationFn: ({ roleId }) => api.deleteOrgRole(orgValue(org), roleId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgRoles(orgValue(org)) });
+      // Deleting a role removes every assignment of it.
+      void client.invalidateQueries({ queryKey: ["member-roles", orgValue(org)], exact: false });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+/**
+ * A single member's roles, fetched only while a dialog needs them.
+ *
+ * The API addresses assignments by member, so showing "who holds this role" would cost one request
+ * per member. The Members page opens this on demand instead, and `enabled` keeps a closed dialog
+ * from costing anything.
+ */
+export function useMemberRoles(
+  org: OrgRef,
+  accountId: MaybeRefOrGetter<string | null>,
+): UseQueryReturnType<Page<OrgRoleDetail>, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.memberRoles(orgValue(org), toValue(accountId) ?? "")),
+    queryFn: () => api.listMemberRoles(orgValue(org), toValue(accountId) ?? ""),
+    enabled: computed(() => toValue(accountId) !== null),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useAssignOrgRole(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string } & AssignOrgRoleRequest>({
+    mutationFn: ({ accountId, role_id }) => api.assignMemberRole(orgValue(org), accountId, { role_id }),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({
+        queryKey: queryKeys.memberRoles(orgValue(org), variables.accountId),
+      });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+export function useUnassignOrgRole(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string; roleId: string }>({
+    mutationFn: ({ accountId, roleId }) => api.unassignMemberRole(orgValue(org), accountId, roleId),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({
+        queryKey: queryKeys.memberRoles(orgValue(org), variables.accountId),
+      });
       invalidateAudit(client, orgValue(org));
     },
   });

@@ -42,6 +42,21 @@ export interface Organization {
 export type OrgRole = "owner" | "admin" | "member";
 
 /**
+ * A named set of scopes defined inside one organization (§6.2).
+ *
+ * Distinct from the membership rank in `Member.role`: an org role grants scopes only while signing
+ * into the org that defines it, and a member may hold any number of them. Deleting a role removes
+ * every assignment of it.
+ */
+export interface OrgRoleDetail {
+  id: string;
+  name: string;
+  description: string;
+  scopes: string[];
+  created_at: string;
+}
+
+/**
  * An application — the protocol `client_id`, its credentials policy and where it may redirect.
  *
  * The secret is never part of this object: the server stores an argon2 hash and reveals the
@@ -158,6 +173,23 @@ export interface CreateOrganizationRequest {
 
 export interface UpdateOrganizationRequest {
   state: "active" | "archived";
+}
+
+export interface CreateOrgRoleRequest {
+  name: string;
+  description: string;
+  scopes: string[];
+}
+
+/** Absent fields keep their value; a supplied array replaces the stored set. */
+export interface UpdateOrgRoleRequest {
+  name?: string;
+  description?: string;
+  scopes?: string[];
+}
+
+export interface AssignOrgRoleRequest {
+  role_id: string;
 }
 
 export interface CreateClientRequest {
