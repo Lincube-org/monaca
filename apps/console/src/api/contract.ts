@@ -1,5 +1,6 @@
 import type {
   AccountWithRoles,
+  AccountSession,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
   Agent,
@@ -30,6 +31,7 @@ import type {
   Page,
   ProblemDetails,
   RegisterAgentKeyRequest,
+  RevokedSessions,
   SessionInfo,
   SignInExperience,
   TenantRole,
@@ -98,6 +100,14 @@ export interface MonacaApi {
   deleteTenantRole(roleId: string): Promise<void>;
   assignAccountRole(accountId: string, roleId: string): Promise<void>;
   unassignAccountRole(accountId: string, roleId: string): Promise<void>;
+
+  /**
+   * The account's live sign-in sessions. Revoking one signs that browser out; revoking all of them
+   * is the tenant-wide "sign out everywhere" lever, and both append to the audit chain.
+   */
+  listAccountSessions(accountId: string): Promise<Page<AccountSession>>;
+  revokeAccountSession(accountId: string, sessionId: string): Promise<void>;
+  revokeAccountSessions(accountId: string): Promise<RevokedSessions>;
 
   /** Social sign-in providers, tenant-level; deleting one also drops every identity it linked. */
   listConnectors(): Promise<Page<Connector>>;

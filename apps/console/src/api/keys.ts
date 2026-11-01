@@ -20,6 +20,8 @@ export const queryKeys = {
 
   tenantRoles: () => ["tenant-roles"] as const,
 
+  accountSessions: (accountId: string) => ["account-sessions", accountId] as const,
+
   connectors: () => ["connectors"] as const,
 
   signInExperience: () => ["sign-in-experience"] as const,

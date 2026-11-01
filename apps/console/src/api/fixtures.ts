@@ -3,6 +3,7 @@ import { newId, typedId, uuidv7 } from "@/lib/typed-id";
 
 import type {
   Account,
+  AccountSession,
   Agent,
   AgentKey,
   ApiResource,
@@ -117,6 +118,87 @@ export function seedMembers(accounts: readonly Account[]): Member[] {
     email: account.email,
     role: roles[index] ?? "member",
   }));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sign-in sessions
+// ---------------------------------------------------------------------------------------------
+
+interface SessionSpec {
+  account: number;
+  client: number | null;
+  /** Minutes ago the session was issued. */
+  issued: number;
+  /** Minutes ago an authorize request last reused it. */
+  lastSeen: number;
+  /** Session lifetime in minutes, measured from issuance. */
+  ttl: number;
+  userAgent: string | null;
+}
+
+/**
+ * Live sessions on a few seeded accounts.
+ *
+ * The shapes are the ones an administrator actually investigates: one user with a current browser
+ * plus an older service session, one user whose only session is stale, and a suspended user with
+ * none — suspension revokes sessions, so a fixture that kept them would contradict the console.
+ */
+export function buildSessions(
+  accounts: readonly Account[],
+  clients: readonly Client[],
+): AccountSession[] {
+  const specs: SessionSpec[] = [
+    {
+      account: 0,
+      client: 0,
+      issued: 3 * 24 * 60,
+      lastSeen: 20,
+      ttl: 30 * 24 * 60,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
+    },
+    {
+      account: 0,
+      client: 1,
+      issued: 26 * 60,
+      lastSeen: 110,
+      ttl: 30 * 24 * 60,
+      userAgent: "monaca-notes/1.4 (+https://notes.demo.localhost)",
+    },
+    {
+      account: 1,
+      client: 0,
+      issued: 12 * 24 * 60,
+      lastSeen: 12 * 60,
+      ttl: 30 * 24 * 60,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
+    },
+    {
+      account: 3,
+      client: 2,
+      issued: 6 * 60,
+      lastSeen: 6 * 60,
+      ttl: 30 * 24 * 60,
+      userAgent:
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/133.0 Safari/537.36",
+    },
+  ];
+
+  return specs.map((spec) => {
+    const account = accounts[spec.account];
+    const client = spec.client === null ? null : clients[spec.client]?.id ?? null;
+    if (!account) throw new Error(`fixture session names a missing account: ${spec.account}`);
+    return {
+      id: newId("ses"),
+      account_id: account.id,
+      client_id: client,
+      issued_at: at(spec.issued),
+      expires_at: at(spec.issued - spec.ttl),
+      last_seen_at: at(spec.lastSeen),
+      user_agent: spec.userAgent,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------------------------

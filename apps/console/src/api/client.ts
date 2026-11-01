@@ -1,6 +1,7 @@
 import { ApiError, type MonacaApi } from "./contract";
 import type {
   AccountWithRoles,
+  AccountSession,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
   Agent,
@@ -31,6 +32,7 @@ import type {
   Page,
   ProblemDetails,
   RegisterAgentKeyRequest,
+  RevokedSessions,
   SessionInfo,
   SignInExperience,
   TenantRole,
@@ -209,6 +211,23 @@ export const httpApi: MonacaApi = {
       `/accounts/${encodeURIComponent(accountId)}/roles/${encodeURIComponent(roleId)}`,
       { method: "DELETE" },
     );
+  },
+
+  listAccountSessions(accountId: string): Promise<Page<AccountSession>> {
+    return request<Page<AccountSession>>(`/accounts/${encodeURIComponent(accountId)}/sessions`);
+  },
+
+  revokeAccountSession(accountId: string, sessionId: string): Promise<void> {
+    return request<void>(
+      `/accounts/${encodeURIComponent(accountId)}/sessions/${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  revokeAccountSessions(accountId: string): Promise<RevokedSessions> {
+    return request<RevokedSessions>(`/accounts/${encodeURIComponent(accountId)}/sessions`, {
+      method: "DELETE",
+    });
   },
 
   listConnectors(): Promise<Page<Connector>> {

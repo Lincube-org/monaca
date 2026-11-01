@@ -4,6 +4,7 @@ import { computed, toValue, type MaybeRefOrGetter } from "vue";
 import { api } from "@/api";
 import { queryKeys } from "@/api/keys";
 import type {
+  AccountSession,
   AccountWithRoles,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
@@ -33,6 +34,7 @@ import type {
   OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
+  RevokedSessions,
   SessionInfo,
   SignInExperience,
   TenantRole,
@@ -334,6 +336,49 @@ export function useUnassignAccountRole() {
     mutationFn: ({ accountId, roleId }) => api.unassignAccountRole(accountId, roleId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+    },
+  });
+}
+
+/**
+ * An account's live sessions, fetched only while its dialog is open.
+ *
+ * `enabled` keeps a closed dialog from costing anything; the cache key carries the account id so
+ * switching users never shows the previous account's sessions while the new list loads.
+ */
+export function useAccountSessions(
+  accountId: MaybeRefOrGetter<string | null>,
+): UseQueryReturnType<Page<AccountSession>, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.accountSessions(toValue(accountId) ?? "")),
+    queryFn: () => api.listAccountSessions(toValue(accountId) ?? ""),
+    enabled: computed(() => toValue(accountId) !== null),
+    staleTime: STALE.fast,
+  });
+}
+
+export function useRevokeAccountSession() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { accountId: string; sessionId: string }>({
+    mutationFn: ({ accountId, sessionId }) => api.revokeAccountSession(accountId, sessionId),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({
+        queryKey: queryKeys.accountSessions(variables.accountId),
+      });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useRevokeAccountSessions() {
+  const client = useQueryClient();
+  return useMutation<RevokedSessions, Error, { accountId: string }>({
+    mutationFn: ({ accountId }) => api.revokeAccountSessions(accountId),
+    onSuccess: (_result, variables) => {
+      void client.invalidateQueries({
+        queryKey: queryKeys.accountSessions(variables.accountId),
+      });
+      invalidateTenantAudit(client);
     },
   });
 }

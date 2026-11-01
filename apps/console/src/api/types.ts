@@ -31,6 +31,29 @@ export interface AccountRole {
 }
 
 /**
+ * A live sign-in session of an account (§6.2).
+ *
+ * `issued_at` is the authentication instant the id_token's `auth_time` mirrors, and `last_seen_at`
+ * is when an authorize request last reused the session. Revoking one signs that browser out; the
+ * listing endpoint only returns sessions that are neither revoked nor expired.
+ */
+export interface AccountSession {
+  id: string;
+  account_id: string;
+  /** The client that established the session, when the server knows it. */
+  client_id: string | null;
+  issued_at: string;
+  expires_at: string;
+  last_seen_at: string;
+  user_agent: string | null;
+}
+
+/** The answer to revoking every live session of an account. */
+export interface RevokedSessions {
+  revoked: number;
+}
+
+/**
  * A tenant role (§6.2) — a named permission set an account holds in every organization.
  *
  * Distinct from an organization role: this one is tenant-wide, its name is what the id_token's

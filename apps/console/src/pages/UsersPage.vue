@@ -25,14 +25,17 @@ import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
 import { describeError } from "@/api/contract";
-import type { AccountRole, AccountWithRoles } from "@/api/types";
+import type { AccountRole, AccountSession, AccountWithRoles } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
 import {
+  useAccountSessions,
   useAccounts,
   useAssignAccountRole,
   useCreateAccount,
+  useRevokeAccountSession,
+  useRevokeAccountSessions,
   useTenantRoles,
   useUnassignAccountRole,
   useUpdateAccount,
@@ -256,6 +259,81 @@ async function removeRole(role: AccountRole): Promise<void> {
     rolesError.value = describeError(error).title;
   }
 }
+
+/**
+ * Live sessions.
+ *
+ * Fetched only while the dialog is open (`enabled` on the account id), because the directory page
+ * should not pay for a request per row. Revoking one needs no confirmation — it is reversible by
+ * signing in again — while "sign out everywhere" is destructive enough to deserve a dialog.
+ */
+const sessionsOpen = ref(false);
+const sessionsTarget = ref<AccountWithRoles | null>(null);
+const sessionsError = ref<string | null>(null);
+
+const sessions = useAccountSessions(computed(() => sessionsTarget.value?.id ?? null));
+const revokeSession = useRevokeAccountSession();
+const revokeAllSessions = useRevokeAccountSessions();
+const sessionRows = computed(() => sessions.data.value?.items ?? []);
+
+const revokeAllOpen = ref(false);
+const revokeAllTarget = ref<AccountWithRoles | null>(null);
+
+function openSessions(account: AccountWithRoles): void {
+  sessionsTarget.value = account;
+  sessionsError.value = null;
+  sessionsOpen.value = true;
+}
+
+async function revokeOne(session: AccountSession): Promise<void> {
+  const account = sessionsTarget.value;
+  if (!account) return;
+  sessionsError.value = null;
+  try {
+    await revokeSession.mutateAsync({ accountId: account.id, sessionId: session.id });
+    toast({
+      title: t("users.revoked"),
+      description: t("users.revokedDescription", {
+        session: session.client_id ?? session.id,
+      }),
+      variant: "success",
+    });
+  } catch (error) {
+    sessionsError.value = describeError(error).title;
+  }
+}
+
+function openRevokeAll(): void {
+  const account = sessionsTarget.value;
+  if (!account) return;
+  revokeAllTarget.value = account;
+  sessionsError.value = null;
+  revokeAllOpen.value = true;
+}
+
+async function confirmRevokeAll(): Promise<void> {
+  const account = revokeAllTarget.value;
+  if (!account) return;
+  sessionsError.value = null;
+  try {
+    const result = await revokeAllSessions.mutateAsync({ accountId: account.id });
+    revokeAllOpen.value = false;
+    toast({
+      title: t("users.signedOutEverywhere"),
+      description: t("users.signedOutEverywhereDescription", { count: result.revoked }),
+      variant: "success",
+    });
+  } catch (error) {
+    sessionsError.value = describeError(error).title;
+  }
+}
+
+function formatDateTime(at: string): string {
+  const parsed = new Date(at);
+  return Number.isNaN(parsed.getTime())
+    ? at
+    : `${parsed.toISOString().slice(0, 10)} ${parsed.toISOString().slice(11, 16)}`;
+}
 </script>
 
 <template>
@@ -345,6 +423,9 @@ async function removeRole(role: AccountRole): Promise<void> {
               <div class="flex justify-end gap-1.5">
                 <Button variant="secondary" size="xs" @click="openRoles(account)">
                   {{ t('users.manageRoles') }}
+                </Button>
+                <Button variant="secondary" size="xs" @click="openSessions(account)">
+                  {{ t('users.sessions') }}
                 </Button>
                 <Button
                   v-if="account.state === 'active'"
@@ -513,6 +594,99 @@ async function removeRole(role: AccountRole): Promise<void> {
 
         <DialogFooter>
           <Button variant="ghost" type="button" @click="rolesOpen = false">{{ t('common.close') }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="sessionsOpen">
+      <DialogContent class="max-w-[560px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('users.sessionsTitle', { email: sessionsTarget?.email ?? '' }) }}</DialogTitle>
+          <DialogDescription>
+            {{ t('users.sessionsDescription', { email: sessionsTarget?.email ?? '' }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="flex flex-col gap-2">
+          <p v-if="sessions.isPending.value" class="text-[12.5px] text-ink-faint">
+            {{ t('users.sessionsLoading') }}
+          </p>
+          <p v-else-if="sessions.error.value" class="text-[12.5px] text-deny">
+            {{ describeError(sessions.error.value).title }}
+          </p>
+          <p v-else-if="sessionRows.length === 0" class="text-[12.5px] text-ink-faint">
+            {{ t('users.sessionsEmpty') }}
+          </p>
+          <div v-else class="divide-y divide-rule rounded-md border border-rule">
+            <div
+              v-for="session in sessionRows"
+              :key="session.id"
+              class="flex items-start gap-3 px-2.5 py-2"
+            >
+              <div class="min-w-0 flex-1">
+                <span class="mono-data block truncate text-[11.5px] text-ink">{{ session.id }}</span>
+                <span
+                  class="mt-0.5 block truncate text-[11.5px] text-ink-muted"
+                  :title="session.user_agent ?? t('users.unknownAgent')"
+                >
+                  {{ session.user_agent ?? t('users.unknownAgent') }}
+                </span>
+                <span class="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-ink-faint">
+                  <span>{{ t('users.sessionLastSeen') }} {{ formatDateTime(session.last_seen_at) }}</span>
+                  <span>{{ t('users.sessionExpires') }} {{ formatDateTime(session.expires_at) }}</span>
+                  <span class="mono-data">{{ session.client_id ?? t('users.unknownClient') }}</span>
+                </span>
+              </div>
+              <Button
+                variant="secondary"
+                size="xs"
+                :disabled="revokeSession.isPending.value"
+                @click="revokeOne(session)"
+              >
+                {{ t('users.revokeSession') }}
+              </Button>
+            </div>
+          </div>
+          <p v-if="sessionsError" class="text-[12.5px] text-deny">{{ sessionsError }}</p>
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="secondary"
+            type="button"
+            :disabled="sessionRows.length === 0 || revokeAllSessions.isPending.value"
+            @click="openRevokeAll"
+          >
+            {{ t('users.signOutEverywhere') }}
+          </Button>
+          <Button variant="ghost" type="button" @click="sessionsOpen = false">{{ t('common.close') }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="revokeAllOpen">
+      <DialogContent class="max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>
+            {{ t('users.signOutEverywhereTitle', { email: revokeAllTarget?.email ?? '' }) }}
+          </DialogTitle>
+          <DialogDescription>
+            {{ t('users.signOutEverywhereDescription', { email: revokeAllTarget?.email ?? '' }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <p v-if="sessionsError" class="text-[12.5px] text-deny">{{ sessionsError }}</p>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="revokeAllOpen = false">{{ t('common.cancel') }}</Button>
+          <Button
+            variant="danger"
+            type="button"
+            :disabled="revokeAllSessions.isPending.value"
+            @click="confirmRevokeAll"
+          >
+            {{ revokeAllSessions.isPending.value ? t('common.saving') : t('users.signOutEverywhere') }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

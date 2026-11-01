@@ -105,6 +105,8 @@ export const M0_ACTIONS = [
   "role.created",
   "role.deleted",
   "session.logout",
+  "session.revoked",
+  "session.revoked_all",
   "sign_in_experience.updated",
   "resource.created",
   "resource.updated",

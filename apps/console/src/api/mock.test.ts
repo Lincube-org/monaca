@@ -1317,3 +1317,97 @@ describe("tenant roles", () => {
     expect(audit.items[0]?.payload).toMatchObject({ name });
   });
 });
+
+describe("account sessions", () => {
+  async function accountByEmail(email: string) {
+    const page = await mockApi.listAccounts();
+    const account = page.items.find((candidate) => candidate.email === email);
+    if (!account) throw new Error(`test account ${email} is missing`);
+    return account;
+  }
+
+  it("lists live sessions newest activity first, and none for a suspended account", async () => {
+    const admin = await accountByEmail("admin@demo.localhost");
+    const page = await mockApi.listAccountSessions(admin.id);
+    expect(page.next).toBe(null);
+    expect(page.items).toHaveLength(2);
+    for (const session of page.items) {
+      expect(session.id).toMatch(/^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+      expect(session.account_id).toBe(admin.id);
+      expect(Number.isNaN(Date.parse(session.last_seen_at))).toBe(false);
+    }
+    const seen = page.items.map((session) => session.last_seen_at);
+    expect(seen).toEqual([...seen].sort((left, right) => right.localeCompare(left)));
+
+    const intern = await accountByEmail("intern@demo.localhost");
+    expect((await mockApi.listAccountSessions(intern.id)).items).toEqual([]);
+  });
+
+  it("revokes one session, appends session.revoked, and refuses a second revoke", async () => {
+    const admin = await accountByEmail("admin@demo.localhost");
+    const target = (await mockApi.listAccountSessions(admin.id)).items[0]!;
+
+    await mockApi.revokeAccountSession(admin.id, target.id);
+    expect((await mockApi.listAccountSessions(admin.id)).items).toHaveLength(1);
+
+    const audit = await mockApi.listAudit(ORG, { action: "session.revoked", limit: 200 });
+    const newest = audit.items[0];
+    expect(newest?.subject.type).toBe("session");
+    expect(newest?.subject.id).toBe(target.id);
+    expect(newest?.payload).toMatchObject({ account_id: admin.id });
+
+    const second = await mockApi
+      .revokeAccountSession(admin.id, target.id)
+      .catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    // A session may only be revoked through the account that owns it.
+    const sam = await accountByEmail("sam.oduya@demo.localhost");
+    const foreign = (await mockApi.listAccountSessions(sam.id)).items[0]!;
+    const wrongOwner = await mockApi
+      .revokeAccountSession(admin.id, foreign.id)
+      .catch((error: unknown) => error);
+    expect(wrongOwner).toBeInstanceOf(ApiError);
+    expect((wrongOwner as ApiError).status).toBe(404);
+  });
+
+  it("revokes every session at once and records the count", async () => {
+    const sam = await accountByEmail("sam.oduya@demo.localhost");
+    expect((await mockApi.listAccountSessions(sam.id)).items).toHaveLength(1);
+
+    const result = await mockApi.revokeAccountSessions(sam.id);
+    expect(result.revoked).toBe(1);
+    expect((await mockApi.listAccountSessions(sam.id)).items).toEqual([]);
+
+    const audit = await mockApi.listAudit(ORG, { action: "session.revoked_all", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ revoked: 1 });
+
+    // Repeating it is a valid no-op, not a 404.
+    expect((await mockApi.revokeAccountSessions(sam.id)).revoked).toBe(0);
+  });
+
+  it("suspending an account revokes its sessions, and reactivating does not restore them", async () => {
+    const wei = await accountByEmail("wei.zhang@demo.localhost");
+    expect((await mockApi.listAccountSessions(wei.id)).items).toHaveLength(1);
+
+    await mockApi.updateAccount(wei.id, { state: "disabled" });
+    expect((await mockApi.listAccountSessions(wei.id)).items).toEqual([]);
+
+    await mockApi.updateAccount(wei.id, { state: "active" });
+    expect((await mockApi.listAccountSessions(wei.id)).items).toEqual([]);
+  });
+
+  it("an unknown account is a 404 and an unknown session id is a 400", async () => {
+    const missing = await mockApi
+      .listAccountSessions(newId("acc"))
+      .catch((error: unknown) => error);
+    expect((missing as ApiError).status).toBe(404);
+
+    const admin = await accountByEmail("admin@demo.localhost");
+    const malformed = await mockApi
+      .revokeAccountSession(admin.id, "ses_not-a-typed-id")
+      .catch((error: unknown) => error);
+    expect((malformed as ApiError).status).toBe(400);
+  });
+});

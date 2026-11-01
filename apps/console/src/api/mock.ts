@@ -9,6 +9,7 @@ import {
   buildAgents,
   buildAuditLog,
   buildGrants,
+  buildSessions,
   seedAccounts,
   seedAccountRoleIndexes,
   seedClients,
@@ -26,6 +27,7 @@ import {
 } from "./fixtures";
 import type {
   AccountRole,
+  AccountSession,
   AccountWithRoles,
   AddMemberRequest,
   AddOrgEmailDomainRequest,
@@ -56,6 +58,7 @@ import type {
   OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
+  RevokedSessions,
   SessionInfo,
   SignInExperience,
   TenantRole,
@@ -89,6 +92,8 @@ class MockStore {
   private accounts = seedAccounts();
   private organizations: Organization[] = seedOrganizations();
   private clients: Client[] = seedClients();
+  /** Live sign-in sessions; a revoked or expired one is not kept. */
+  private sessions: AccountSession[] = buildSessions(this.accounts, this.clients);
   /**
    * Plaintext secrets for confidential clients, keyed by row id.
    *
@@ -615,6 +620,10 @@ class MockStore {
       throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
     }
     if (account.state === body.state) return { ...account, roles: this.rolesFor(account.id) };
+    if (body.state === "disabled") {
+      // Suspension revokes every live session; "suspended" has to mean signed out everywhere.
+      this.sessions = this.sessions.filter((session) => session.account_id !== account.id);
+    }
 
     const updated = { ...account, state: body.state };
     this.accounts = [...this.accounts.slice(0, index), updated, ...this.accounts.slice(index + 1)];
@@ -728,6 +737,63 @@ class MockStore {
       });
     }
     if (ids.size === 0) this.accountRoles.delete(accountId);
+  }
+
+  listAccountSessions(accountId: string): Page<AccountSession> {
+    parseAccountId(accountId);
+    if (!this.accounts.some((account) => account.id === accountId)) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const now = Date.now();
+    // Newest activity first, as the server orders by `last_seen_at DESC`.
+    const items = this.sessions
+      .filter(
+        (session) => session.account_id === accountId && Date.parse(session.expires_at) > now,
+      )
+      .sort((left, right) => Date.parse(right.last_seen_at) - Date.parse(left.last_seen_at))
+      .map((session) => ({ ...session }));
+    return { items, next: null };
+  }
+
+  async revokeAccountSession(accountId: string, sessionId: string): Promise<void> {
+    parseAccountId(accountId);
+    parseSessionId(sessionId);
+    // A session may only be revoked through the account it belongs to.
+    const index = this.sessions.findIndex(
+      (session) => session.id === sessionId && session.account_id === accountId,
+    );
+    if (index < 0) {
+      throw new ApiError("session not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    this.sessions = [...this.sessions.slice(0, index), ...this.sessions.slice(index + 1)];
+    await this.append({
+      action: "session.revoked",
+      actor: this.session().account_id,
+      subjectType: "session",
+      subjectId: sessionId,
+      decision: "deny",
+      payload: { account_id: accountId },
+    });
+  }
+
+  async revokeAccountSessions(accountId: string): Promise<RevokedSessions> {
+    parseAccountId(accountId);
+    if (!this.accounts.some((account) => account.id === accountId)) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    const revoked = this.sessions.filter((session) => session.account_id === accountId).length;
+    this.sessions = this.sessions.filter((session) => session.account_id !== accountId);
+    await this.append({
+      action: "session.revoked_all",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: accountId,
+      decision: "deny",
+      payload: { revoked },
+    });
+    return { revoked };
   }
 
   listConnectors(): Page<Connector> {
@@ -1451,6 +1517,13 @@ function parseAccountId(accountId: string): void {
   }
 }
 
+/** The server's `SessionId::parse`: a typed `ses_…` id, nothing else. */
+function parseSessionId(sessionId: string): void {
+  if (!/^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(sessionId)) {
+    throw new ApiError("not a session id", { status: 400, code: "MONACA_INVALID_REQUEST" });
+  }
+}
+
 /** The §6.2 protocol-id rule, identical to the server's `valid_client_id`. */
 function validClientId(value: string): boolean {
   return (
@@ -1621,6 +1694,18 @@ export const mockApi: MonacaApi = {
   async unassignAccountRole(accountId, roleId) {
     await delay();
     return store.unassignAccountRole(accountId, roleId);
+  },
+  async listAccountSessions(accountId) {
+    await delay();
+    return store.listAccountSessions(accountId);
+  },
+  async revokeAccountSession(accountId, sessionId) {
+    await delay();
+    return store.revokeAccountSession(accountId, sessionId);
+  },
+  async revokeAccountSessions(accountId) {
+    await delay();
+    return store.revokeAccountSessions(accountId);
   },
   async listConnectors() {
     await delay();
