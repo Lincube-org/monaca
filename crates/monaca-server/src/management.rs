@@ -92,6 +92,13 @@ pub struct AddMemberBody {
     pub role: String,
 }
 
+/// `PATCH /v1/orgs/{org}/members/{account}` body.
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberBody {
+    /// `owner` | `admin` | `member`.
+    pub role: String,
+}
+
 /// `POST /v1/orgs/{org}/agents` body.
 #[derive(Debug, Deserialize)]
 pub struct CreateAgentBody {
@@ -884,6 +891,105 @@ pub async fn list_members(
         })
         .collect();
     Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `PATCH /v1/orgs/{org}/members/{account}` — change one member's role.
+///
+/// The role set is the same one `add_member` accepts (§6.2). Repeating the member's current role is
+/// a no-op and writes no audit event, so a retried call cannot inflate the chain.
+pub async fn update_member(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((org, account)): Path<(String, String)>,
+    Json(body): Json<UpdateMemberBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let ctx = org.ctx(&tenant);
+    let account_id = parse_account(&account)?;
+    if !matches!(body.role.as_str(), "owner" | "admin" | "member") {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "role must be owner, admin or member",
+        ));
+    }
+
+    let mut tx = state.store.begin_org(&ctx).await?;
+    let previous = state.store.org_member_role(&mut *tx, account_id).await?;
+    let Some(previous) = previous else {
+        tx.rollback().await?;
+        return Err(ApiError::not_found("member"));
+    };
+    if previous != body.role {
+        state
+            .store
+            .org_member_set_role(&mut *tx, account_id, &body.role)
+            .await?;
+        let event = AuditEvent {
+            id: EventId::new(),
+            at: state.now(),
+            action: "org.member.role_changed".into(),
+            actor_chain: vec![admin.actor()],
+            subject: AuditSubject {
+                subject_type: AuditActorType::Account,
+                id: Some(account_id.to_typed_string()),
+            },
+            decision: AuditDecision::Allow,
+            grant_id: None,
+            jti: None,
+            payload: json!({ "org": org.slug, "from": previous, "to": body.role }),
+        };
+        state
+            .store
+            .audit_append(&mut *tx, &ctx.schema_name, &event)
+            .await?;
+    }
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "account_id": account_id.to_typed_string(),
+        "org": org.org_id().to_typed_string(),
+        "role": body.role,
+    })))
+}
+
+/// `DELETE /v1/orgs/{org}/members/{account}` — remove a member, keeping the account.
+pub async fn remove_member(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((org, account)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let org = state.store.org_by_slug(&tenant, &org).await?;
+    let ctx = org.ctx(&tenant);
+    let account_id = parse_account(&account)?;
+
+    let mut tx = state.store.begin_org(&ctx).await?;
+    if !state.store.org_member_remove(&mut *tx, account_id).await? {
+        tx.rollback().await?;
+        return Err(ApiError::not_found("member"));
+    }
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "org.member.removed".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "org": org.slug }),
+    };
+    state
+        .store
+        .audit_append(&mut *tx, &ctx.schema_name, &event)
+        .await?;
+    tx.commit().await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /v1/orgs/{org}/agents`.

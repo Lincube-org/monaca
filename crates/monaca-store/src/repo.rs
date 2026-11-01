@@ -1761,6 +1761,34 @@ impl Store {
         Ok(())
     }
 
+    /// Change a member's role; `false` when the account is not a member.
+    pub async fn org_member_set_role(
+        &self,
+        conn: &mut PgConnection,
+        account_id: AccountId,
+        role: &str,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE members SET role = $2 WHERE account_id = $1")
+            .bind(account_id.uuid())
+            .bind(role)
+            .execute(&mut *conn)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove a member; `false` when the account is not a member.
+    pub async fn org_member_remove(
+        &self,
+        conn: &mut PgConnection,
+        account_id: AccountId,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM members WHERE account_id = $1")
+            .bind(account_id.uuid())
+            .execute(&mut *conn)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Members with their email, ordered by creation.
     pub async fn org_members(
         &self,

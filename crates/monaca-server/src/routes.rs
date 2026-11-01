@@ -287,6 +287,10 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             get(crate::management::list_members).post(crate::management::add_member),
         )
         .route(
+            "/v1/orgs/{org}/members/{account}",
+            patch(crate::management::update_member).delete(crate::management::remove_member),
+        )
+        .route(
             "/v1/orgs/{org}/agents",
             get(crate::management::list_agents).post(crate::management::create_agent),
         )

@@ -266,6 +266,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "error=invalid_request and its member list is 404, while GET by id still reports it; " +
       "{state:active} restores sign-in and membership, an invalid state is 400, and an unknown org is 404",
   },
+  {
+    step: "27",
+    title: "org members",
+    assertion:
+      "PATCH /v1/orgs/{org}/members/{account} re-roles a member (200, and GET lists the new role) " +
+      "while an invalid role is 400, an account that is not a member is 404 and repeating the " +
+      "current role writes nothing; DELETE is 204 and the membership disappears from " +
+      "GET /v1/orgs/{org}/members while the account itself survives (GET /v1/accounts/{id} is 200), " +
+      "and deleting it again is 404",
+  },
 ];
 
 interface StepResult {
@@ -5357,6 +5367,141 @@ async function organizationFlow(base: string, adminToken: string): Promise<StepR
   };
 }
 
+/**
+ * Step 27 — org membership (§6.2).
+ *
+ * Membership has a single role per account; step 26 adds one to a new org, and this step covers
+ * the rest of its lifecycle: re-rolling, refusing an account that is not a member, and removing the
+ * membership without deleting the account.
+ */
+async function orgMemberFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const email = `member-${runId}@demo.localhost`;
+  const password = `pw-${runId}-member`;
+  const outsiderEmail = `outsider-${runId}@demo.localhost`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "27",
+    title: "org members",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  try {
+    // --- two accounts: one joins the org, the other must be refused ---------------------------------
+    const member = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Org member", password }),
+    });
+    const memberId = (member.body as { id?: unknown })?.id;
+    if (member.status !== 201 || typeof memberId !== "string") {
+      return fail(`POST /v1/accounts → ${member.status} ${text(member.body)}`);
+    }
+    const outsider = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: outsiderEmail, display_name: "Org outsider", password }),
+    });
+    const outsiderId = (outsider.body as { id?: unknown })?.id;
+    if (outsider.status !== 201 || typeof outsiderId !== "string") {
+      return fail(`POST /v1/accounts (outsider) → ${outsider.status} ${text(outsider.body)}`);
+    }
+
+    const added = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: memberId, role: "member" }),
+    });
+    checks.push([
+      "POST adds the member with role=member",
+      added.status === 201 && (added.body as { role?: unknown })?.role === "member",
+    ]);
+
+    // --- re-roling -----------------------------------------------------------------------------------
+    const promoted = await call(`${base}/v1/orgs/${ORG}/members/${memberId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ role: "admin" }),
+    });
+    checks.push([
+      "PATCH re-roles it to admin",
+      promoted.status === 200 && (promoted.body as { role?: unknown })?.role === "admin",
+    ]);
+
+    const listed = await call(`${base}/v1/orgs/${ORG}/members`, { headers });
+    const items = (listed.body as { items?: { account_id?: unknown; role?: unknown }[] })?.items;
+    checks.push([
+      "GET lists the new role",
+      listed.status === 200 &&
+        Array.isArray(items) &&
+        items.some((item) => item.account_id === memberId && item.role === "admin"),
+    ]);
+
+    const repeated = await call(`${base}/v1/orgs/${ORG}/members/${memberId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ role: "admin" }),
+    });
+    checks.push(["repeating the current role is still 200", repeated.status === 200]);
+
+    const badRole = await call(`${base}/v1/orgs/${ORG}/members/${memberId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ role: "superuser" }),
+    });
+    checks.push(["an invalid role is 400", badRole.status === 400]);
+
+    const notMember = await call(`${base}/v1/orgs/${ORG}/members/${outsiderId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ role: "member" }),
+    });
+    checks.push(["an account that is not a member is 404", notMember.status === 404]);
+
+    // --- removal keeps the account ---------------------------------------------------------------------
+    const removed = await call(`${base}/v1/orgs/${ORG}/members/${memberId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["DELETE the membership is 204", removed.status === 204]);
+
+    const after = await call(`${base}/v1/orgs/${ORG}/members`, { headers });
+    checks.push([
+      "the membership is gone from the member list",
+      after.status === 200 && !JSON.stringify(after.body).includes(email),
+    ]);
+
+    const accountStill = await call(`${base}/v1/accounts/${memberId}`, { headers });
+    checks.push(["the account itself survives", accountStill.status === 200]);
+
+    const removedAgain = await call(`${base}/v1/orgs/${ORG}/members/${memberId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["deleting it again is 404", removedAgain.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "27",
+    title: "org members",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: add → re-role → list → repeat → invalid 400 → outsider 404 → remove 204 → gone → account survives → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -5612,6 +5757,7 @@ async function main(): Promise<number> {
   push(await signInExperienceFlow(base, adminToken));
   push(await apiResourceFlow(base, adminToken));
   push(await organizationFlow(base, adminToken));
+  push(await orgMemberFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
