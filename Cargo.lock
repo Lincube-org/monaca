@@ -1528,6 +1528,7 @@ dependencies = [
  "clap",
  "data-encoding",
  "hex",
+ "hmac 0.12.1",
  "monaca-agent",
  "monaca-audit",
  "monaca-crypto",
