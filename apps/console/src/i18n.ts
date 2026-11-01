@@ -625,6 +625,12 @@ export const messages = {
     mfaPolicyMandatory: "Mandatory",
     mfaPolicyHint:
       "User-controlled challenges accounts that enrolled a factor. Mandatory also pauses a first-time sign-in on a setup step.",
+    trustedDevicesField: "Remembered browsers",
+    trustedDevicesHint:
+      "Lets an account skip the second factor on a browser it trusted. Off stops trusting every existing device cookie immediately.",
+    trustedDays: "Trust duration (days)",
+    trustedDaysHint: "A remembered browser expires after this many days, between 1 and 365.",
+    invalidTrustedDays: "The trust duration is 1–365 days.",
     save: "Save changes",
     saving: "Saving",
     discard: "Discard",

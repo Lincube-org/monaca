@@ -73,6 +73,10 @@ export interface SignInExperience {
   mfa_enabled: boolean;
   /** `user_controlled` | `mandatory`. */
   mfa_policy: "user_controlled" | "mandatory";
+  /** Whether a browser may be remembered past the second factor. */
+  mfa_trusted_devices_enabled: boolean;
+  /** How long a remembered browser keeps its trust, in days. */
+  mfa_trusted_device_ttl_days: number;
   /** The tenant's shortest accepted password, 8–64 characters. */
   password_min_length: number;
   /** How many character classes (lowercase, uppercase, digits, symbols) a password must use. */

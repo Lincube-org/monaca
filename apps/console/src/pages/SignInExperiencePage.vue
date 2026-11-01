@@ -55,6 +55,10 @@ const emailCode = ref(true);
 const passkey = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
+const trustedDevices = ref(true);
+const trustedDeviceDays = ref(30);
+const TRUSTED_MIN_DAYS = 1;
+const TRUSTED_MAX_DAYS = 365;
 const passwordMinLength = ref(8);
 const passwordMinTypes = ref(1);
 const rejectUserInfo = ref(true);
@@ -133,6 +137,8 @@ interface SwitchForm {
   passkey: boolean;
   mfaEnabled: boolean;
   mfaPolicy: "user_controlled" | "mandatory";
+  trustedDevices: boolean;
+  trustedDeviceDays: number;
   passwordMinLength: number;
   passwordMinTypes: number;
   rejectUserInfo: boolean;
@@ -151,6 +157,8 @@ function formValues(): SwitchForm {
     passkey: passkey.value,
     mfaEnabled: mfaEnabled.value,
     mfaPolicy: mfaPolicy.value,
+    trustedDevices: trustedDevices.value,
+    trustedDeviceDays: trustedDeviceDays.value,
     passwordMinLength: passwordMinLength.value,
     passwordMinTypes: passwordMinTypes.value,
     rejectUserInfo: rejectUserInfo.value,
@@ -170,6 +178,8 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.passkey_sign_in_enabled === form.passkey &&
     value.mfa_enabled === form.mfaEnabled &&
     value.mfa_policy === form.mfaPolicy &&
+    value.mfa_trusted_devices_enabled === form.trustedDevices &&
+    value.mfa_trusted_device_ttl_days === form.trustedDeviceDays &&
     value.password_min_length === form.passwordMinLength &&
     value.password_min_character_types === form.passwordMinTypes &&
     value.password_reject_user_info === form.rejectUserInfo &&
@@ -189,6 +199,8 @@ function adopt(value: SignInExperience): void {
   passkey.value = value.passkey_sign_in_enabled;
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
+  trustedDevices.value = value.mfa_trusted_devices_enabled;
+  trustedDeviceDays.value = value.mfa_trusted_device_ttl_days;
   passwordMinLength.value = value.password_min_length;
   passwordMinTypes.value = value.password_min_character_types;
   rejectUserInfo.value = value.password_reject_user_info;
@@ -278,6 +290,17 @@ function setMfaPolicy(value: string): void {
   formError.value = null;
 }
 
+function setTrustedDevices(value: boolean | "indeterminate"): void {
+  trustedDevices.value = value === true;
+  formError.value = null;
+}
+
+function setTrustedDays(value: string | number): void {
+  const parsed = Number.parseInt(String(value), 10);
+  trustedDeviceDays.value = Number.isNaN(parsed) ? 0 : parsed;
+  formError.value = null;
+}
+
 function setPasswordMinLength(value: string | number): void {
   const parsed = Number.parseInt(String(value), 10);
   passwordMinLength.value = Number.isNaN(parsed) ? 0 : parsed;
@@ -325,6 +348,13 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidPasswordMinTypes");
     return;
   }
+  if (
+    trustedDeviceDays.value < TRUSTED_MIN_DAYS ||
+    trustedDeviceDays.value > TRUSTED_MAX_DAYS
+  ) {
+    formError.value = t("signInExperience.invalidTrustedDays");
+    return;
+  }
   if (rejectedWordsIssue.value !== null) {
     formError.value = t("signInExperience.invalidRejectedWords");
     return;
@@ -365,6 +395,12 @@ async function save(): Promise<void> {
   if (passkey.value !== base.passkey_sign_in_enabled) body.passkey_sign_in_enabled = passkey.value;
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
+  if (trustedDevices.value !== base.mfa_trusted_devices_enabled) {
+    body.mfa_trusted_devices_enabled = trustedDevices.value;
+  }
+  if (trustedDeviceDays.value !== base.mfa_trusted_device_ttl_days) {
+    body.mfa_trusted_device_ttl_days = trustedDeviceDays.value;
+  }
   if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
   if (passwordMinTypes.value !== base.password_min_character_types) {
     body.password_min_character_types = passwordMinTypes.value;
@@ -847,6 +883,47 @@ function formatStamp(at: string): string {
                 </NativeSelect>
                 <p class="text-[11.5px] leading-snug text-ink-faint">
                   {{ t('signInExperience.mfaPolicyHint') }}
+                </p>
+              </div>
+
+              <Separator />
+
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="mfa-trusted-devices"
+                  :model-value="trustedDevices"
+                  :disabled="!mfaEnabled || update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => setTrustedDevices(value)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="mfa-trusted-devices">{{ t('signInExperience.trustedDevicesField') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.trustedDevicesHint') }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="mfa-trusted-days">{{ t('signInExperience.trustedDays') }}</Label>
+                <Input
+                  id="mfa-trusted-days"
+                  type="number"
+                  :min="TRUSTED_MIN_DAYS"
+                  :max="TRUSTED_MAX_DAYS"
+                  :model-value="trustedDeviceDays"
+                  :invalid="trustedDeviceDays < TRUSTED_MIN_DAYS || trustedDeviceDays > TRUSTED_MAX_DAYS"
+                  :disabled="!mfaEnabled || !trustedDevices || update.isPending.value"
+                  class="w-[120px]"
+                  @update:model-value="(value: string | number) => setTrustedDays(value)"
+                />
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.trustedDaysHint') }}
+                </p>
+                <p
+                  v-if="trustedDeviceDays < TRUSTED_MIN_DAYS || trustedDeviceDays > TRUSTED_MAX_DAYS"
+                  class="text-[11.5px] leading-snug text-deny"
+                >
+                  {{ t('signInExperience.invalidTrustedDays') }}
                 </p>
               </div>
             </CardContent>

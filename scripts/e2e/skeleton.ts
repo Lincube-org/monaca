@@ -437,6 +437,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "the account centre's PATCH /t/{tenant}/account updates and clears it; an authorization code exchanged with " +
       "the profile scope mints an id_token whose picture is the avatar",
   },
+  {
+    step: "46",
+    title: "trusted-device policy",
+    assertion:
+      "PATCH /v1/sign-in-experience sets mfa_trusted_devices_enabled and a 1–365-day " +
+      "mfa_trusted_device_ttl_days (0 and 366 are 400) and the public read follows; a remembered browser's cookie " +
+      "uses that Max-Age and its row expires that many days out; switching the policy off makes an existing device " +
+      "cookie ask for MFA again and a new remember_device request is not remembered",
+  },
 ];
 
 interface StepResult {
@@ -8977,6 +8986,322 @@ async function accountAvatarFlow(base: string, adminToken: string): Promise<Step
   };
 }
 
+/**
+ * Step 46: the tenant chooses whether browsers may be remembered past MFA, and for how long.
+ *
+ * The duration is observed twice: in the `Max-Age` of the device cookie and in the row's
+ * `expires_at`. Switching the policy off must also retire cookies issued before the switch, so an
+ * old cookie is offered on a fresh sign-in and still stops at the challenge.
+ */
+async function trustedDevicePolicyFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const email = `trust-policy-${runId}@demo.localhost`;
+  const password = `pw-${runId}-trust`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const trustDays = 7;
+  const trustSecs = trustDays * 86_400;
+
+  const enabled = (body: unknown): unknown =>
+    (body as { mfa_trusted_devices_enabled?: unknown } | undefined)?.mfa_trusted_devices_enabled;
+  const ttlDays = (body: unknown): unknown =>
+    (body as { mfa_trusted_device_ttl_days?: unknown } | undefined)?.mfa_trusted_device_ttl_days;
+
+  const setPolicy = (patch: {
+    mfa_trusted_devices_enabled?: boolean;
+    mfa_trusted_device_ttl_days?: number;
+  }): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(patch),
+    });
+
+  const publicRead = (): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/sign-in-experience`);
+
+  /** A fresh authorize → interaction for the console client. */
+  const begin = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `td-${tag}-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const response = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-td-${tag}-${runId}`,
+        nonce: `n-td-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(
+      response.headers.get("location") ?? "",
+      base,
+    ).searchParams.get("interaction");
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status} ${text(response.body)}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  /** Password sign-in, optionally carrying a remembered-browser cookie. */
+  const signIn = async (
+    tag: string,
+    cookie?: string,
+  ): Promise<
+    | {
+        interaction: string;
+        verifier: string;
+        status: number;
+        body: unknown;
+        session?: string;
+      }
+    | undefined
+  > => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const session = /monaca_session=([0-9a-f-]{36})/.exec(
+      response.headers.get("set-cookie") ?? "",
+    )?.[1];
+    return { ...started, status: response.status, body: response.body, session };
+  };
+
+  let accountId: string | undefined;
+  try {
+    const on = await setPolicy({
+      mfa_trusted_devices_enabled: true,
+      mfa_trusted_device_ttl_days: trustDays,
+    });
+    checks.push([
+      "PATCH enables remembered browsers and sets a seven-day trust",
+      on.status === 200 && enabled(on.body) === true && ttlDays(on.body) === trustDays,
+    ]);
+
+    const publicOn = await publicRead();
+    checks.push([
+      "the public read carries the policy",
+      publicOn.status === 200 &&
+        enabled(publicOn.body) === true &&
+        ttlDays(publicOn.body) === trustDays,
+    ]);
+
+    for (const days of [0, 366]) {
+      const refusal = await setPolicy({ mfa_trusted_device_ttl_days: days });
+      checks.push([`a trust of ${days} days is 400`, refusal.status === 400]);
+    }
+
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Trusted policy", password }),
+    });
+    const createdId = (created.body as { id?: unknown } | undefined)?.id;
+    if (typeof createdId === "string") accountId = createdId;
+    checks.push(["POST /v1/accounts creates the account", created.status === 201]);
+    if (accountId === undefined) {
+      return {
+        step: "46",
+        title: "trusted-device policy",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /v1/accounts → ${created.status} ${text(created.body)}`,
+      };
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const first = await signIn("first");
+    if (first?.session === undefined) {
+      return {
+        step: "46",
+        title: "trusted-device policy",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: "the first sign-in set no session cookie",
+      };
+    }
+    const accountHeaders = {
+      cookie: `monaca_session=${first.session}`,
+      "content-type": "application/json",
+    };
+    const enrollment = await call(`${base}/t/${TENANT}/account/mfa/totp`, {
+      method: "POST",
+      headers: accountHeaders,
+    });
+    const secret = (enrollment.body as { secret?: unknown } | undefined)?.secret;
+    if (typeof secret !== "string") {
+      return {
+        step: "46",
+        title: "trusted-device policy",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /account/mfa/totp → ${enrollment.status} ${text(enrollment.body)}`,
+      };
+    }
+    const confirmed = await call(`${base}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: accountHeaders,
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push(["the account enrols an authenticator app", confirmed.status === 200]);
+
+    const challenged = await signIn("challenged");
+    checks.push([
+      "a password sign-in asks for the second factor",
+      challenged?.status === 200 &&
+        (challenged.body as { mfa_required?: unknown })?.mfa_required === true,
+    ]);
+    if (challenged === undefined) {
+      return {
+        step: "46",
+        title: "trusted-device policy",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: "the challenged sign-in failed",
+      };
+    }
+
+    const verified = await call(
+      `${base}/t/${TENANT}/interaction/${challenged.interaction}/mfa/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          code: totpFromBase32(secret),
+          factor: "totp",
+          remember_device: true,
+        }),
+      },
+    );
+    const setCookie = verified.headers.get("set-cookie") ?? "";
+    const deviceToken = /monaca_mfa_device=([0-9a-f]{64})/.exec(setCookie)?.[1];
+    checks.push([
+      "the verified browser is remembered for the configured seven days",
+      verified.status === 200 &&
+        deviceToken !== undefined &&
+        setCookie.includes(`Max-Age=${trustSecs}`),
+    ]);
+    if (deviceToken === undefined) {
+      return {
+        step: "46",
+        title: "trusted-device policy",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `mfa/verify → ${verified.status} ${text(verified.body)}`,
+      };
+    }
+
+    const deviceCookie = `monaca_mfa_device=${deviceToken}`;
+    const trusted = await signIn("trusted", deviceCookie);
+    checks.push([
+      "a remembered browser skips the second factor",
+      trusted?.status === 200 &&
+        typeof (trusted.body as { redirect_to?: unknown } | undefined)?.redirect_to === "string",
+    ]);
+
+    const listed = await call(`${base}/t/${TENANT}/account/mfa/devices`, {
+      headers: { cookie: `monaca_session=${first.session}; ${deviceCookie}` },
+    });
+    const expiresAt = (
+      listed.body as { items?: { expires_at?: unknown }[] } | undefined
+    )?.items?.[0]?.expires_at;
+    const expires = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
+    const daysOut = (expires - Date.now()) / 86_400_000;
+    checks.push([
+      "the stored device expires seven days out",
+      Number.isFinite(expires) && daysOut > 6.5 && daysOut < 7.5,
+    ]);
+
+    const off = await setPolicy({ mfa_trusted_devices_enabled: false });
+    checks.push([
+      "PATCH disables remembered browsers",
+      off.status === 200 && enabled(off.body) === false,
+    ]);
+    const publicOff = await publicRead();
+    checks.push([
+      "the public read follows the switch off",
+      publicOff.status === 200 && enabled(publicOff.body) === false,
+    ]);
+
+    const stale = await signIn("stale", deviceCookie);
+    checks.push([
+      "a cookie issued before the switch no longer skips the second factor",
+      stale?.status === 200 &&
+        (stale.body as { mfa_required?: unknown })?.mfa_required === true,
+    ]);
+    if (stale === undefined) {
+      return {
+        step: "46",
+        title: "trusted-device policy",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: "the stale-device sign-in failed",
+      };
+    }
+
+    const whileOff = await call(
+      `${base}/t/${TENANT}/interaction/${stale.interaction}/mfa/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          code: totpFromBase32(secret),
+          factor: "totp",
+          remember_device: true,
+        }),
+      },
+    );
+    checks.push([
+      "remember_device is ignored while the policy is off",
+      whileOff.status === 200 &&
+        !(whileOff.headers.get("set-cookie") ?? "").includes("monaca_mfa_device="),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await setPolicy({
+      mfa_trusted_devices_enabled: true,
+      mfa_trusted_device_ttl_days: 30,
+    }).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "46",
+    title: "trusted-device policy",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: on + 7 days → two 400s → enroll → remember → skip → expires 7d → off → stale cookie challenged → no new cookie → restored`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -9251,6 +9576,7 @@ async function main(): Promise<number> {
   push(await applicationCssFlow(base, adminToken));
   push(await passkeySignInSwitchFlow(base, adminToken));
   push(await accountAvatarFlow(base, adminToken));
+  push(await trustedDevicePolicyFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

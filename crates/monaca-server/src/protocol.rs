@@ -83,6 +83,8 @@ pub async fn sign_in_experience(
         "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
+        "mfa_trusted_devices_enabled": experience.mfa_trusted_devices_enabled,
+        "mfa_trusted_device_ttl_days": experience.mfa_trusted_device_ttl_days,
         "password_min_length": experience.password_min_length,
         "password_min_character_types": experience.password_min_character_types,
         "password_reject_user_info": experience.password_reject_user_info,
@@ -603,9 +605,11 @@ pub(crate) async fn finish_sign_in(
         let challenge = factors.iter().any(|factor| *factor == "totp");
         if challenge {
             // A browser this account chose to remember skips the second factor until it is revoked
-            // or expires (§6.1 `mfa`). The cookie is per tenant and the row names the account, so a
-            // stale trust from another account does nothing.
-            if let Some(token) = session::trusted_device_token(headers)
+            // or expires (§6.1 `mfa`). A tenant that switches the policy off stops trusting every
+            // cookie immediately, including one issued before the switch. The cookie is per tenant
+            // and the row names the account, so a stale trust from another account does nothing.
+            if experience.mfa_trusted_devices_enabled
+                && let Some(token) = session::trusted_device_token(headers)
                 && let Some(device) = state
                     .store
                     .trusted_device(&tenant, &hash_secret(&token))
@@ -1668,13 +1672,11 @@ pub struct MfaVerifyBody {
     pub code: String,
     /// `totp` (default) or `backup_code`.
     pub factor: Option<String>,
-    /// Ask the server to remember this browser for thirty days once the factor is accepted.
+    /// Ask the server to remember this browser once the factor is accepted, when the tenant's
+    /// trusted-device policy allows it.
     #[serde(default)]
     pub remember_device: bool,
 }
-
-/// How long a remembered browser may skip the second factor.
-const TRUSTED_DEVICE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Mint a trust for this browser and return the cookie that carries it.
 ///
@@ -1685,6 +1687,7 @@ async fn issue_trusted_device(
     tenant: &TenantRow,
     account: &AccountRow,
     headers: &HeaderMap,
+    ttl_secs: u64,
 ) -> Result<HeaderValue, ApiError> {
     let token = hex::encode(generate_challenge());
     let user_agent = headers
@@ -1698,15 +1701,12 @@ async fn issue_trusted_device(
             account.account_id(),
             &hash_secret(&token),
             user_agent.as_deref(),
-            state.now() + Duration::seconds(TRUSTED_DEVICE_TTL_SECS as i64),
+            state.now() + Duration::seconds(ttl_secs as i64),
         )
         .await?;
     let secure = session::secure_origin(&state.config);
     HeaderValue::from_str(&session::set_device_cookie(
-        &token,
-        TRUSTED_DEVICE_TTL_SECS,
-        secure,
-        &tenant.slug,
+        &token, ttl_secs, secure, &tenant.slug,
     ))
     .map_err(ApiError::internal)
 }
@@ -1816,8 +1816,12 @@ pub async fn mfa_verify(
         .await
         .map_err(ApiError::Interaction)?;
 
-    let trust = if body.remember_device {
-        Some(issue_trusted_device(&state, &tenant, &account, &headers).await?)
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    let trust = if body.remember_device && experience.mfa_trusted_devices_enabled {
+        let ttl_secs = u64::try_from(experience.mfa_trusted_device_ttl_days)
+            .unwrap_or(30)
+            .saturating_mul(86_400);
+        Some(issue_trusted_device(&state, &tenant, &account, &headers, ttl_secs).await?)
     } else {
         None
     };

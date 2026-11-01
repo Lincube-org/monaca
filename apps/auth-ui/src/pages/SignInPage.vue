@@ -99,11 +99,19 @@ const mfaInput = ref<InstanceType<typeof Input> | null>(null);
 /** Which factors this challenge accepts; `backup_code` unlocks the recovery-code form. */
 const mfaFactors = ref<string[]>([]);
 const useBackupCode = ref(false);
-/** When checked, the code step also leaves a thirty-day trust for this browser. */
+/** When checked, the code step also leaves a tenant-configured trust for this browser. */
 const rememberDevice = ref(false);
 
 /** The recovery-code toggle is offered only when the account actually has unused codes. */
 const backupCodeAvailable = computed(() => mfaFactors.value.includes("backup_code"));
+
+/**
+ * Remembering the browser is offered only while the tenant's trusted-device policy is on. Before
+ * the switches load the option stays visible; the server ignores the flag when the policy is off.
+ */
+const trustedDeviceAvailable = computed(
+  () => experience.value?.mfa_trusted_devices_enabled ?? true,
+);
 
 /** Passkey support is a browser fact, resolved once; a browser without it never sees the option. */
 const passkeyAvailable = ref(passkeysSupported());
@@ -1146,7 +1154,10 @@ async function cancel(): Promise<void> {
             </div>
 
             <!-- Remembering this browser is the one-way choice out of the second factor. -->
-            <label class="flex items-start gap-2 text-[12.5px] leading-snug text-ink-muted">
+            <label
+              v-if="trustedDeviceAvailable"
+              class="flex items-start gap-2 text-[12.5px] leading-snug text-ink-muted"
+            >
               <input
                 v-model="rememberDevice"
                 type="checkbox"

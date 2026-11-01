@@ -585,6 +585,10 @@ pub struct UpdateSignInExperienceBody {
     pub mfa_enabled: Option<bool>,
     /// `user_controlled` | `mandatory`.
     pub mfa_policy: Option<String>,
+    /// Whether a browser may be remembered past the second factor.
+    pub mfa_trusted_devices_enabled: Option<bool>,
+    /// How long a remembered browser keeps its trust, 1–365 days.
+    pub mfa_trusted_device_ttl_days: Option<i32>,
     /// The shortest password every entrance accepts, 8–64 characters.
     pub password_min_length: Option<i32>,
     /// How many character classes a password must use, 1–4.
@@ -631,6 +635,8 @@ pub async fn update_sign_in_experience(
         && body.passkey_sign_in_enabled.is_none()
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
+        && body.mfa_trusted_devices_enabled.is_none()
+        && body.mfa_trusted_device_ttl_days.is_none()
         && body.password_min_length.is_none()
         && body.password_min_character_types.is_none()
         && body.password_reject_user_info.is_none()
@@ -667,6 +673,14 @@ pub async fn update_sign_in_experience(
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "password_min_character_types must be between 1 and 4",
+        ));
+    }
+    if let Some(days) = body.mfa_trusted_device_ttl_days
+        && !(1..=365).contains(&days)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "mfa_trusted_device_ttl_days must be between 1 and 365",
         ));
     }
     let rejected_words = normalise_rejected_words(body.password_rejected_words.as_deref())?;
@@ -734,6 +748,8 @@ pub async fn update_sign_in_experience(
             rejected_words,
             body.session_ttl_secs,
             body.refresh_token_ttl_secs,
+            body.mfa_trusted_devices_enabled,
+            body.mfa_trusted_device_ttl_days,
         )
         .await?;
     let branding = match &body.branding {
@@ -782,6 +798,8 @@ pub async fn update_sign_in_experience(
             "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
+            "mfa_trusted_devices_enabled": experience.mfa_trusted_devices_enabled,
+            "mfa_trusted_device_ttl_days": experience.mfa_trusted_device_ttl_days,
             "password_min_length": experience.password_min_length,
             "password_min_character_types": experience.password_min_character_types,
             "password_reject_user_info": experience.password_reject_user_info,
@@ -808,6 +826,8 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "passkey_sign_in_enabled": experience.passkey_sign_in_enabled,
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
+        "mfa_trusted_devices_enabled": experience.mfa_trusted_devices_enabled,
+        "mfa_trusted_device_ttl_days": experience.mfa_trusted_device_ttl_days,
         "password_min_length": experience.password_min_length,
         "password_min_character_types": experience.password_min_character_types,
         "password_reject_user_info": experience.password_reject_user_info,

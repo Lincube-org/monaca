@@ -455,6 +455,8 @@ export function seedSignInExperience(): SignInExperience {
     passkey_sign_in_enabled: true,
     mfa_enabled: true,
     mfa_policy: "user_controlled",
+    mfa_trusted_devices_enabled: true,
+    mfa_trusted_device_ttl_days: 30,
     password_min_length: 8,
     password_min_character_types: 1,
     password_reject_user_info: true,

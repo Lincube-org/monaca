@@ -1296,6 +1296,8 @@ class MockStore {
       body.passkey_sign_in_enabled === undefined &&
       body.mfa_enabled === undefined &&
       body.mfa_policy === undefined &&
+      body.mfa_trusted_devices_enabled === undefined &&
+      body.mfa_trusted_device_ttl_days === undefined &&
       body.password_min_length === undefined &&
       body.password_min_character_types === undefined &&
       body.password_reject_user_info === undefined &&
@@ -1330,6 +1332,15 @@ class MockStore {
       !(body.password_min_character_types >= 1 && body.password_min_character_types <= 4)
     ) {
       throw new ApiError("password_min_character_types must be between 1 and 4", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (
+      body.mfa_trusted_device_ttl_days !== undefined &&
+      !(body.mfa_trusted_device_ttl_days >= 1 && body.mfa_trusted_device_ttl_days <= 365)
+    ) {
+      throw new ApiError("mfa_trusted_device_ttl_days must be between 1 and 365", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
@@ -1384,6 +1395,10 @@ class MockStore {
         body.passkey_sign_in_enabled ?? this.experience.passkey_sign_in_enabled,
       mfa_enabled: mfaEnabled,
       mfa_policy: mfaPolicy,
+      mfa_trusted_devices_enabled:
+        body.mfa_trusted_devices_enabled ?? this.experience.mfa_trusted_devices_enabled,
+      mfa_trusted_device_ttl_days:
+        body.mfa_trusted_device_ttl_days ?? this.experience.mfa_trusted_device_ttl_days,
       password_min_length:
         body.password_min_length ?? this.experience.password_min_length,
       password_min_character_types:
@@ -1416,6 +1431,8 @@ class MockStore {
         passkey_sign_in_enabled: updated.passkey_sign_in_enabled,
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
+        mfa_trusted_devices_enabled: updated.mfa_trusted_devices_enabled,
+        mfa_trusted_device_ttl_days: updated.mfa_trusted_device_ttl_days,
         password_min_length: updated.password_min_length,
         password_min_character_types: updated.password_min_character_types,
         password_reject_user_info: updated.password_reject_user_info,

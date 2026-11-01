@@ -1136,6 +1136,8 @@ describe("sign-in experience", () => {
       passkey_sign_in_enabled: true,
       mfa_enabled: true,
       mfa_policy: "user_controlled",
+      mfa_trusted_devices_enabled: true,
+      mfa_trusted_device_ttl_days: 30,
       password_min_length: 8,
       password_min_character_types: 1,
       password_reject_user_info: true,
@@ -1168,6 +1170,31 @@ describe("sign-in experience", () => {
     expect(audit.items[0]?.payload["passkey_sign_in_enabled"]).toBe(false);
 
     await mockApi.updateSignInExperience({ passkey_sign_in_enabled: true });
+  });
+
+  it("sets the trusted-device policy and refuses a duration outside 1–365 days", async () => {
+    const written = await mockApi.updateSignInExperience({
+      mfa_trusted_devices_enabled: false,
+      mfa_trusted_device_ttl_days: 7,
+    });
+    expect(written.mfa_trusted_devices_enabled).toBe(false);
+    expect(written.mfa_trusted_device_ttl_days).toBe(7);
+
+    const read = await mockApi.getSignInExperience();
+    expect(read.mfa_trusted_devices_enabled).toBe(false);
+    expect(read.mfa_trusted_device_ttl_days).toBe(7);
+
+    for (const days of [0, 366]) {
+      const failure = await mockApi
+        .updateSignInExperience({ mfa_trusted_device_ttl_days: days })
+        .catch((error: unknown) => error);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    await mockApi.updateSignInExperience({
+      mfa_trusted_devices_enabled: true,
+      mfa_trusted_device_ttl_days: 30,
+    });
   });
 
   it("refuses an empty patch and any patch that leaves no first factor", async () => {

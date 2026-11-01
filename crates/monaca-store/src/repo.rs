@@ -59,6 +59,10 @@ pub struct SignInExperienceRow {
     pub mfa_enabled: bool,
     /// `user_controlled` (an enrolled factor is challenged) | `mandatory` (everyone must enroll).
     pub mfa_policy: String,
+    /// Whether a browser may be remembered past the second factor.
+    pub mfa_trusted_devices_enabled: bool,
+    /// How long a remembered browser keeps its trust, in days (1–365).
+    pub mfa_trusted_device_ttl_days: i32,
     /// The shortest password every entrance accepts, in characters.
     pub password_min_length: i32,
     /// How many character classes (lowercase, uppercase, digits, symbols) a password must use.
@@ -821,8 +825,9 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                    passkey_sign_in_enabled, mfa_enabled, mfa_policy, password_min_length,
-                    password_min_character_types, password_reject_user_info,
+                    passkey_sign_in_enabled, mfa_enabled, mfa_policy,
+                    mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,
+                    password_min_length, password_min_character_types, password_reject_user_info,
                     password_reject_repetition_and_sequence, password_rejected_words,
                     session_ttl_secs, refresh_token_ttl_secs, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
@@ -849,6 +854,8 @@ impl Store {
         password_rejected_words: Option<Vec<String>>,
         session_ttl_secs: Option<i32>,
         refresh_token_ttl_secs: Option<i32>,
+        mfa_trusted_devices_enabled: Option<bool>,
+        mfa_trusted_device_ttl_days: Option<i32>,
     ) -> Result<SignInExperienceRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
@@ -867,13 +874,17 @@ impl Store {
                  password_rejected_words = COALESCE($11, password_rejected_words),
                  session_ttl_secs = COALESCE($12, session_ttl_secs),
                  refresh_token_ttl_secs = COALESCE($13, refresh_token_ttl_secs),
+                 mfa_trusted_devices_enabled = COALESCE($14, mfa_trusted_devices_enabled),
+                 mfa_trusted_device_ttl_days = COALESCE($15, mfa_trusted_device_ttl_days),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
-                       passkey_sign_in_enabled, mfa_enabled, mfa_policy, password_min_length,
-                       password_min_character_types, password_reject_user_info,
-                       password_reject_repetition_and_sequence, password_rejected_words,
-                       session_ttl_secs, refresh_token_ttl_secs, updated_at",
+                       passkey_sign_in_enabled, mfa_enabled, mfa_policy,
+                       mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,
+                       password_min_length, password_min_character_types,
+                       password_reject_user_info, password_reject_repetition_and_sequence,
+                       password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
+                       updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
@@ -888,6 +899,8 @@ impl Store {
         .bind(password_rejected_words)
         .bind(session_ttl_secs)
         .bind(refresh_token_ttl_secs)
+        .bind(mfa_trusted_devices_enabled)
+        .bind(mfa_trusted_device_ttl_days)
         .fetch_one(&pool)
         .await?)
     }

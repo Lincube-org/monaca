@@ -259,6 +259,10 @@ export interface SignInExperience {
   passkey_sign_in_enabled: boolean;
   mfa_enabled: boolean;
   mfa_policy: "user_controlled" | "mandatory";
+  /** Whether a browser may be remembered past the second factor. */
+  mfa_trusted_devices_enabled: boolean;
+  /** How long a remembered browser keeps its trust, in days (1–365). */
+  mfa_trusted_device_ttl_days: number;
   /** The shortest password every entrance accepts, 8–64 characters. */
   password_min_length: number;
   /** How many character classes a password must use, 1–4. */
@@ -496,6 +500,8 @@ export interface UpdateSignInExperienceRequest {
   passkey_sign_in_enabled?: boolean;
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
+  mfa_trusted_devices_enabled?: boolean;
+  mfa_trusted_device_ttl_days?: number;
   password_min_length?: number;
   password_min_character_types?: number;
   password_reject_user_info?: boolean;
