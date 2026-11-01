@@ -77,6 +77,20 @@ export interface Client {
 
 export type ClientKind = "public" | "confidential";
 
+/**
+ * An API resource — an absolute `http(s)` indicator plus the scope names it publishes (§6.2).
+ *
+ * `authorize` refuses any non-standard scope a registered resource does not define, so this row is
+ * what makes a custom scope requestable at all.
+ */
+export interface ApiResource {
+  id: string;
+  name: string;
+  identifier: string;
+  scopes: string[];
+  created_at: string;
+}
+
 /** A create response for a confidential client carries the new secret exactly once. */
 export type CreatedClient = Client & { client_secret?: string };
 
@@ -190,6 +204,18 @@ export interface UpdateOrgRoleRequest {
 
 export interface AssignOrgRoleRequest {
   role_id: string;
+}
+
+export interface CreateApiResourceRequest {
+  name: string;
+  identifier: string;
+  scopes: string[];
+}
+
+/** The identifier is fixed at registration; only the name and scopes may change. */
+export interface UpdateApiResourceRequest {
+  name?: string;
+  scopes?: string[];
 }
 
 export interface CreateClientRequest {

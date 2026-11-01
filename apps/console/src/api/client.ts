@@ -2,12 +2,14 @@ import { ApiError, type MonacaApi } from "./contract";
 import type {
   AddMemberRequest,
   Agent,
+  ApiResource,
   AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
   ClientSecret,
   CreateAgentRequest,
+  CreateApiResourceRequest,
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
@@ -22,6 +24,7 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
@@ -132,6 +135,25 @@ export const httpApi: MonacaApi = {
 
   deleteClient(clientId: string): Promise<void> {
     return request<void>(`/clients/${encodeURIComponent(clientId)}`, { method: "DELETE" });
+  },
+
+  listResources(): Promise<Page<ApiResource>> {
+    return request<Page<ApiResource>>("/resources");
+  },
+
+  createResource(body: CreateApiResourceRequest): Promise<ApiResource> {
+    return request<ApiResource>("/resources", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  updateResource(resourceId: string, body: UpdateApiResourceRequest): Promise<ApiResource> {
+    return request<ApiResource>(`/resources/${encodeURIComponent(resourceId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteResource(resourceId: string): Promise<void> {
+    return request<void>(`/resources/${encodeURIComponent(resourceId)}`, { method: "DELETE" });
   },
 
   listMembers(org: string): Promise<Page<Member>> {

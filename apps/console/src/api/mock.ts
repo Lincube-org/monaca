@@ -14,18 +14,21 @@ import {
   seedMemberRoleIndexes,
   seedMembers,
   seedOrgRoles,
+  seedResources,
   verifyLog,
   type AuditLog,
 } from "./fixtures";
 import type {
   AddMemberRequest,
   Agent,
+  ApiResource,
   AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
   ClientSecret,
   CreateAgentRequest,
+  CreateApiResourceRequest,
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
@@ -39,6 +42,7 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
@@ -74,6 +78,7 @@ class MockStore {
    * a rotation replaces the secret, and the previous value stops being valid.
    */
   private clientSecrets = new Map<string, string>();
+  private resources: ApiResource[] = seedResources();
   private members: Member[] = seedMembers(this.accounts);
   private orgRoles: OrgRoleDetail[] = seedOrgRoles();
   /** account id → role ids held in this org. A role may be held by many members. */
@@ -377,6 +382,126 @@ class MockStore {
       decision: "info",
       payload: { client_id: client.client_id },
     });
+  }
+
+  listResources(): Page<ApiResource> {
+    // The server orders by identifier, and the console should not invent a different order.
+    const items = [...this.resources]
+      .sort((left, right) => left.identifier.localeCompare(right.identifier))
+      .map(cloneResource);
+    return { items, next: null };
+  }
+
+  async createResource(body: CreateApiResourceRequest): Promise<ApiResource> {
+    const name = body.name.trim();
+    if (name.length === 0 || name.length > 80) {
+      throw new ApiError("name must be 1-80 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const identifier = body.identifier.trim();
+    if (!/^https?:\/\/[^\s]+$/.test(identifier)) {
+      throw new ApiError("identifier must be an absolute http(s) URL", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    // The indicator is the audience an application asks for; two rows publishing it would make
+    // "which scopes does this audience define" ambiguous.
+    if (this.resources.some((resource) => resource.identifier === identifier)) {
+      throw new ApiError(`A resource with the identifier ${identifier} already exists`, {
+        status: 409,
+        code: "MONACA_RESOURCE_EXISTS",
+      });
+    }
+
+    const resource: ApiResource = {
+      id: newId("res"),
+      name,
+      identifier,
+      scopes: normaliseScopes(body.scopes),
+      created_at: new Date().toISOString(),
+    };
+    this.resources = [...this.resources, resource];
+
+    await this.append({
+      action: "resource.created",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { identifier: resource.identifier, scopes: resource.scopes },
+    });
+    return cloneResource(resource);
+  }
+
+  async updateResource(resourceId: string, body: UpdateApiResourceRequest): Promise<ApiResource> {
+    if (body.name === undefined && body.scopes === undefined) {
+      throw new ApiError("at least one field must be present", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const resource = this.requireResource(resourceId);
+
+    let name = resource.name;
+    if (body.name !== undefined) {
+      name = body.name.trim();
+      if (name.length === 0 || name.length > 80) {
+        throw new ApiError("name must be 1-80 characters", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
+
+    const updated: ApiResource = {
+      ...resource,
+      name,
+      scopes: body.scopes === undefined ? resource.scopes : normaliseScopes(body.scopes),
+    };
+    const index = this.resources.findIndex((candidate) => candidate.id === resource.id);
+    this.resources = [
+      ...this.resources.slice(0, index),
+      updated,
+      ...this.resources.slice(index + 1),
+    ];
+
+    await this.append({
+      action: "resource.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { identifier: updated.identifier, scopes: updated.scopes },
+    });
+    return cloneResource(updated);
+  }
+
+  async deleteResource(resourceId: string): Promise<void> {
+    const resource = this.requireResource(resourceId);
+    this.resources = this.resources.filter((candidate) => candidate.id !== resource.id);
+
+    await this.append({
+      action: "resource.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { identifier: resource.identifier },
+    });
+  }
+
+  private requireResource(resourceId: string): ApiResource {
+    if (!/^res_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(resourceId)) {
+      throw new ApiError("not a resource id", { status: 400, code: "MONACA_INVALID_REQUEST" });
+    }
+    const resource = this.resources.find((candidate) => candidate.id === resourceId);
+    if (!resource) {
+      throw new ApiError("resource not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    return resource;
   }
 
   listMembers(): Page<Member> {
@@ -839,6 +964,10 @@ function cloneRole(role: OrgRoleDetail): OrgRoleDetail {
   return { ...role, scopes: [...role.scopes] };
 }
 
+function cloneResource(resource: ApiResource): ApiResource {
+  return { ...resource, scopes: [...resource.scopes] };
+}
+
 /** The server's `RoleId::parse`: a typed `rol_…` id, nothing else. */
 function parseRoleId(roleId: string): void {
   if (!/^rol_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(roleId)) {
@@ -950,6 +1079,22 @@ export const mockApi: MonacaApi = {
   async deleteClient(clientId) {
     await delay();
     return store.deleteClient(clientId);
+  },
+  async listResources() {
+    await delay();
+    return store.listResources();
+  },
+  async createResource(body) {
+    await delay();
+    return store.createResource(body);
+  },
+  async updateResource(resourceId, body) {
+    await delay();
+    return store.updateResource(resourceId, body);
+  },
+  async deleteResource(resourceId) {
+    await delay();
+    return store.deleteResource(resourceId);
   },
   async listMembers() {
     await delay();

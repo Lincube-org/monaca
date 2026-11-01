@@ -30,6 +30,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Applications" },
   },
   {
+    path: "/resources",
+    name: "resources",
+    component: () => import("@/pages/ResourcesPage.vue"),
+    meta: { title: "API resources" },
+  },
+  {
     path: "/members",
     name: "members",
     component: () => import("@/pages/MembersPage.vue"),

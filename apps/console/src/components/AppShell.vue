@@ -19,6 +19,7 @@ import { useQueryClient } from "@tanstack/vue-query";
 import {
   AppWindow,
   Bot,
+  Boxes,
   Building2,
   Check,
   ChevronsUpDown,
@@ -67,6 +68,7 @@ const navItems: { name: string; label: string; icon: Component }[] = [
   { name: "overview", label: t("nav.overview"), icon: LayoutDashboard },
   { name: "organizations", label: t("nav.organizations"), icon: Building2 },
   { name: "applications", label: t("nav.applications"), icon: AppWindow },
+  { name: "resources", label: t("nav.resources"), icon: Boxes },
   { name: "members", label: t("nav.members"), icon: Users },
   { name: "roles", label: t("nav.roles"), icon: ShieldCheck },
   { name: "agents", label: t("nav.agents"), icon: Bot },

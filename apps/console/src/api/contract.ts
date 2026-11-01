@@ -1,12 +1,14 @@
 import type {
   AddMemberRequest,
   Agent,
+  ApiResource,
   AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
   ClientSecret,
   CreateAgentRequest,
+  CreateApiResourceRequest,
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
@@ -21,6 +23,7 @@ import type {
   ProblemDetails,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
@@ -58,6 +61,15 @@ export interface MonacaApi {
   updateClient(clientId: string, body: UpdateClientRequest): Promise<Client>;
   rotateClientSecret(clientId: string): Promise<ClientSecret>;
   deleteClient(clientId: string): Promise<void>;
+
+  /**
+   * API resources are tenant-level: the identifier is an audience the whole tenant's applications
+   * may request, and its scopes are published once for all of them.
+   */
+  listResources(): Promise<Page<ApiResource>>;
+  createResource(body: CreateApiResourceRequest): Promise<ApiResource>;
+  updateResource(resourceId: string, body: UpdateApiResourceRequest): Promise<ApiResource>;
+  deleteResource(resourceId: string): Promise<void>;
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;

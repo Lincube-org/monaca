@@ -6,12 +6,14 @@ import { queryKeys } from "@/api/keys";
 import type {
   AddMemberRequest,
   Agent,
+  ApiResource,
   AssignOrgRoleRequest,
   AuditEvent,
   AuditIntegrity,
   Client,
   ClientSecret,
   CreateAgentRequest,
+  CreateApiResourceRequest,
   CreateClientRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
@@ -25,6 +27,7 @@ import type {
   Page,
   RegisterAgentKeyRequest,
   SessionInfo,
+  UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
@@ -135,6 +138,47 @@ export function useDeleteClient() {
     mutationFn: ({ clientId }) => api.deleteClient(clientId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.clients() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useResources(): UseQueryReturnType<Page<ApiResource>, Error> {
+  return useQuery({
+    queryKey: queryKeys.resources(),
+    queryFn: () => api.listResources(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useCreateResource() {
+  const client = useQueryClient();
+  return useMutation<ApiResource, Error, CreateApiResourceRequest>({
+    mutationFn: (body) => api.createResource(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.resources() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUpdateResource() {
+  const client = useQueryClient();
+  return useMutation<ApiResource, Error, { resourceId: string; body: UpdateApiResourceRequest }>({
+    mutationFn: ({ resourceId, body }) => api.updateResource(resourceId, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.resources() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteResource() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { resourceId: string }>({
+    mutationFn: ({ resourceId }) => api.deleteResource(resourceId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.resources() });
       invalidateTenantAudit(client);
     },
   });

@@ -21,6 +21,7 @@ export const ID_PREFIXES = [
   "grt",
   "cli",
   "rol",
+  "res",
   "ses",
   "evt",
   "dlg",

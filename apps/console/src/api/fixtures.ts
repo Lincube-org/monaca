@@ -5,6 +5,7 @@ import type {
   Account,
   Agent,
   AgentKey,
+  ApiResource,
   AuditActor,
   AuditEvent,
   AuditIntegrity,
@@ -160,6 +161,35 @@ export function seedOrgRoles(): OrgRoleDetail[] {
  */
 export function seedMemberRoleIndexes(): Record<number, number[]> {
   return { 1: [0], 2: [1], 3: [2] };
+}
+
+// ---------------------------------------------------------------------------------------------
+// API resources
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The same indicator the seeded grants point at, plus a second audience.
+ *
+ * A grant without a registered resource could not have been issued a custom scope by `authorize`,
+ * so the demo tenant registers the resource its grants name.
+ */
+export function seedResources(): ApiResource[] {
+  return [
+    {
+      id: newId("res", BASE - 700 * HOUR_MS),
+      name: "Demo MCP server",
+      identifier: DEMO_RESOURCE,
+      scopes: ["tools:read", "tools:write"],
+      created_at: at(700 * 60),
+    },
+    {
+      id: newId("res", BASE - 420 * HOUR_MS),
+      name: "Notes API",
+      identifier: "https://api.demo.localhost",
+      scopes: ["notes:read", "notes:write"],
+      created_at: at(420 * 60),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------------------------

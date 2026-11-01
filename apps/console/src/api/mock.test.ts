@@ -426,6 +426,100 @@ describe("org roles", () => {
   });
 });
 
+describe("api resources", () => {
+  async function freshIdentifier(prefix: string): Promise<string> {
+    return `https://${prefix}-${Math.random().toString(36).slice(2, 8)}.example`;
+  }
+
+  it("lists seeded resources ordered by identifier, including the audience the grants name", async () => {
+    const page = await mockApi.listResources();
+    expect(page.next).toBe(null);
+    expect(page.items.length).toBeGreaterThanOrEqual(2);
+
+    const identifiers = page.items.map((resource) => resource.identifier);
+    expect(identifiers).toEqual([...identifiers].sort((left, right) => left.localeCompare(right)));
+    expect(identifiers).toContain("http://localhost:8080/mcp/demo");
+
+    for (const resource of page.items) {
+      expect(resource.id).toMatch(/^res_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+      expect(Array.isArray(resource.scopes)).toBe(true);
+    }
+  });
+
+  it("registers a resource, refuses a duplicate identifier, and appends resource.created", async () => {
+    const identifier = await freshIdentifier("billing");
+    const created = await mockApi.createResource({
+      name: "Billing API",
+      identifier,
+      scopes: ["billing:read"],
+    });
+    expect(created.name).toBe("Billing API");
+    expect(created.identifier).toBe(identifier);
+    expect(created.scopes).toEqual(["billing:read"]);
+
+    const audit = await mockApi.listAudit(ORG, { action: "resource.created", limit: 200 });
+    expect(audit.items.some((event) => event.payload["identifier"] === identifier)).toBe(true);
+
+    const duplicate = await mockApi
+      .createResource({ name: "Copy", identifier, scopes: [] })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).code).toBe("MONACA_RESOURCE_EXISTS");
+    expect((duplicate as ApiError).status).toBe(409);
+
+    const relative = await mockApi
+      .createResource({ name: "Relative", identifier: "/api", scopes: [] })
+      .catch((error: unknown) => error);
+    expect((relative as ApiError).status).toBe(400);
+  });
+
+  it("edits the name and scopes but never the identifier", async () => {
+    const identifier = await freshIdentifier("catalog");
+    const created = await mockApi.createResource({
+      name: "Catalog API",
+      identifier,
+      scopes: ["catalog:read"],
+    });
+
+    const updated = await mockApi.updateResource(created.id, {
+      name: "Catalog API v2",
+      scopes: ["catalog:read", "catalog:write"],
+    });
+    expect(updated.name).toBe("Catalog API v2");
+    expect(updated.identifier).toBe(identifier);
+    expect(updated.scopes).toEqual(["catalog:read", "catalog:write"]);
+
+    const emptyPatch = await mockApi.updateResource(created.id, {}).catch((error: unknown) => error);
+    expect((emptyPatch as ApiError).status).toBe(400);
+
+    await expect(mockApi.updateResource(created.id, { scopes: ["bad scope"] })).rejects.toThrow(
+      /scope grammar/,
+    );
+
+    const audit = await mockApi.listAudit(ORG, { action: "resource.updated", limit: 200 });
+    expect(audit.items.some((event) => event.payload["identifier"] === identifier)).toBe(true);
+  });
+
+  it("deletes a resource and refuses the second delete", async () => {
+    const identifier = await freshIdentifier("ephemeral");
+    const created = await mockApi.createResource({
+      name: "Ephemeral API",
+      identifier,
+      scopes: [],
+    });
+
+    await mockApi.deleteResource(created.id);
+    expect((await mockApi.listResources()).items.some((resource) => resource.id === created.id)).toBe(false);
+
+    const second = await mockApi.deleteResource(created.id).catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "resource.deleted", limit: 200 });
+    expect(audit.items.some((event) => event.payload["identifier"] === identifier)).toBe(true);
+  });
+});
+
 describe("agents", () => {
   it("lists seeded agents with typed ids and RFC 7638 fingerprints", async () => {
     const page = await mockApi.listAgents(ORG);
