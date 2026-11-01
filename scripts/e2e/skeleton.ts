@@ -396,6 +396,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "PATCH /v1/sign-in-experience {branding:{custom_css:…}} is 200 and the public read echoes the stylesheet; " +
       "a stylesheet over 20,000 characters is 400; an empty string clears it back to null",
   },
+  {
+    step: "41",
+    title: "password rejections",
+    assertion:
+      "PATCH /v1/sign-in-experience toggles password_reject_user_info and password_reject_repetition_and_sequence " +
+      "and the public read follows; with user-info on, an administrator's password containing the email local part " +
+      "is 400 MONACA_WEAK_PASSWORD; with repetition on, four identical or four consecutive characters are 400; " +
+      "clean passwords are 201 and the defaults are restored",
+  },
 ];
 
 interface StepResult {
@@ -8197,6 +8206,128 @@ async function customCssFlow(base: string, adminToken: string): Promise<StepResu
   };
 }
 
+/**
+ * Step 41: the tenant's password rejection rules, which Logto applies by default.
+ *
+ * The two rules are checked separately, so a failure names the rule that broke: one refuses a
+ * password containing the account's own names, the other refuses repeated runs and sequences.
+ * Passwords in this flow are either deliberately rejected or fixed strings with no runs, so the
+ * assertion does not depend on the random run id.
+ */
+async function passwordRejectionsFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const policy = (body: unknown) =>
+    body as {
+      password_reject_user_info?: unknown;
+      password_reject_repetition_and_sequence?: unknown;
+    };
+
+  const setRules = (userInfo: boolean, repetition: boolean): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        password_reject_user_info: userInfo,
+        password_reject_repetition_and_sequence: repetition,
+      }),
+    });
+
+  const create = (tag: string, password: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        email: `reject-${tag}-${runId}@demo.localhost`,
+        display_name: "Rejected",
+        password,
+      }),
+    });
+
+  try {
+    const bothOff = await setRules(false, false);
+    checks.push([
+      "PATCH turns both rejection rules off",
+      bothOff.status === 200 &&
+        policy(bothOff.body).password_reject_user_info === false &&
+        policy(bothOff.body).password_reject_repetition_and_sequence === false,
+    ]);
+
+    const firstRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read carries both rules",
+      firstRead.status === 200 &&
+        policy(firstRead.body).password_reject_user_info === false &&
+        policy(firstRead.body).password_reject_repetition_and_sequence === false,
+    ]);
+
+    const userInfoOn = await setRules(true, false);
+    checks.push([
+      "PATCH enables only the user-info rule",
+      userInfoOn.status === 200 &&
+        policy(userInfoOn.body).password_reject_user_info === true &&
+        policy(userInfoOn.body).password_reject_repetition_and_sequence === false,
+    ]);
+
+    // The local part is `reject-info-<runId>`, so a password containing it is refused.
+    const ownName = await create("info", `reject-info-${runId}-secret`);
+    checks.push([
+      "a password containing the email local part is 400 MONACA_WEAK_PASSWORD",
+      ownName.status === 400 &&
+        (ownName.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_WEAK_PASSWORD",
+    ]);
+
+    const cleanName = await create("info-clean", `pw-${runId}-account`);
+    checks.push(["a password without the account's names is 201", cleanName.status === 201]);
+
+    const repetitionOn = await setRules(false, true);
+    checks.push([
+      "PATCH enables only the repetition rule",
+      repetitionOn.status === 200 &&
+        policy(repetitionOn.body).password_reject_user_info === false &&
+        policy(repetitionOn.body).password_reject_repetition_and_sequence === true,
+    ]);
+
+    const repeated = await create("repeat", "zzzz1234");
+    checks.push(["four identical characters in a row are 400", repeated.status === 400]);
+
+    const sequential = await create("sequence", "Abcd5678");
+    checks.push(["four consecutive characters are 400", sequential.status === 400]);
+
+    const cleanRuns = await create("runs-clean", "Pw-clean-9!x");
+    checks.push(["a password with no runs is 201", cleanRuns.status === 201]);
+
+    const restored = await setRules(true, false);
+    checks.push([
+      "the defaults are restored",
+      restored.status === 200 &&
+        policy(restored.body).password_reject_user_info === true &&
+        policy(restored.body).password_reject_repetition_and_sequence === false,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await setRules(true, false).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "41",
+    title: "password rejections",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: both off → public read → user-info only → own name 400 → clean 201 → repetition only → repeat 400 → sequence 400 → clean 201 → restored`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -8466,6 +8597,7 @@ async function main(): Promise<number> {
   push(await sessionSettingsFlow(base, adminToken, parsed.consoleSecret));
   push(await passwordComplexityFlow(base, adminToken, parsed.internalSecret));
   push(await customCssFlow(base, adminToken));
+  push(await passwordRejectionsFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

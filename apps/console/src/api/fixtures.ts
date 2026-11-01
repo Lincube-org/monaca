@@ -451,6 +451,8 @@ export function seedSignInExperience(): SignInExperience {
     mfa_policy: "user_controlled",
     password_min_length: 8,
     password_min_character_types: 1,
+    password_reject_user_info: true,
+    password_reject_repetition_and_sequence: false,
     session_ttl_secs: 2_592_000,
     refresh_token_ttl_secs: 2_592_000,
     branding: {

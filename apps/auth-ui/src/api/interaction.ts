@@ -75,6 +75,10 @@ export interface SignInExperience {
   password_min_length: number;
   /** How many character classes (lowercase, uppercase, digits, symbols) a password must use. */
   password_min_character_types: number;
+  /** Whether a password may not contain the account's email local part or username. */
+  password_reject_user_info: boolean;
+  /** Whether a password may not repeat a character or follow a sequence four times. */
+  password_reject_repetition_and_sequence: boolean;
   /** The optional hosted-page look. */
   branding: Branding;
 }

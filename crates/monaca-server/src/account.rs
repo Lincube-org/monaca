@@ -455,11 +455,20 @@ pub async fn change_password(
         ));
     }
     let experience = state.store.sign_in_experience(&tenant).await?;
-    check_password(
-        &body.new_password,
-        experience.password_min_length,
-        experience.password_min_character_types,
-    )?;
+    let local_part = account
+        .primary_email
+        .split('@')
+        .next()
+        .unwrap_or(&account.primary_email);
+    let username = state
+        .store
+        .account_username(&tenant, account.account_id())
+        .await?;
+    let mut identifiers = vec![local_part];
+    if let Some(username) = username.as_deref() {
+        identifiers.push(username);
+    }
+    check_password(&body.new_password, &experience, &identifiers)?;
 
     let phc = hash_password(body.new_password.clone(), state.argon)
         .await

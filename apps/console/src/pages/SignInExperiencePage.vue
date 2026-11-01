@@ -56,6 +56,8 @@ const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const passwordMinLength = ref(8);
 const passwordMinTypes = ref(1);
+const rejectUserInfo = ref(true);
+const rejectRepetition = ref(true);
 /** Session and refresh-token lifetimes are stored in seconds but edited in whole days. */
 const sessionDays = ref(30);
 const refreshDays = ref(30);
@@ -113,6 +115,8 @@ interface SwitchForm {
   mfaPolicy: "user_controlled" | "mandatory";
   passwordMinLength: number;
   passwordMinTypes: number;
+  rejectUserInfo: boolean;
+  rejectRepetition: boolean;
   sessionDays: number;
   refreshDays: number;
   branding: Branding;
@@ -127,6 +131,8 @@ function formValues(): SwitchForm {
     mfaPolicy: mfaPolicy.value,
     passwordMinLength: passwordMinLength.value,
     passwordMinTypes: passwordMinTypes.value,
+    rejectUserInfo: rejectUserInfo.value,
+    rejectRepetition: rejectRepetition.value,
     sessionDays: sessionDays.value,
     refreshDays: refreshDays.value,
     branding: brandingValues(),
@@ -142,6 +148,8 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.mfa_policy === form.mfaPolicy &&
     value.password_min_length === form.passwordMinLength &&
     value.password_min_character_types === form.passwordMinTypes &&
+    value.password_reject_user_info === form.rejectUserInfo &&
+    value.password_reject_repetition_and_sequence === form.rejectRepetition &&
     storedDays(value.session_ttl_secs, SESSION_MAX_DAYS) === form.sessionDays &&
     storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS) === form.refreshDays &&
     sameBranding(value.branding, form.branding)
@@ -157,6 +165,8 @@ function adopt(value: SignInExperience): void {
   mfaPolicy.value = value.mfa_policy;
   passwordMinLength.value = value.password_min_length;
   passwordMinTypes.value = value.password_min_character_types;
+  rejectUserInfo.value = value.password_reject_user_info;
+  rejectRepetition.value = value.password_reject_repetition_and_sequence;
   sessionDays.value = storedDays(value.session_ttl_secs, SESSION_MAX_DAYS);
   refreshDays.value = storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS);
   brandName.value = value.branding.display_name ?? "";
@@ -244,6 +254,13 @@ function setPasswordMinTypes(value: string): void {
   formError.value = null;
 }
 
+function setRejection(field: "userInfo" | "repetition", value: boolean | "indeterminate"): void {
+  const next = value === true;
+  if (field === "userInfo") rejectUserInfo.value = next;
+  else rejectRepetition.value = next;
+  formError.value = null;
+}
+
 function setDays(field: "session" | "refresh", value: string | number): void {
   const parsed = Number.parseInt(String(value), 10);
   const next = Number.isNaN(parsed) ? 0 : parsed;
@@ -311,6 +328,12 @@ async function save(): Promise<void> {
   if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
   if (passwordMinTypes.value !== base.password_min_character_types) {
     body.password_min_character_types = passwordMinTypes.value;
+  }
+  if (rejectUserInfo.value !== base.password_reject_user_info) {
+    body.password_reject_user_info = rejectUserInfo.value;
+  }
+  if (rejectRepetition.value !== base.password_reject_repetition_and_sequence) {
+    body.password_reject_repetition_and_sequence = rejectRepetition.value;
   }
   if (storedDays(base.session_ttl_secs, SESSION_MAX_DAYS) !== sessionDays.value) {
     body.session_ttl_secs = sessionDays.value * 86_400;
@@ -574,7 +597,7 @@ function formatStamp(at: string): string {
               <CardTitle>{{ t('signInExperience.passwordPolicy') }}</CardTitle>
               <CardDescription>{{ t('signInExperience.passwordPolicyHint') }}</CardDescription>
             </CardHeader>
-            <CardContent class="flex flex-col gap-1.5">
+            <CardContent class="flex flex-col gap-3">
               <Label for="password-min-length">{{ t('signInExperience.passwordMinLength') }}</Label>
               <Input
                 id="password-min-length"
@@ -616,6 +639,38 @@ function formatStamp(at: string): string {
                 <p v-if="passwordMinTypes < 1 || passwordMinTypes > 4" class="text-[11.5px] leading-snug text-deny">
                   {{ t('signInExperience.invalidPasswordMinTypes') }}
                 </p>
+              </div>
+
+              <Separator />
+
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="password-reject-user-info"
+                  :model-value="rejectUserInfo"
+                  :disabled="update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => setRejection('userInfo', value)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="password-reject-user-info">{{ t('signInExperience.rejectUserInfo') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.rejectUserInfoHint') }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="password-reject-repetition"
+                  :model-value="rejectRepetition"
+                  :disabled="update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => setRejection('repetition', value)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="password-reject-repetition">{{ t('signInExperience.rejectRepetition') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.rejectRepetitionHint') }}
+                  </p>
+                </div>
               </div>
             </CardContent>
           </Card>

@@ -569,6 +569,12 @@ export const messages = {
     passwordMinTypesThree: "3 — three kinds",
     passwordMinTypesFour: "4 — all four kinds",
     invalidPasswordMinTypes: "The minimum character types must be between 1 and 4.",
+    rejectUserInfo: "Reject the account's own names",
+    rejectUserInfoHint:
+      "Refuses a password containing the email local part or username, so alice@example.com cannot use alice1234.",
+    rejectRepetition: "Reject repeats and sequences",
+    rejectRepetitionHint:
+      "Refuses four identical characters in a row (aaaa) and four consecutive characters (abcd, 4321).",
     sessions: "Sessions and tokens",
     sessionsHint:
       "How long a browser stays signed in and how long its refresh tokens can be redeemed. The deployment's own maximum still applies.",

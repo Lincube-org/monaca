@@ -1072,6 +1072,8 @@ describe("sign-in experience", () => {
     expect(experience.mfa_policy).toBe("user_controlled");
     expect(experience.password_min_length).toBe(8);
     expect(experience.password_min_character_types).toBe(1);
+    expect(experience.password_reject_user_info).toBe(true);
+    expect(experience.password_reject_repetition_and_sequence).toBe(false);
     expect(experience.session_ttl_secs).toBe(2_592_000);
     expect(experience.refresh_token_ttl_secs).toBe(2_592_000);
     expect(experience.branding).toEqual({
@@ -1105,6 +1107,8 @@ describe("sign-in experience", () => {
       mfa_policy: "user_controlled",
       password_min_length: 8,
       password_min_character_types: 1,
+      password_reject_user_info: true,
+      password_reject_repetition_and_sequence: false,
       session_ttl_secs: 2_592_000,
       refresh_token_ttl_secs: 2_592_000,
       branding: {
@@ -1220,6 +1224,29 @@ describe("sign-in experience", () => {
     expect(audit.items[0]?.payload).toMatchObject({ password_min_character_types: 3 });
 
     await mockApi.updateSignInExperience({ password_min_character_types: 1 });
+  });
+
+  it("toggles the password rejection rules and records them", async () => {
+    const flipped = await mockApi.updateSignInExperience({
+      password_reject_user_info: false,
+      password_reject_repetition_and_sequence: true,
+    });
+    expect(flipped.password_reject_user_info).toBe(false);
+    expect(flipped.password_reject_repetition_and_sequence).toBe(true);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({
+      password_reject_user_info: false,
+      password_reject_repetition_and_sequence: true,
+    });
+
+    await mockApi.updateSignInExperience({
+      password_reject_user_info: true,
+      password_reject_repetition_and_sequence: false,
+    });
   });
 
   it("sets and clears branding fields and validates their shape", async () => {

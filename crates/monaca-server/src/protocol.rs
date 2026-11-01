@@ -17,7 +17,7 @@ use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
     Interaction, TokenErrorCode, TokenForm, TokenRequest, at_hash, scope_subset, verify_pkce_s256,
 };
-use monaca_store::{AccountRow, OrgRow, PasskeyRow, TenantRow, topics};
+use monaca_store::{AccountRow, OrgRow, PasskeyRow, SignInExperienceRow, TenantRow, topics};
 use monaca_types::{
     AccountId, AgentId, ClientId, EventId, GrantId, InteractionId, OrgId, OrgInvitationId, TypedId,
 };
@@ -65,6 +65,9 @@ pub async fn sign_in_experience(
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
         "password_min_character_types": experience.password_min_character_types,
+        "password_reject_user_info": experience.password_reject_user_info,
+        "password_reject_repetition_and_sequence":
+            experience.password_reject_repetition_and_sequence,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": crate::management::branding_json(&branding),
@@ -901,24 +904,28 @@ pub(crate) fn normalise_email(email: &str) -> Result<String, ApiError> {
     Ok(normalised)
 }
 
-/// Reject a password that does not meet the tenant's length and complexity policy.
+/// Reject a password that does not meet the tenant's length, complexity or rejection rules.
 ///
 /// The character classes are ASCII lowercase, ASCII uppercase, ASCII digits and everything else
 /// (symbols, whitespace and non-ASCII letters). A policy of 1 therefore accepts any password long
 /// enough, which is the pre-existing behaviour the column defaults to.
+///
+/// `identifiers` are the account's own names (the email's local part and its username); they are
+/// checked only when the tenant enabled the rule, and only once they are three characters long so
+/// a one-letter local part cannot ban ordinary words.
 pub(crate) fn check_password(
     password: &str,
-    min_length: i32,
-    min_character_types: i32,
+    experience: &SignInExperienceRow,
+    identifiers: &[&str],
 ) -> Result<(), ApiError> {
-    let minimum = min_length.max(MIN_PASSWORD_LEN as i32) as usize;
+    let minimum = experience.password_min_length.max(MIN_PASSWORD_LEN as i32) as usize;
     if password.chars().count() < minimum {
         return Err(ApiError::problem(
             kinds::WEAK_PASSWORD,
             format!("password must be at least {minimum} characters"),
         ));
     }
-    let required = min_character_types.max(1) as usize;
+    let required = experience.password_min_character_types.max(1) as usize;
     let present = password_character_types(password);
     if present < required {
         return Err(ApiError::problem(
@@ -928,6 +935,26 @@ pub(crate) fn check_password(
                  (lowercase, uppercase, digits, symbols)"
             ),
         ));
+    }
+    if experience.password_reject_repetition_and_sequence
+        && (has_repeated_run(password, 4) || has_sequential_run(password, 4))
+    {
+        return Err(ApiError::problem(
+            kinds::WEAK_PASSWORD,
+            "password must not repeat a character or a sequence four times in a row",
+        ));
+    }
+    if experience.password_reject_user_info {
+        let candidate = password.to_lowercase();
+        for identifier in identifiers {
+            let identifier = identifier.trim().to_lowercase();
+            if identifier.chars().count() >= 3 && candidate.contains(&identifier) {
+                return Err(ApiError::problem(
+                    kinds::WEAK_PASSWORD,
+                    "password must not contain the account's email or username",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -947,6 +974,56 @@ fn password_character_types(password: &str) -> usize {
         }
     }
     usize::from(lower) + usize::from(upper) + usize::from(digit) + usize::from(symbol)
+}
+
+/// Whether one character repeats `run` times consecutively.
+fn has_repeated_run(password: &str, run: usize) -> bool {
+    let mut length = 0;
+    let mut previous: Option<char> = None;
+    for character in password.chars() {
+        if previous == Some(character) {
+            length += 1;
+        } else {
+            length = 1;
+            previous = Some(character);
+        }
+        if length >= run {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the password follows an ASCII alphanumeric sequence `run` characters long.
+///
+/// A sequence is an ascending or descending run of consecutive characters (`abcd`, `4321`). The
+/// characters must be ASCII alphanumeric on both sides, so a digit cannot continue into a letter.
+fn has_sequential_run(password: &str, run: usize) -> bool {
+    let mut length = 1;
+    let mut step: Option<i64> = None;
+    let mut previous: Option<char> = None;
+    for character in password.chars() {
+        if let Some(prev) = previous {
+            let difference = character as i64 - prev as i64;
+            let consecutive = matches!(difference, 1 | -1)
+                && prev.is_ascii_alphanumeric()
+                && character.is_ascii_alphanumeric();
+            if consecutive && step == Some(difference) {
+                length += 1;
+            } else if consecutive {
+                step = Some(difference);
+                length = 2;
+            } else {
+                step = None;
+                length = 1;
+            }
+            if length >= run {
+                return true;
+            }
+        }
+        previous = Some(character);
+    }
+    false
 }
 
 /// The shortest and longest accepted username, in characters.
@@ -1150,11 +1227,12 @@ pub async fn sign_up_verify(
         ));
     }
     let email = normalise_email(&body.email)?;
-    check_password(
-        &body.password,
-        experience.password_min_length,
-        experience.password_min_character_types,
-    )?;
+    let local_part = email.split('@').next().unwrap_or(&email);
+    let mut identifiers = vec![local_part];
+    if let Some(username) = body.username.as_deref() {
+        identifiers.push(username);
+    }
+    check_password(&body.password, &experience, &identifiers)?;
     // A second registration for the same address is a conflict even with a valid code, because
     // the code proves the address, not the account's absence.
     if state
@@ -1518,11 +1596,8 @@ pub async fn password_reset(
         ));
     }
     let email = normalise_email(&body.email)?;
-    check_password(
-        &body.password,
-        experience.password_min_length,
-        experience.password_min_character_types,
-    )?;
+    let local_part = email.split('@').next().unwrap_or(&email);
+    check_password(&body.password, &experience, &[local_part])?;
     take_verification_code(&state, &tenant, PURPOSE_PASSWORD_RESET, &email, &body.code).await?;
 
     let Some((account, _)) = state.store.account_by_email(&tenant, &email).await? else {

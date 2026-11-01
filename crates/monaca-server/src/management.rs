@@ -286,11 +286,9 @@ pub async fn create_account(
         ));
     }
     let experience = state.store.sign_in_experience(&tenant).await?;
-    crate::protocol::check_password(
-        &body.password,
-        experience.password_min_length,
-        experience.password_min_character_types,
-    )?;
+    let email = body.email.trim();
+    let local_part = email.split('@').next().unwrap_or(email);
+    crate::protocol::check_password(&body.password, &experience, &[local_part])?;
     let phc = hash_password(body.password.clone(), state.argon)
         .await
         .map_err(ApiError::internal)?;
@@ -567,6 +565,10 @@ pub struct UpdateSignInExperienceBody {
     pub password_min_length: Option<i32>,
     /// How many character classes a password must use, 1–4.
     pub password_min_character_types: Option<i32>,
+    /// Whether a password may not contain the account's email local part or username.
+    pub password_reject_user_info: Option<bool>,
+    /// Whether a password may not repeat a character or follow a sequence four times.
+    pub password_reject_repetition_and_sequence: Option<bool>,
     /// How long a browser session stays signed in, 3600–7776000 seconds.
     pub session_ttl_secs: Option<i32>,
     /// How long a refresh token stays usable, 3600–31536000 seconds.
@@ -604,6 +606,8 @@ pub async fn update_sign_in_experience(
         && body.mfa_policy.is_none()
         && body.password_min_length.is_none()
         && body.password_min_character_types.is_none()
+        && body.password_reject_user_info.is_none()
+        && body.password_reject_repetition_and_sequence.is_none()
         && body.session_ttl_secs.is_none()
         && body.refresh_token_ttl_secs.is_none()
         && body.branding.is_none()
@@ -695,6 +699,8 @@ pub async fn update_sign_in_experience(
             body.mfa_policy.as_deref(),
             body.password_min_length,
             body.password_min_character_types,
+            body.password_reject_user_info,
+            body.password_reject_repetition_and_sequence,
             body.session_ttl_secs,
             body.refresh_token_ttl_secs,
         )
@@ -746,6 +752,9 @@ pub async fn update_sign_in_experience(
             "mfa_policy": experience.mfa_policy,
             "password_min_length": experience.password_min_length,
             "password_min_character_types": experience.password_min_character_types,
+            "password_reject_user_info": experience.password_reject_user_info,
+            "password_reject_repetition_and_sequence":
+                experience.password_reject_repetition_and_sequence,
             "session_ttl_secs": experience.session_ttl_secs,
             "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
             "branding": branding_json(&branding),
@@ -767,6 +776,9 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
         "password_min_character_types": experience.password_min_character_types,
+        "password_reject_user_info": experience.password_reject_user_info,
+        "password_reject_repetition_and_sequence":
+            experience.password_reject_repetition_and_sequence,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": branding_json(branding),

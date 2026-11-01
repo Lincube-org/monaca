@@ -1254,6 +1254,8 @@ class MockStore {
       body.mfa_policy === undefined &&
       body.password_min_length === undefined &&
       body.password_min_character_types === undefined &&
+      body.password_reject_user_info === undefined &&
+      body.password_reject_repetition_and_sequence === undefined &&
       body.session_ttl_secs === undefined &&
       body.refresh_token_ttl_secs === undefined &&
       (body.branding === undefined || brandingPatchIsEmpty(body.branding))
@@ -1335,6 +1337,11 @@ class MockStore {
         body.password_min_length ?? this.experience.password_min_length,
       password_min_character_types:
         body.password_min_character_types ?? this.experience.password_min_character_types,
+      password_reject_user_info:
+        body.password_reject_user_info ?? this.experience.password_reject_user_info,
+      password_reject_repetition_and_sequence:
+        body.password_reject_repetition_and_sequence ??
+        this.experience.password_reject_repetition_and_sequence,
       session_ttl_secs: body.session_ttl_secs ?? this.experience.session_ttl_secs,
       refresh_token_ttl_secs:
         body.refresh_token_ttl_secs ?? this.experience.refresh_token_ttl_secs,
@@ -1357,6 +1364,9 @@ class MockStore {
         mfa_policy: updated.mfa_policy,
         password_min_length: updated.password_min_length,
         password_min_character_types: updated.password_min_character_types,
+        password_reject_user_info: updated.password_reject_user_info,
+        password_reject_repetition_and_sequence:
+          updated.password_reject_repetition_and_sequence,
         session_ttl_secs: updated.session_ttl_secs,
         refresh_token_ttl_secs: updated.refresh_token_ttl_secs,
         branding: { ...updated.branding },

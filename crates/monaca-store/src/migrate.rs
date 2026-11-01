@@ -164,6 +164,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "tenant custom CSS for the hosted page (M1)",
         include_str!("../migrations/tenant_25.sql"),
     ),
+    (
+        26,
+        "tenant password rejection rules (M1)",
+        include_str!("../migrations/tenant_26.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

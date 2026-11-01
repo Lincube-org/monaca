@@ -257,6 +257,10 @@ export interface SignInExperience {
   password_min_length: number;
   /** How many character classes a password must use, 1–4. */
   password_min_character_types: number;
+  /** Whether a password may not contain the account's email local part or username. */
+  password_reject_user_info: boolean;
+  /** Whether a password may not repeat a character or follow a sequence four times. */
+  password_reject_repetition_and_sequence: boolean;
   /** How long a browser session stays signed in, in seconds (3600–7776000). */
   session_ttl_secs: number;
   /** How long a refresh token stays usable, in seconds (3600–31536000). */
@@ -485,6 +489,8 @@ export interface UpdateSignInExperienceRequest {
   mfa_policy?: "user_controlled" | "mandatory";
   password_min_length?: number;
   password_min_character_types?: number;
+  password_reject_user_info?: boolean;
+  password_reject_repetition_and_sequence?: boolean;
   session_ttl_secs?: number;
   refresh_token_ttl_secs?: number;
   branding?: BrandingPatch;

@@ -59,6 +59,10 @@ pub struct SignInExperienceRow {
     pub password_min_length: i32,
     /// How many character classes (lowercase, uppercase, digits, symbols) a password must use.
     pub password_min_character_types: i32,
+    /// Whether a password may not contain the account's own email local part or username.
+    pub password_reject_user_info: bool,
+    /// Whether a password may not repeat a character or follow a sequence for a run of four.
+    pub password_reject_repetition_and_sequence: bool,
     /// How long a browser session stays signed in, in seconds.
     pub session_ttl_secs: i32,
     /// How long a refresh token stays usable, in seconds.
@@ -810,6 +814,7 @@ impl Store {
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
             "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
                     mfa_enabled, mfa_policy, password_min_length, password_min_character_types,
+                    password_reject_user_info, password_reject_repetition_and_sequence,
                     session_ttl_secs, refresh_token_ttl_secs, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
@@ -829,6 +834,8 @@ impl Store {
         mfa_policy: Option<&str>,
         password_min_length: Option<i32>,
         password_min_character_types: Option<i32>,
+        password_reject_user_info: Option<bool>,
+        password_reject_repetition_and_sequence: Option<bool>,
         session_ttl_secs: Option<i32>,
         refresh_token_ttl_secs: Option<i32>,
     ) -> Result<SignInExperienceRow, StoreError> {
@@ -842,12 +849,16 @@ impl Store {
                  mfa_policy = COALESCE($5, mfa_policy),
                  password_min_length = COALESCE($6, password_min_length),
                  password_min_character_types = COALESCE($7, password_min_character_types),
-                 session_ttl_secs = COALESCE($8, session_ttl_secs),
-                 refresh_token_ttl_secs = COALESCE($9, refresh_token_ttl_secs),
+                 password_reject_user_info = COALESCE($8, password_reject_user_info),
+                 password_reject_repetition_and_sequence =
+                   COALESCE($9, password_reject_repetition_and_sequence),
+                 session_ttl_secs = COALESCE($10, session_ttl_secs),
+                 refresh_token_ttl_secs = COALESCE($11, refresh_token_ttl_secs),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
                        mfa_enabled, mfa_policy, password_min_length, password_min_character_types,
+                       password_reject_user_info, password_reject_repetition_and_sequence,
                        session_ttl_secs, refresh_token_ttl_secs, updated_at",
         )
         .bind(sign_up_enabled)
@@ -857,6 +868,8 @@ impl Store {
         .bind(mfa_policy)
         .bind(password_min_length)
         .bind(password_min_character_types)
+        .bind(password_reject_user_info)
+        .bind(password_reject_repetition_and_sequence)
         .bind(session_ttl_secs)
         .bind(refresh_token_ttl_secs)
         .fetch_one(&pool)
