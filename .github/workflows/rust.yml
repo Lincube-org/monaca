@@ -419,6 +419,9 @@ jobs:
         run: |
           .monaca/bin/monaca-server migrate
           .monaca/bin/monaca-server bootstrap
+          # A second run replays the org migration set on the orgs bootstrap just created, which
+          # is the path a deployment uses to upgrade schemas provisioned before a migration.
+          .monaca/bin/monaca-server migrate
 
       - name: Stage 0 — start the server and wait for /healthz
         run: |
