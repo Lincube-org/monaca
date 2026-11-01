@@ -64,6 +64,7 @@ pub async fn sign_in_experience(
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
+        "password_min_character_types": experience.password_min_character_types,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": crate::management::branding_json(&branding),
@@ -900,8 +901,16 @@ pub(crate) fn normalise_email(email: &str) -> Result<String, ApiError> {
     Ok(normalised)
 }
 
-/// Reject a password shorter than the tenant's policy.
-pub(crate) fn check_password(password: &str, min_length: i32) -> Result<(), ApiError> {
+/// Reject a password that does not meet the tenant's length and complexity policy.
+///
+/// The character classes are ASCII lowercase, ASCII uppercase, ASCII digits and everything else
+/// (symbols, whitespace and non-ASCII letters). A policy of 1 therefore accepts any password long
+/// enough, which is the pre-existing behaviour the column defaults to.
+pub(crate) fn check_password(
+    password: &str,
+    min_length: i32,
+    min_character_types: i32,
+) -> Result<(), ApiError> {
     let minimum = min_length.max(MIN_PASSWORD_LEN as i32) as usize;
     if password.chars().count() < minimum {
         return Err(ApiError::problem(
@@ -909,7 +918,35 @@ pub(crate) fn check_password(password: &str, min_length: i32) -> Result<(), ApiE
             format!("password must be at least {minimum} characters"),
         ));
     }
+    let required = min_character_types.max(1) as usize;
+    let present = password_character_types(password);
+    if present < required {
+        return Err(ApiError::problem(
+            kinds::WEAK_PASSWORD,
+            format!(
+                "password must use at least {required} character types \
+                 (lowercase, uppercase, digits, symbols)"
+            ),
+        ));
+    }
     Ok(())
+}
+
+/// How many of the four character classes the password uses.
+fn password_character_types(password: &str) -> usize {
+    let (mut lower, mut upper, mut digit, mut symbol) = (false, false, false, false);
+    for character in password.chars() {
+        if character.is_ascii_lowercase() {
+            lower = true;
+        } else if character.is_ascii_uppercase() {
+            upper = true;
+        } else if character.is_ascii_digit() {
+            digit = true;
+        } else {
+            symbol = true;
+        }
+    }
+    usize::from(lower) + usize::from(upper) + usize::from(digit) + usize::from(symbol)
 }
 
 /// The shortest and longest accepted username, in characters.
@@ -1113,7 +1150,11 @@ pub async fn sign_up_verify(
         ));
     }
     let email = normalise_email(&body.email)?;
-    check_password(&body.password, experience.password_min_length)?;
+    check_password(
+        &body.password,
+        experience.password_min_length,
+        experience.password_min_character_types,
+    )?;
     // A second registration for the same address is a conflict even with a valid code, because
     // the code proves the address, not the account's absence.
     if state
@@ -1477,7 +1518,11 @@ pub async fn password_reset(
         ));
     }
     let email = normalise_email(&body.email)?;
-    check_password(&body.password, experience.password_min_length)?;
+    check_password(
+        &body.password,
+        experience.password_min_length,
+        experience.password_min_character_types,
+    )?;
     take_verification_code(&state, &tenant, PURPOSE_PASSWORD_RESET, &email, &body.code).await?;
 
     let Some((account, _)) = state.store.account_by_email(&tenant, &email).await? else {

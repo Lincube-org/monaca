@@ -1252,6 +1252,7 @@ class MockStore {
       body.mfa_enabled === undefined &&
       body.mfa_policy === undefined &&
       body.password_min_length === undefined &&
+      body.password_min_character_types === undefined &&
       body.session_ttl_secs === undefined &&
       body.refresh_token_ttl_secs === undefined &&
       (body.branding === undefined || brandingPatchIsEmpty(body.branding))
@@ -1272,6 +1273,15 @@ class MockStore {
       !(body.password_min_length >= 8 && body.password_min_length <= 64)
     ) {
       throw new ApiError("password_min_length must be between 8 and 64", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (
+      body.password_min_character_types !== undefined &&
+      !(body.password_min_character_types >= 1 && body.password_min_character_types <= 4)
+    ) {
+      throw new ApiError("password_min_character_types must be between 1 and 4", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
@@ -1322,6 +1332,8 @@ class MockStore {
       mfa_policy: mfaPolicy,
       password_min_length:
         body.password_min_length ?? this.experience.password_min_length,
+      password_min_character_types:
+        body.password_min_character_types ?? this.experience.password_min_character_types,
       session_ttl_secs: body.session_ttl_secs ?? this.experience.session_ttl_secs,
       refresh_token_ttl_secs:
         body.refresh_token_ttl_secs ?? this.experience.refresh_token_ttl_secs,
@@ -1343,6 +1355,7 @@ class MockStore {
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
         password_min_length: updated.password_min_length,
+        password_min_character_types: updated.password_min_character_types,
         session_ttl_secs: updated.session_ttl_secs,
         refresh_token_ttl_secs: updated.refresh_token_ttl_secs,
         branding: { ...updated.branding },

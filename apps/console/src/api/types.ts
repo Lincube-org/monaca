@@ -253,6 +253,8 @@ export interface SignInExperience {
   mfa_policy: "user_controlled" | "mandatory";
   /** The shortest password every entrance accepts, 8–64 characters. */
   password_min_length: number;
+  /** How many character classes a password must use, 1–4. */
+  password_min_character_types: number;
   /** How long a browser session stays signed in, in seconds (3600–7776000). */
   session_ttl_secs: number;
   /** How long a refresh token stays usable, in seconds (3600–31536000). */
@@ -479,6 +481,7 @@ export interface UpdateSignInExperienceRequest {
   mfa_enabled?: boolean;
   mfa_policy?: "user_controlled" | "mandatory";
   password_min_length?: number;
+  password_min_character_types?: number;
   session_ttl_secs?: number;
   refresh_token_ttl_secs?: number;
   branding?: BrandingPatch;

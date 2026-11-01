@@ -380,6 +380,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "with Max-Age=3600 and its stored session expires at the same time; the code exchange mints a refresh token; " +
       "restoring the 30-day defaults succeeds",
   },
+  {
+    step: "39",
+    title: "password complexity",
+    assertion:
+      "PATCH /v1/sign-in-experience {password_min_character_types:3} is 200 (0 and 5 are 400) and the public read " +
+      "follows; an administrator's create and a self-service sign-up with a lowercase-only password are both 400 " +
+      "MONACA_WEAK_PASSWORD, while a password using three character types completes; restoring 1 accepts the " +
+      "lowercase-only password",
+  },
 ];
 
 interface StepResult {
@@ -7932,6 +7941,192 @@ async function sessionSettingsFlow(
   }
 }
 
+/**
+ * Step 39: the tenant's password complexity policy is enforced wherever a password is set.
+ *
+ * Like step 35, both entrances are exercised: the administrator's create proves the management API
+ * shares `check_password`, and the self-service sign-up proves the protocol does. A refused verify
+ * must not consume the mailed code, so the same code is reused for the accepted attempt.
+ */
+async function passwordComplexityFlow(
+  base: string,
+  adminToken: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const email = `complexity-${runId}@demo.localhost`;
+  const weakPassword = "lowercaseonly";
+  const strongPassword = "Lowercase1";
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const begin = async (): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `c-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-complexity-${runId}`,
+        nonce: `n-complexity-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  const setPolicy = (value: number): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ password_min_character_types: value }),
+    });
+
+  const createAdminAccount = (tag: string, password: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        email: `complexity-${tag}-${runId}@demo.localhost`,
+        display_name: "Complexity",
+        password,
+      }),
+    });
+
+  try {
+    for (const value of [0, 5]) {
+      checks.push([`a minimum of ${value} types is 400`, (await setPolicy(value)).status === 400]);
+    }
+
+    const raised = await setPolicy(3);
+    checks.push([
+      "PATCH raises the minimum to three character types",
+      raised.status === 200 &&
+        (raised.body as { password_min_character_types?: unknown })?.password_min_character_types ===
+          3,
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read carries the complexity policy",
+      publicRead.status === 200 &&
+        (publicRead.body as { password_min_character_types?: unknown })
+          ?.password_min_character_types === 3,
+    ]);
+
+    const weakAdmin = await createAdminAccount("weak", weakPassword);
+    checks.push([
+      "an administrator cannot create a lowercase-only password",
+      weakAdmin.status === 400 &&
+        (weakAdmin.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_WEAK_PASSWORD",
+    ]);
+
+    const strongAdmin = await createAdminAccount("strong", strongPassword);
+    checks.push(["an administrator's password at three types succeeds", strongAdmin.status === 201]);
+
+    const interaction = await begin();
+    if (interaction === undefined) return failComplexity("authorize did not open an interaction");
+    const requested = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-up`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      },
+    );
+    checks.push([
+      "sign-up requests a code",
+      requested.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+    const mail = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "sign_up" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const code = (mail.body as { payload?: { code?: unknown } } | undefined)?.payload?.code;
+    if (mail.status !== 200 || typeof code !== "string") {
+      return failComplexity(`internal/mail → ${mail.status} ${text(mail.body)}`);
+    }
+    checks.push(["the dev outbox carries the sign-up code", true]);
+
+    const weakSignUp = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-up/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, code, password: weakPassword }),
+      },
+    );
+    checks.push(["self-service sign-up refuses a lowercase-only password", weakSignUp.status === 400]);
+
+    const strongSignUp = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-up/verify`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, code, password: strongPassword }),
+      },
+    );
+    checks.push([
+      "a password at three character types completes sign-up",
+      strongSignUp.status === 200 &&
+        typeof (strongSignUp.body as { redirect_to?: unknown })?.redirect_to === "string",
+    ]);
+
+    const restored = await setPolicy(1);
+    checks.push([
+      "the minimum is restored to one type",
+      restored.status === 200 &&
+        (restored.body as { password_min_character_types?: unknown })
+          ?.password_min_character_types === 1,
+    ]);
+
+    const relaxed = await createAdminAccount("relaxed", weakPassword);
+    checks.push(["and the lowercase-only password is accepted again", relaxed.status === 201]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await setPolicy(1).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "39",
+    title: "password complexity",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: two 400s → three types → public echo → weak admin 400 → strong admin 201 → weak sign-up 400 → strong sign-up 200 → restored → relaxed 201`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+
+  function failComplexity(why: string): StepResult {
+    return {
+      step: "39",
+      title: "password complexity",
+      status: "fail",
+      ms: Math.round(performance.now() - t),
+      detail: why,
+    };
+  }
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -8199,6 +8394,7 @@ async function main(): Promise<number> {
   push(await brandingFlow(base, adminToken));
   push(await accountProfileFlow(base, adminToken));
   push(await sessionSettingsFlow(base, adminToken, parsed.consoleSecret));
+  push(await passwordComplexityFlow(base, adminToken, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

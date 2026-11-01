@@ -131,6 +131,8 @@ export const messages = {
     currentPassword: "Current password",
     newPassword: "New password",
     passwordHint: "At least {min} characters.",
+    passwordHintTypes:
+      "At least {min} characters using {types} of: lowercase letters, uppercase letters, digits and symbols.",
     changePassword: "Change password",
     changingPassword: "Changing",
     passwordChanged: "Your password was changed. Other browsers were signed out.",
@@ -254,6 +256,8 @@ export const messages = {
     usernameHint: "3-32 letters, digits, `_` or `-`. You can use it to sign in later.",
     password: "Password",
     passwordHint: "At least {min} characters.",
+    passwordHintTypes:
+      "At least {min} characters using {types} of: lowercase letters, uppercase letters, digits and symbols.",
     submit: "Create account",
     submitting: "Creating the account",
     changeEmail: "Use a different email",
@@ -265,6 +269,8 @@ export const messages = {
     sending: "Sending the code",
     password: "New password",
     passwordHint: "At least {min} characters.",
+    passwordHintTypes:
+      "At least {min} characters using {types} of: lowercase letters, uppercase letters, digits and symbols.",
     submit: "Set a new password",
     submitting: "Setting the password",
     changeEmail: "Use a different email",
@@ -275,7 +281,7 @@ export const messages = {
     identifierRequired: "Enter your email address or username.",
     usernameInvalid: "Use 3-32 letters, digits, `_` or `-` for the username.",
     usernameTaken: "That username is already taken. Choose another.",
-    weakPassword: "Use a password of at least 8 characters.",
+    weakPassword: "Use a password that meets the tenant's password policy.",
     invalidCode: "That code is not valid or has expired. Request a new one.",
     tooManyAttempts: "Too many attempts. Wait a moment, then request a new code.",
     consentFailed: "Could not record your decision. Try again.",

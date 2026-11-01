@@ -44,6 +44,7 @@ import {
 } from "@/api/social";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
+import { passwordMeetsPolicy } from "@/lib/password-policy";
 
 /**
  * Account centre, reached at `/account/{tenant}`.
@@ -107,6 +108,10 @@ const passwordSubmitError = ref<string | null>(null);
 const passwordNotice = ref<MessageKey | null>(null);
 /** The tenant's minimum, read from the public switches; the server enforces the same value. */
 const passwordMinLength = ref(8);
+const passwordMinTypes = ref(1);
+const passwordPolicyHint = computed<MessageKey>(() =>
+  passwordMinTypes.value > 1 ? "account.passwordHintTypes" : "account.passwordHint",
+);
 
 const sessions = ref<AccountSession[] | null>(null);
 const sessionsBusy = ref(false);
@@ -222,7 +227,9 @@ async function load(): Promise<void> {
     }
     socialConnectors.value = await listSocialConnectors(tenant.value);
     try {
-      passwordMinLength.value = (await getSignInExperience(tenant.value)).password_min_length;
+      const switches = await getSignInExperience(tenant.value);
+      passwordMinLength.value = switches.password_min_length;
+      passwordMinTypes.value = switches.password_min_character_types;
     } catch {
       // A failed read must not block the page; the server still enforces the real minimum.
     }
@@ -454,7 +461,7 @@ async function submitPassword(): Promise<void> {
     passwordFieldError.value = "errors.newPasswordRequired";
     return;
   }
-  if ([...newPassword.value].length < passwordMinLength.value) {
+  if (!passwordMeetsPolicy(newPassword.value, passwordMinLength.value, passwordMinTypes.value)) {
     passwordFieldError.value = "errors.weakPassword";
     return;
   }
@@ -985,7 +992,7 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
                 autocomplete="new-password"
                 :invalid="passwordFieldError === 'errors.newPasswordRequired' || passwordFieldError === 'errors.weakPassword'"
               />
-              <span class="text-[11.5px] text-ink-faint">{{ t("account.passwordHint", { min: passwordMinLength }) }}</span>
+              <span class="text-[11.5px] text-ink-faint">{{ t(passwordPolicyHint, { min: passwordMinLength, types: passwordMinTypes }) }}</span>
             </div>
             <p
               v-if="passwordFieldError || passwordSubmitError"

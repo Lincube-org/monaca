@@ -556,11 +556,19 @@ export const messages = {
     emailCodeFieldHint: "Mails a one-time code or link. It still works while password sign-in is off.",
     invalidMethods: "Keep password sign-in or email code sign-in enabled.",
     passwordPolicy: "Password policy",
-    passwordPolicyHint: "The shortest password accepted wherever a password is set.",
+    passwordPolicyHint: "The length and complexity every new password must meet.",
     passwordMinLength: "Minimum length",
     passwordMinLengthHint:
       "Between 8 and 64 characters. Applies to sign-up, reset, the account centre and administrator-created accounts.",
     invalidPasswordMinLength: "The minimum length must be between 8 and 64.",
+    passwordMinTypes: "Minimum character types",
+    passwordMinTypesHint:
+      "How many of lowercase letters, uppercase letters, digits and symbols a password must use. 1 accepts any password that is long enough.",
+    passwordMinTypesAny: "1 — any characters",
+    passwordMinTypesTwo: "2 — two kinds",
+    passwordMinTypesThree: "3 — three kinds",
+    passwordMinTypesFour: "4 — all four kinds",
+    invalidPasswordMinTypes: "The minimum character types must be between 1 and 4.",
     sessions: "Sessions and tokens",
     sessionsHint:
       "How long a browser stays signed in and how long its refresh tokens can be redeemed. The deployment's own maximum still applies.",

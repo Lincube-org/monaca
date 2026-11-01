@@ -1071,6 +1071,7 @@ describe("sign-in experience", () => {
     expect(experience.mfa_enabled).toBe(true);
     expect(experience.mfa_policy).toBe("user_controlled");
     expect(experience.password_min_length).toBe(8);
+    expect(experience.password_min_character_types).toBe(1);
     expect(experience.session_ttl_secs).toBe(2_592_000);
     expect(experience.refresh_token_ttl_secs).toBe(2_592_000);
     expect(experience.branding).toEqual({
@@ -1102,6 +1103,7 @@ describe("sign-in experience", () => {
       mfa_enabled: true,
       mfa_policy: "user_controlled",
       password_min_length: 8,
+      password_min_character_types: 1,
       session_ttl_secs: 2_592_000,
       refresh_token_ttl_secs: 2_592_000,
       branding: {
@@ -1195,6 +1197,27 @@ describe("sign-in experience", () => {
     expect(audit.items[0]?.payload).toMatchObject({ password_min_length: 12 });
 
     await mockApi.updateSignInExperience({ password_min_length: 8 });
+  });
+
+  it("sets the minimum character types and refuses values outside 1–4", async () => {
+    for (const value of [0, 5]) {
+      const failure = await mockApi
+        .updateSignInExperience({ password_min_character_types: value })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    const raised = await mockApi.updateSignInExperience({ password_min_character_types: 3 });
+    expect(raised.password_min_character_types).toBe(3);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({ password_min_character_types: 3 });
+
+    await mockApi.updateSignInExperience({ password_min_character_types: 1 });
   });
 
   it("sets and clears branding fields and validates their shape", async () => {

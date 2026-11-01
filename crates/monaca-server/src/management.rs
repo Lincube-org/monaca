@@ -286,7 +286,11 @@ pub async fn create_account(
         ));
     }
     let experience = state.store.sign_in_experience(&tenant).await?;
-    crate::protocol::check_password(&body.password, experience.password_min_length)?;
+    crate::protocol::check_password(
+        &body.password,
+        experience.password_min_length,
+        experience.password_min_character_types,
+    )?;
     let phc = hash_password(body.password.clone(), state.argon)
         .await
         .map_err(ApiError::internal)?;
@@ -558,6 +562,8 @@ pub struct UpdateSignInExperienceBody {
     pub mfa_policy: Option<String>,
     /// The shortest password every entrance accepts, 8–64 characters.
     pub password_min_length: Option<i32>,
+    /// How many character classes a password must use, 1–4.
+    pub password_min_character_types: Option<i32>,
     /// How long a browser session stays signed in, 3600–7776000 seconds.
     pub session_ttl_secs: Option<i32>,
     /// How long a refresh token stays usable, 3600–31536000 seconds.
@@ -594,6 +600,7 @@ pub async fn update_sign_in_experience(
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
         && body.password_min_length.is_none()
+        && body.password_min_character_types.is_none()
         && body.session_ttl_secs.is_none()
         && body.refresh_token_ttl_secs.is_none()
         && body.branding.is_none()
@@ -617,6 +624,14 @@ pub async fn update_sign_in_experience(
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "password_min_length must be between 8 and 64",
+        ));
+    }
+    if let Some(min_types) = body.password_min_character_types
+        && !(1..=4).contains(&min_types)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "password_min_character_types must be between 1 and 4",
         ));
     }
     if let Some(branding) = &body.branding {
@@ -676,6 +691,7 @@ pub async fn update_sign_in_experience(
             body.mfa_enabled,
             body.mfa_policy.as_deref(),
             body.password_min_length,
+            body.password_min_character_types,
             body.session_ttl_secs,
             body.refresh_token_ttl_secs,
         )
@@ -724,6 +740,7 @@ pub async fn update_sign_in_experience(
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
             "password_min_length": experience.password_min_length,
+            "password_min_character_types": experience.password_min_character_types,
             "session_ttl_secs": experience.session_ttl_secs,
             "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
             "branding": branding_json(&branding),
@@ -744,6 +761,7 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
+        "password_min_character_types": experience.password_min_character_types,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": branding_json(branding),

@@ -52,6 +52,7 @@ import { findSsoConnector, ssoSignInUrl, type SsoConnector } from "@/api/sso";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 import { brandStyle } from "@/lib/branding";
+import { passwordMeetsPolicy } from "@/lib/password-policy";
 
 /**
  * Hosted sign-in.
@@ -206,6 +207,7 @@ const emailCodeAllowed = computed(() => experience.value?.email_code_sign_in_ena
 const signUpAllowed = computed(() => experience.value?.sign_up_enabled ?? true);
 /** The tenant's policy, defaulting to the contract's minimum when the read failed. */
 const passwordMinLength = computed(() => experience.value?.password_min_length ?? 8);
+const passwordMinTypes = computed(() => experience.value?.password_min_character_types ?? 1);
 
 const passwordInput = ref<InstanceType<typeof Input> | null>(null);
 const emailInput = ref<InstanceType<typeof Input> | null>(null);
@@ -276,9 +278,12 @@ const modeNote = computed<MessageKey>(() => {
 const newPasswordLabel = computed<MessageKey>(() =>
   mode.value === "reset" ? "reset.password" : "signUp.password",
 );
-const newPasswordHint = computed<MessageKey>(() =>
-  mode.value === "reset" ? "reset.passwordHint" : "signUp.passwordHint",
-);
+const newPasswordHint = computed<MessageKey>(() => {
+  if (mode.value === "reset") {
+    return passwordMinTypes.value > 1 ? "reset.passwordHintTypes" : "reset.passwordHint";
+  }
+  return passwordMinTypes.value > 1 ? "signUp.passwordHintTypes" : "signUp.passwordHint";
+});
 const changeEmailKey = computed<MessageKey>(() => {
   switch (mode.value) {
     case "signup":
@@ -878,7 +883,10 @@ async function verifyCode(): Promise<void> {
     fieldError.value = "errors.codeRequired";
     return;
   }
-  if ((mode.value === "signup" || mode.value === "reset") && [...newPassword.value].length < passwordMinLength.value) {
+  if (
+    (mode.value === "signup" || mode.value === "reset") &&
+    !passwordMeetsPolicy(newPassword.value, passwordMinLength.value, passwordMinTypes.value)
+  ) {
     fieldError.value = "errors.weakPassword";
     return;
   }
@@ -1407,7 +1415,7 @@ async function cancel(): Promise<void> {
                   <Eye v-else class="size-3.5" aria-hidden="true" />
                 </button>
               </div>
-              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t(newPasswordHint, { min: passwordMinLength }) }}</p>
+              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t(newPasswordHint, { min: passwordMinLength, types: passwordMinTypes }) }}</p>
             </div>
 
             <div v-if="awaitingCode && mode === 'signup'" class="flex flex-col gap-1.5">

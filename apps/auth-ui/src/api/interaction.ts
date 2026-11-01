@@ -71,6 +71,8 @@ export interface SignInExperience {
   mfa_policy: "user_controlled" | "mandatory";
   /** The tenant's shortest accepted password, 8–64 characters. */
   password_min_length: number;
+  /** How many character classes (lowercase, uppercase, digits, symbols) a password must use. */
+  password_min_character_types: number;
   /** The optional hosted-page look. */
   branding: Branding;
 }

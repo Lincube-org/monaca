@@ -54,6 +54,7 @@ const emailCode = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const passwordMinLength = ref(8);
+const passwordMinTypes = ref(1);
 /** Session and refresh-token lifetimes are stored in seconds but edited in whole days. */
 const sessionDays = ref(30);
 const refreshDays = ref(30);
@@ -99,28 +100,47 @@ function storedDays(secs: number, maxDays: number): number {
   return Math.min(maxDays, Math.max(SESSION_MIN_DAYS, Math.round(secs / 86_400)));
 }
 
-function sameSwitches(
-  value: SignInExperience,
-  a: boolean,
-  b: boolean,
-  c: boolean,
-  mfa: boolean,
-  policy: "user_controlled" | "mandatory",
-  minLength: number,
-  session: number,
-  refresh: number,
-  branding: Branding,
-): boolean {
+/** Every value the form can change, so the comparison and the save read one object. */
+interface SwitchForm {
+  signUp: boolean;
+  password: boolean;
+  emailCode: boolean;
+  mfaEnabled: boolean;
+  mfaPolicy: "user_controlled" | "mandatory";
+  passwordMinLength: number;
+  passwordMinTypes: number;
+  sessionDays: number;
+  refreshDays: number;
+  branding: Branding;
+}
+
+function formValues(): SwitchForm {
+  return {
+    signUp: signUp.value,
+    password: password.value,
+    emailCode: emailCode.value,
+    mfaEnabled: mfaEnabled.value,
+    mfaPolicy: mfaPolicy.value,
+    passwordMinLength: passwordMinLength.value,
+    passwordMinTypes: passwordMinTypes.value,
+    sessionDays: sessionDays.value,
+    refreshDays: refreshDays.value,
+    branding: brandingValues(),
+  };
+}
+
+function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
   return (
-    value.sign_up_enabled === a &&
-    value.password_sign_in_enabled === b &&
-    value.email_code_sign_in_enabled === c &&
-    value.mfa_enabled === mfa &&
-    value.mfa_policy === policy &&
-    value.password_min_length === minLength &&
-    storedDays(value.session_ttl_secs, SESSION_MAX_DAYS) === session &&
-    storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS) === refresh &&
-    sameBranding(value.branding, branding)
+    value.sign_up_enabled === form.signUp &&
+    value.password_sign_in_enabled === form.password &&
+    value.email_code_sign_in_enabled === form.emailCode &&
+    value.mfa_enabled === form.mfaEnabled &&
+    value.mfa_policy === form.mfaPolicy &&
+    value.password_min_length === form.passwordMinLength &&
+    value.password_min_character_types === form.passwordMinTypes &&
+    storedDays(value.session_ttl_secs, SESSION_MAX_DAYS) === form.sessionDays &&
+    storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS) === form.refreshDays &&
+    sameBranding(value.branding, form.branding)
   );
 }
 
@@ -132,6 +152,7 @@ function adopt(value: SignInExperience): void {
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
   passwordMinLength.value = value.password_min_length;
+  passwordMinTypes.value = value.password_min_character_types;
   sessionDays.value = storedDays(value.session_ttl_secs, SESSION_MAX_DAYS);
   refreshDays.value = storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS);
   brandName.value = value.branding.display_name ?? "";
@@ -152,8 +173,9 @@ watch(
   (next, previous) => {
     if (!next) return;
     const base = previous ?? null;
-    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, sessionDays.value, refreshDays.value, brandingValues());
-    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, sessionDays.value, refreshDays.value, brandingValues());
+    const form = formValues();
+    const matchesNext = sameSwitches(next, form);
+    const matchesBase = base !== null && sameSwitches(base, form);
     if (matchesNext || !matchesBase) adopt(next);
   },
   { immediate: true },
@@ -162,7 +184,7 @@ watch(
 const dirty = computed(() => {
   const base = baseline.value;
   if (!base) return false;
-  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, sessionDays.value, refreshDays.value, brandingValues());
+  return !sameSwitches(base, formValues());
 });
 
 watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl], () => (formError.value = null));
@@ -212,6 +234,11 @@ function setPasswordMinLength(value: string | number): void {
   formError.value = null;
 }
 
+function setPasswordMinTypes(value: string): void {
+  passwordMinTypes.value = Number.parseInt(value, 10) || 0;
+  formError.value = null;
+}
+
 function setDays(field: "session" | "refresh", value: string | number): void {
   const parsed = Number.parseInt(String(value), 10);
   const next = Number.isNaN(parsed) ? 0 : parsed;
@@ -235,6 +262,10 @@ async function save(): Promise<void> {
   }
   if (passwordMinLength.value < 8 || passwordMinLength.value > 64) {
     formError.value = t("signInExperience.invalidPasswordMinLength");
+    return;
+  }
+  if (passwordMinTypes.value < 1 || passwordMinTypes.value > 4) {
+    formError.value = t("signInExperience.invalidPasswordMinTypes");
     return;
   }
   if (sessionDays.value < SESSION_MIN_DAYS || sessionDays.value > SESSION_MAX_DAYS) {
@@ -269,6 +300,9 @@ async function save(): Promise<void> {
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
   if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
+  if (passwordMinTypes.value !== base.password_min_character_types) {
+    body.password_min_character_types = passwordMinTypes.value;
+  }
   if (storedDays(base.session_ttl_secs, SESSION_MAX_DAYS) !== sessionDays.value) {
     body.session_ttl_secs = sessionDays.value * 86_400;
   }
@@ -528,6 +562,30 @@ function formatStamp(at: string): string {
               <p v-if="passwordMinLength < 8 || passwordMinLength > 64" class="text-[11.5px] leading-snug text-deny">
                 {{ t('signInExperience.invalidPasswordMinLength') }}
               </p>
+
+              <Separator />
+
+              <div class="flex flex-col gap-1.5">
+                <Label for="password-min-types">{{ t('signInExperience.passwordMinTypes') }}</Label>
+                <NativeSelect
+                  id="password-min-types"
+                  :model-value="String(passwordMinTypes)"
+                  :disabled="update.isPending.value"
+                  class="w-[220px]"
+                  @update:model-value="(value: string) => setPasswordMinTypes(value)"
+                >
+                  <option value="1">{{ t('signInExperience.passwordMinTypesAny') }}</option>
+                  <option value="2">{{ t('signInExperience.passwordMinTypesTwo') }}</option>
+                  <option value="3">{{ t('signInExperience.passwordMinTypesThree') }}</option>
+                  <option value="4">{{ t('signInExperience.passwordMinTypesFour') }}</option>
+                </NativeSelect>
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.passwordMinTypesHint') }}
+                </p>
+                <p v-if="passwordMinTypes < 1 || passwordMinTypes > 4" class="text-[11.5px] leading-snug text-deny">
+                  {{ t('signInExperience.invalidPasswordMinTypes') }}
+                </p>
+              </div>
             </CardContent>
           </Card>
 

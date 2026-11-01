@@ -455,7 +455,11 @@ pub async fn change_password(
         ));
     }
     let experience = state.store.sign_in_experience(&tenant).await?;
-    check_password(&body.new_password, experience.password_min_length)?;
+    check_password(
+        &body.new_password,
+        experience.password_min_length,
+        experience.password_min_character_types,
+    )?;
 
     let phc = hash_password(body.new_password.clone(), state.argon)
         .await
