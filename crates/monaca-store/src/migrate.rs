@@ -149,6 +149,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "tenant branding: display name, logo, primary colour and legal links (M1)",
         include_str!("../migrations/tenant_22.sql"),
     ),
+    (
+        23,
+        "tenant session and refresh-token lifetimes (M1)",
+        include_str!("../migrations/tenant_23.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

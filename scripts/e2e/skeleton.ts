@@ -371,6 +371,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "is 400; a username another account holds is 409 MONACA_USERNAME_TAKEN; a state-only patch still suspends and " +
       "reactivates",
   },
+  {
+    step: "38",
+    title: "session lifetimes",
+    assertion:
+      "PATCH /v1/sign-in-experience {session_ttl_secs,refresh_token_ttl_secs} outside their ranges is 400; a one-hour " +
+      "session and a two-hour refresh token are 200 and the public read follows; the next sign-in sets an SSO cookie " +
+      "with Max-Age=3600 and its stored session expires at the same time; the code exchange mints a refresh token; " +
+      "restoring the 30-day defaults succeeds",
+  },
 ];
 
 interface StepResult {
@@ -7718,6 +7727,211 @@ async function accountProfileFlow(base: string, adminToken: string): Promise<Ste
   }
 }
 
+/**
+ * Step 38: a tenant tunes how long a browser stays signed in and how long refresh tokens live.
+ *
+ * The session lifetime is observable on the wire: the SSO cookie's `Max-Age` and the row listed by
+ * the account centre must both carry the tenant value. The code exchange then mints a refresh token
+ * under the tuned value; its exact expiry is not exposed by the API, so the assertion is that the
+ * token is still issued rather than that a specific timestamp is stored.
+ */
+async function sessionSettingsFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const email = `session-settings-${runId}@demo.localhost`;
+  const password = `pw-${runId}-settings`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const lifetimes = (body: unknown) =>
+    body as { session_ttl_secs?: unknown; refresh_token_ttl_secs?: unknown };
+
+  const begin = async (): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `s-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email offline_access",
+        state: `st-settings-${runId}`,
+        nonce: `n-settings-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  try {
+    for (const body of [
+      { session_ttl_secs: 3_599 },
+      { session_ttl_secs: 7_776_001 },
+      { refresh_token_ttl_secs: 3_599 },
+      { refresh_token_ttl_secs: 31_536_001 },
+    ]) {
+      const refused = await call(`${base}/v1/sign-in-experience`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(body),
+      });
+      checks.push([
+        `a ${Object.keys(body)[0]} outside its range is 400`,
+        refused.status === 400,
+      ]);
+    }
+
+    const tuned = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ session_ttl_secs: 3_600, refresh_token_ttl_secs: 7_200 }),
+    });
+    checks.push([
+      "PATCH writes a one-hour session and a two-hour refresh token",
+      tuned.status === 200 &&
+        lifetimes(tuned.body).session_ttl_secs === 3_600 &&
+        lifetimes(tuned.body).refresh_token_ttl_secs === 7_200,
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read follows both lifetimes",
+      publicRead.status === 200 &&
+        lifetimes(publicRead.body).session_ttl_secs === 3_600 &&
+        lifetimes(publicRead.body).refresh_token_ttl_secs === 7_200,
+    ]);
+
+    // An account that is already a member, so the console interaction completes.
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Session settings", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return failSettings(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push(["the run's account joined acme", member.status === 201]);
+
+    const interaction = await begin();
+    if (interaction === undefined) return failSettings("authorize did not open an interaction");
+    const signedIn = await call(
+      `${base}/t/${TENANT}/interaction/${interaction.interaction}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      },
+    );
+    const setCookie = signedIn.headers.get("set-cookie") ?? "";
+    const cookie = /monaca_session=([0-9a-f-]{36})/.exec(setCookie)?.[1];
+    checks.push([
+      "the SSO cookie carries the tenant's Max-Age",
+      signedIn.status === 200 && cookie !== undefined && setCookie.includes("Max-Age=3600"),
+    ]);
+
+    if (cookie !== undefined) {
+      const sessions = await call(`${base}/t/${TENANT}/account/sessions`, {
+        headers: { cookie: `monaca_session=${cookie}` },
+      });
+      const items =
+        (sessions.body as { items?: { current?: unknown; expires_at?: unknown }[] })?.items ?? [];
+      const current = items.find((item) => item.current === true);
+      const expiresAt =
+        typeof current?.expires_at === "string" ? Date.parse(current.expires_at) - Date.now() : NaN;
+      checks.push([
+        "the stored session expires with the same value",
+        !Number.isNaN(expiresAt) && expiresAt > 3_500_000 && expiresAt <= 3_600_001,
+      ]);
+    } else {
+      checks.push(["the stored session expires with the same value", false]);
+    }
+
+    const redirectTo = (signedIn.body as { redirect_to?: unknown })?.redirect_to;
+    const code =
+      typeof redirectTo === "string" ? new URL(redirectTo).searchParams.get("code") ?? "" : "";
+    const tokens = await tokenCall(
+      base,
+      {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        client_id: "monaca-console",
+        code_verifier: interaction.verifier,
+      },
+      basic,
+    );
+    checks.push([
+      "the exchange mints a refresh token under the tuned lifetime",
+      tokens.status === 200 &&
+        typeof (tokens.body as { refresh_token?: unknown })?.refresh_token === "string",
+    ]);
+
+    const restored = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ session_ttl_secs: 2_592_000, refresh_token_ttl_secs: 2_592_000 }),
+    });
+    checks.push([
+      "the 30-day defaults are restored",
+      restored.status === 200 &&
+        lifetimes(restored.body).session_ttl_secs === 2_592_000 &&
+        lifetimes(restored.body).refresh_token_ttl_secs === 2_592_000,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ session_ttl_secs: 2_592_000, refresh_token_ttl_secs: 2_592_000 }),
+    }).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "38",
+    title: "session lifetimes",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: four 400s → one-hour session/two-hour refresh → public echo → cookie Max-Age → session row → refresh token → restored`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+
+  function failSettings(why: string): StepResult {
+    return {
+      step: "38",
+      title: "session lifetimes",
+      status: "fail",
+      ms: Math.round(performance.now() - t),
+      detail: why,
+    };
+  }
+}
+
 /** Decodes the base64url payloads this walk-through mints or reads back. */
 function base64UrlDecode(value: string): Uint8Array {
   const normalised = value.replaceAll("-", "+").replaceAll("_", "/");
@@ -7984,6 +8198,7 @@ async function main(): Promise<number> {
   push(await passwordPolicyFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await brandingFlow(base, adminToken));
   push(await accountProfileFlow(base, adminToken));
+  push(await sessionSettingsFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

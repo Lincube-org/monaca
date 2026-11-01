@@ -1252,6 +1252,8 @@ class MockStore {
       body.mfa_enabled === undefined &&
       body.mfa_policy === undefined &&
       body.password_min_length === undefined &&
+      body.session_ttl_secs === undefined &&
+      body.refresh_token_ttl_secs === undefined &&
       (body.branding === undefined || brandingPatchIsEmpty(body.branding))
     ) {
       throw new ApiError("at least one switch must be present", {
@@ -1275,6 +1277,17 @@ class MockStore {
       });
     }
     if (body.branding !== undefined) checkBrandingPatch(body.branding);
+    for (const [field, value, min, max] of [
+      ["session_ttl_secs", body.session_ttl_secs, 3_600, 7_776_000],
+      ["refresh_token_ttl_secs", body.refresh_token_ttl_secs, 3_600, 31_536_000],
+    ] as const) {
+      if (value !== undefined && !(value >= min && value <= max)) {
+        throw new ApiError(`${field} must be between ${min} and ${max}`, {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
 
     const password = body.password_sign_in_enabled ?? this.experience.password_sign_in_enabled;
     const emailCode = body.email_code_sign_in_enabled ?? this.experience.email_code_sign_in_enabled;
@@ -1309,6 +1322,9 @@ class MockStore {
       mfa_policy: mfaPolicy,
       password_min_length:
         body.password_min_length ?? this.experience.password_min_length,
+      session_ttl_secs: body.session_ttl_secs ?? this.experience.session_ttl_secs,
+      refresh_token_ttl_secs:
+        body.refresh_token_ttl_secs ?? this.experience.refresh_token_ttl_secs,
       branding: { ...this.branding },
       updated_at: new Date().toISOString(),
     };
@@ -1327,6 +1343,8 @@ class MockStore {
         mfa_enabled: updated.mfa_enabled,
         mfa_policy: updated.mfa_policy,
         password_min_length: updated.password_min_length,
+        session_ttl_secs: updated.session_ttl_secs,
+        refresh_token_ttl_secs: updated.refresh_token_ttl_secs,
         branding: { ...updated.branding },
       },
     });

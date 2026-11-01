@@ -54,6 +54,13 @@ const emailCode = ref(true);
 const mfaEnabled = ref(true);
 const mfaPolicy = ref<"user_controlled" | "mandatory">("user_controlled");
 const passwordMinLength = ref(8);
+/** Session and refresh-token lifetimes are stored in seconds but edited in whole days. */
+const sessionDays = ref(30);
+const refreshDays = ref(30);
+const SESSION_MIN_DAYS = 1;
+const SESSION_MAX_DAYS = 90;
+const REFRESH_MIN_DAYS = 1;
+const REFRESH_MAX_DAYS = 365;
 /** Branding is edited as five strings; empty means "use the built-in look". */
 const brandName = ref("");
 const logoUrl = ref("");
@@ -87,6 +94,11 @@ function brandingValues(): Branding {
   };
 }
 
+/** The day count the form shows for a stored duration, clamped to the editable range. */
+function storedDays(secs: number, maxDays: number): number {
+  return Math.min(maxDays, Math.max(SESSION_MIN_DAYS, Math.round(secs / 86_400)));
+}
+
 function sameSwitches(
   value: SignInExperience,
   a: boolean,
@@ -95,6 +107,8 @@ function sameSwitches(
   mfa: boolean,
   policy: "user_controlled" | "mandatory",
   minLength: number,
+  session: number,
+  refresh: number,
   branding: Branding,
 ): boolean {
   return (
@@ -104,6 +118,8 @@ function sameSwitches(
     value.mfa_enabled === mfa &&
     value.mfa_policy === policy &&
     value.password_min_length === minLength &&
+    storedDays(value.session_ttl_secs, SESSION_MAX_DAYS) === session &&
+    storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS) === refresh &&
     sameBranding(value.branding, branding)
   );
 }
@@ -116,6 +132,8 @@ function adopt(value: SignInExperience): void {
   mfaEnabled.value = value.mfa_enabled;
   mfaPolicy.value = value.mfa_policy;
   passwordMinLength.value = value.password_min_length;
+  sessionDays.value = storedDays(value.session_ttl_secs, SESSION_MAX_DAYS);
+  refreshDays.value = storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS);
   brandName.value = value.branding.display_name ?? "";
   logoUrl.value = value.branding.logo_url ?? "";
   primaryColor.value = value.branding.primary_color ?? "";
@@ -134,8 +152,8 @@ watch(
   (next, previous) => {
     if (!next) return;
     const base = previous ?? null;
-    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, brandingValues());
-    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, brandingValues());
+    const matchesNext = sameSwitches(next, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, sessionDays.value, refreshDays.value, brandingValues());
+    const matchesBase = base !== null && sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, sessionDays.value, refreshDays.value, brandingValues());
     if (matchesNext || !matchesBase) adopt(next);
   },
   { immediate: true },
@@ -144,7 +162,7 @@ watch(
 const dirty = computed(() => {
   const base = baseline.value;
   if (!base) return false;
-  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, brandingValues());
+  return !sameSwitches(base, signUp.value, password.value, emailCode.value, mfaEnabled.value, mfaPolicy.value, passwordMinLength.value, sessionDays.value, refreshDays.value, brandingValues());
 });
 
 watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl], () => (formError.value = null));
@@ -194,6 +212,14 @@ function setPasswordMinLength(value: string | number): void {
   formError.value = null;
 }
 
+function setDays(field: "session" | "refresh", value: string | number): void {
+  const parsed = Number.parseInt(String(value), 10);
+  const next = Number.isNaN(parsed) ? 0 : parsed;
+  if (field === "session") sessionDays.value = next;
+  else refreshDays.value = next;
+  formError.value = null;
+}
+
 function discard(): void {
   const current = experience.data.value;
   if (current) adopt(current);
@@ -209,6 +235,14 @@ async function save(): Promise<void> {
   }
   if (passwordMinLength.value < 8 || passwordMinLength.value > 64) {
     formError.value = t("signInExperience.invalidPasswordMinLength");
+    return;
+  }
+  if (sessionDays.value < SESSION_MIN_DAYS || sessionDays.value > SESSION_MAX_DAYS) {
+    formError.value = t("signInExperience.invalidSessionTtl");
+    return;
+  }
+  if (refreshDays.value < REFRESH_MIN_DAYS || refreshDays.value > REFRESH_MAX_DAYS) {
+    formError.value = t("signInExperience.invalidRefreshTtl");
     return;
   }
   if (brandName.value.trim().length > 64) {
@@ -235,6 +269,12 @@ async function save(): Promise<void> {
   if (mfaEnabled.value !== base.mfa_enabled) body.mfa_enabled = mfaEnabled.value;
   if (mfaPolicy.value !== base.mfa_policy) body.mfa_policy = mfaPolicy.value;
   if (passwordMinLength.value !== base.password_min_length) body.password_min_length = passwordMinLength.value;
+  if (storedDays(base.session_ttl_secs, SESSION_MAX_DAYS) !== sessionDays.value) {
+    body.session_ttl_secs = sessionDays.value * 86_400;
+  }
+  if (storedDays(base.refresh_token_ttl_secs, REFRESH_MAX_DAYS) !== refreshDays.value) {
+    body.refresh_token_ttl_secs = refreshDays.value * 86_400;
+  }
   if (!sameBranding(base.branding, brandingValues())) {
     body.branding = {
       display_name: brandName.value.trim(),
@@ -488,6 +528,61 @@ function formatStamp(at: string): string {
               <p v-if="passwordMinLength < 8 || passwordMinLength > 64" class="text-[11.5px] leading-snug text-deny">
                 {{ t('signInExperience.invalidPasswordMinLength') }}
               </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{{ t('signInExperience.sessions') }}</CardTitle>
+              <CardDescription>{{ t('signInExperience.sessionsHint') }}</CardDescription>
+            </CardHeader>
+            <CardContent class="grid grid-cols-2 gap-3">
+              <div class="flex flex-col gap-1.5">
+                <Label for="session-ttl">{{ t('signInExperience.sessionTtl') }}</Label>
+                <Input
+                  id="session-ttl"
+                  type="number"
+                  :min="SESSION_MIN_DAYS"
+                  :max="SESSION_MAX_DAYS"
+                  :model-value="sessionDays"
+                  :invalid="sessionDays < SESSION_MIN_DAYS || sessionDays > SESSION_MAX_DAYS"
+                  :disabled="update.isPending.value"
+                  class="w-[120px]"
+                  @update:model-value="(value: string | number) => setDays('session', value)"
+                />
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.sessionTtlHint') }}
+                </p>
+                <p
+                  v-if="sessionDays < SESSION_MIN_DAYS || sessionDays > SESSION_MAX_DAYS"
+                  class="text-[11.5px] leading-snug text-deny"
+                >
+                  {{ t('signInExperience.invalidSessionTtl') }}
+                </p>
+              </div>
+              <div class="flex flex-col gap-1.5">
+                <Label for="refresh-ttl">{{ t('signInExperience.refreshTtl') }}</Label>
+                <Input
+                  id="refresh-ttl"
+                  type="number"
+                  :min="REFRESH_MIN_DAYS"
+                  :max="REFRESH_MAX_DAYS"
+                  :model-value="refreshDays"
+                  :invalid="refreshDays < REFRESH_MIN_DAYS || refreshDays > REFRESH_MAX_DAYS"
+                  :disabled="update.isPending.value"
+                  class="w-[120px]"
+                  @update:model-value="(value: string | number) => setDays('refresh', value)"
+                />
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.refreshTtlHint') }}
+                </p>
+                <p
+                  v-if="refreshDays < REFRESH_MIN_DAYS || refreshDays > REFRESH_MAX_DAYS"
+                  class="text-[11.5px] leading-snug text-deny"
+                >
+                  {{ t('signInExperience.invalidRefreshTtl') }}
+                </p>
+              </div>
             </CardContent>
           </Card>
 

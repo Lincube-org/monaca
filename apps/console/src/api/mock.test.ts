@@ -1071,6 +1071,8 @@ describe("sign-in experience", () => {
     expect(experience.mfa_enabled).toBe(true);
     expect(experience.mfa_policy).toBe("user_controlled");
     expect(experience.password_min_length).toBe(8);
+    expect(experience.session_ttl_secs).toBe(2_592_000);
+    expect(experience.refresh_token_ttl_secs).toBe(2_592_000);
     expect(experience.branding).toEqual({
       display_name: null,
       logo_url: null,
@@ -1100,6 +1102,8 @@ describe("sign-in experience", () => {
       mfa_enabled: true,
       mfa_policy: "user_controlled",
       password_min_length: 8,
+      session_ttl_secs: 2_592_000,
+      refresh_token_ttl_secs: 2_592_000,
       branding: {
         display_name: null,
         logo_url: null,
@@ -1250,6 +1254,40 @@ describe("sign-in experience", () => {
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+    });
+  });
+
+  it("sets the session and refresh-token lifetimes and refuses values outside their ranges", async () => {
+    for (const body of [
+      { session_ttl_secs: 3_599 },
+      { session_ttl_secs: 7_776_001 },
+      { refresh_token_ttl_secs: 3_599 },
+      { refresh_token_ttl_secs: 31_536_001 },
+    ]) {
+      const failure = await mockApi.updateSignInExperience(body).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    const tuned = await mockApi.updateSignInExperience({
+      session_ttl_secs: 604_800,
+      refresh_token_ttl_secs: 1_209_600,
+    });
+    expect(tuned.session_ttl_secs).toBe(604_800);
+    expect(tuned.refresh_token_ttl_secs).toBe(1_209_600);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({
+      session_ttl_secs: 604_800,
+      refresh_token_ttl_secs: 1_209_600,
+    });
+
+    await mockApi.updateSignInExperience({
+      session_ttl_secs: 2_592_000,
+      refresh_token_ttl_secs: 2_592_000,
     });
   });
 });

@@ -558,6 +558,10 @@ pub struct UpdateSignInExperienceBody {
     pub mfa_policy: Option<String>,
     /// The shortest password every entrance accepts, 8–64 characters.
     pub password_min_length: Option<i32>,
+    /// How long a browser session stays signed in, 3600–7776000 seconds.
+    pub session_ttl_secs: Option<i32>,
+    /// How long a refresh token stays usable, 3600–31536000 seconds.
+    pub refresh_token_ttl_secs: Option<i32>,
     /// The hosted page's optional look.
     pub branding: Option<BrandingPatch>,
 }
@@ -590,6 +594,8 @@ pub async fn update_sign_in_experience(
         && body.mfa_enabled.is_none()
         && body.mfa_policy.is_none()
         && body.password_min_length.is_none()
+        && body.session_ttl_secs.is_none()
+        && body.refresh_token_ttl_secs.is_none()
         && body.branding.is_none()
     {
         return Err(ApiError::problem(
@@ -615,6 +621,22 @@ pub async fn update_sign_in_experience(
     }
     if let Some(branding) = &body.branding {
         check_branding(branding)?;
+    }
+    if let Some(ttl) = body.session_ttl_secs
+        && !(3_600..=7_776_000).contains(&ttl)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "session_ttl_secs must be between 3600 and 7776000",
+        ));
+    }
+    if let Some(ttl) = body.refresh_token_ttl_secs
+        && !(3_600..=31_536_000).contains(&ttl)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "refresh_token_ttl_secs must be between 3600 and 31536000",
+        ));
     }
 
     let current = state.store.sign_in_experience(&tenant).await?;
@@ -654,6 +676,8 @@ pub async fn update_sign_in_experience(
             body.mfa_enabled,
             body.mfa_policy.as_deref(),
             body.password_min_length,
+            body.session_ttl_secs,
+            body.refresh_token_ttl_secs,
         )
         .await?;
     let branding = match &body.branding {
@@ -700,6 +724,8 @@ pub async fn update_sign_in_experience(
             "mfa_enabled": experience.mfa_enabled,
             "mfa_policy": experience.mfa_policy,
             "password_min_length": experience.password_min_length,
+            "session_ttl_secs": experience.session_ttl_secs,
+            "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
             "branding": branding_json(&branding),
         }),
     };
@@ -718,6 +744,8 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
+        "session_ttl_secs": experience.session_ttl_secs,
+        "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": branding_json(branding),
         "updated_at": ts(experience.updated_at),
     })

@@ -561,6 +561,15 @@ export const messages = {
     passwordMinLengthHint:
       "Between 8 and 64 characters. Applies to sign-up, reset, the account centre and administrator-created accounts.",
     invalidPasswordMinLength: "The minimum length must be between 8 and 64.",
+    sessions: "Sessions and tokens",
+    sessionsHint:
+      "How long a browser stays signed in and how long its refresh tokens can be redeemed. The deployment's own maximum still applies.",
+    sessionTtl: "Session duration (days)",
+    sessionTtlHint: "1–90 days. The SSO cookie and the stored session stop being accepted after this.",
+    refreshTtl: "Refresh token duration (days)",
+    refreshTtlHint: "1–365 days. A refresh token older than this is rejected.",
+    invalidSessionTtl: "The session duration must be between 1 and 90 days.",
+    invalidRefreshTtl: "The refresh token duration must be between 1 and 365 days.",
     branding: "Branding",
     brandingHint: "How the hosted sign-in page identifies this tenant.",
     brandName: "Display name",

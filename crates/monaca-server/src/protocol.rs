@@ -64,6 +64,8 @@ pub async fn sign_in_experience(
         "mfa_enabled": experience.mfa_enabled,
         "mfa_policy": experience.mfa_policy,
         "password_min_length": experience.password_min_length,
+        "session_ttl_secs": experience.session_ttl_secs,
+        "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
         "branding": crate::management::branding_json(&branding),
     })))
 }
@@ -729,13 +731,22 @@ async fn complete_sign_in(
     }
 
     // Establish (or reuse) the cross-application session before the code is minted, so the browser
-    // leaves sign-in with the SSO cookie and the next application skips the password page.
+    // leaves sign-in with the SSO cookie and the next application skips the password page. The
+    // tenant's session lifetime is read here, so this is the one place the cookie and the row agree.
+    let session_ttl_secs = (state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .session_ttl_secs
+        .max(60) as u64)
+        .min(state.config.session_ttl.as_secs());
     let session_id = establish_session(
         &state,
         &tenant,
         headers,
         &account,
         interaction.client_row_id,
+        session_ttl_secs,
     )
     .await?;
 
@@ -748,7 +759,7 @@ async fn complete_sign_in(
             .await
             .map_err(ApiError::Interaction)?;
         let response = Json(json!({ "consent_required": true })).into_response();
-        return Ok(with_session_cookie(response, session_id, &state));
+        return Ok(with_session_cookie(response, session_id, session_ttl_secs, &state));
     }
 
     // Consume only after authentication succeeds, so a typo does not burn the interaction.
@@ -765,7 +776,7 @@ async fn complete_sign_in(
         Some(session_id),
     )
     .await?;
-    Ok(with_session_cookie(response, session_id, &state))
+    Ok(with_session_cookie(response, session_id, session_ttl_secs, &state))
 }
 
 /// The browser-facing variant of [`finish_sign_in`].
@@ -2160,6 +2171,7 @@ async fn establish_session(
     headers: &HeaderMap,
     account: &AccountRow,
     client_row_id: Uuid,
+    session_ttl_secs: u64,
 ) -> Result<Uuid, ApiError> {
     let now = state.now();
     if let Some(id) = session::session_id(headers)
@@ -2183,7 +2195,7 @@ async fn establish_session(
             id,
             account.id,
             Some(client_row_id),
-            now + Duration::seconds(state.config.session_ttl.as_secs() as i64),
+            now + Duration::seconds(session_ttl_secs as i64),
             user_agent,
         )
         .await?;
@@ -2191,9 +2203,9 @@ async fn establish_session(
 }
 
 /// Attach the SSO cookie to a sign-in response.
-fn with_session_cookie(mut response: Response, session_id: Uuid, state: &AppState) -> Response {
+fn with_session_cookie(mut response: Response, session_id: Uuid, ttl_secs: u64, state: &AppState) -> Response {
     let secure = session::secure_origin(&state.config);
-    let value = session::set_cookie(session_id, state.config.session_ttl.as_secs(), secure);
+    let value = session::set_cookie(session_id, ttl_secs, secure);
     if let Ok(value) = HeaderValue::from_str(&value) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -3216,6 +3228,13 @@ async fn issue_refresh(
 ) -> Result<String, ApiError> {
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let hash = sha256_hex(&token);
+    let refresh_ttl_secs = (state
+        .store
+        .sign_in_experience(&tenant)
+        .await?
+        .refresh_token_ttl_secs
+        .max(60) as u64)
+        .min(state.config.refresh_token_ttl.as_secs());
     state
         .store
         .insert_refresh_token(
@@ -3230,7 +3249,7 @@ async fn issue_refresh(
             family_id,
             dpop_jkt.as_deref(),
             auth_time,
-            state.now() + Duration::seconds(state.config.refresh_token_ttl.as_secs() as i64),
+            state.now() + Duration::seconds(refresh_ttl_secs as i64),
         )
         .await?;
     Ok(token)
