@@ -2,6 +2,11 @@
 import {
   Badge,
   Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -24,11 +29,21 @@ import { Plus, RefreshCw } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 
 import { describeError } from "@/api/contract";
-import type { Member, OrgRole, OrgRoleDetail } from "@/api/types";
+import type { Member, OrganizationEmailDomain, OrgRole, OrgRoleDetail } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
-import { useAddMember, useAssignOrgRole, useMembers, useMemberRoles, useOrgRoles, useUnassignOrgRole } from "@/queries";
+import {
+  useAddMember,
+  useAddOrgEmailDomain,
+  useAssignOrgRole,
+  useMembers,
+  useMemberRoles,
+  useOrgEmailDomains,
+  useOrgRoles,
+  useRemoveOrgEmailDomain,
+  useUnassignOrgRole,
+} from "@/queries";
 import { useUiStore } from "@/stores/ui";
 
 /**
@@ -44,6 +59,12 @@ const org = computed(() => ui.org);
 const members = useMembers(org);
 const addMember = useAddMember(org);
 
+const domainsQuery = useOrgEmailDomains(org);
+const addEmailDomain = useAddOrgEmailDomain(org);
+const removeEmailDomain = useRemoveOrgEmailDomain(org);
+
+const domains = computed(() => domainsQuery.data.value?.items ?? []);
+
 const open = ref(false);
 const accountId = ref("");
 const role = ref<OrgRole>("member");
@@ -54,6 +75,16 @@ const roleLabel: Record<OrgRole, string> = {
   admin: t("members.roleAdmin"),
   member: t("members.roleMember"),
 };
+
+const stats = computed(() => {
+  const items: string[] = [];
+  if (members.data.value) items.push(t("members.count", { count: members.data.value.items.length }));
+  if (domainsQuery.data.value) {
+    const count = domains.value.length;
+    items.push(count === 1 ? t("members.domainsCountOne") : t("members.domainsCount", { count }));
+  }
+  return items;
+});
 
 /** The account id must look like a typed id before we spend a round trip on it (§5.2). */
 const accountIdLooksValid = computed(() => /^acc_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(accountId.value.trim()));
@@ -162,6 +193,91 @@ async function removeRole(role: OrgRoleDetail): Promise<void> {
     assignmentError.value = describeError(error).title;
   }
 }
+
+/**
+ * Email domains.
+ *
+ * A domain is the one membership rule an admin can set without knowing an account id: anyone whose
+ * primary email is at it joins at sign-in. The form mirrors the server's DNS rule locally so the
+ * common mistake is caught before a round trip, and the duplicate case still surfaces the 409 the
+ * server would give, because two orgs may not claim the same domain.
+ */
+const domainInput = ref("");
+const domainError = ref<string | null>(null);
+
+const removeDomainOpen = ref(false);
+const removeTarget = ref<OrganizationEmailDomain | null>(null);
+const removeDomainError = ref<string | null>(null);
+
+watch(domainInput, () => (domainError.value = null));
+
+function normaliseDomain(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+/** The same rule the `organization_email_domains` CHECK constraint fixes (§5.6). */
+function domainLooksValid(raw: string): boolean {
+  const domain = normaliseDomain(raw);
+  if (domain.length < 2 || domain.length > 100) return false;
+  return domain
+    .split(".")
+    .every(
+      (label) =>
+        label.length >= 1 &&
+        label.length <= 63 &&
+        !label.startsWith("-") &&
+        !label.endsWith("-") &&
+        /^[a-z0-9-]+$/.test(label),
+    );
+}
+
+async function addDomain(): Promise<void> {
+  const domain = normaliseDomain(domainInput.value);
+  if (!domainLooksValid(domain)) {
+    domainError.value = t("members.invalidDomain");
+    return;
+  }
+  domainError.value = null;
+  try {
+    const created = await addEmailDomain.mutateAsync({ domain });
+    domainInput.value = "";
+    toast({
+      title: t("members.domainAdded"),
+      description: t("members.domainAddedDescription", { domain: created.domain, org: org.value }),
+      variant: "success",
+    });
+  } catch (error) {
+    domainError.value = describeError(error).title;
+  }
+}
+
+function openRemoveDomain(entry: OrganizationEmailDomain): void {
+  removeTarget.value = entry;
+  removeDomainError.value = null;
+  removeDomainOpen.value = true;
+}
+
+async function confirmRemoveDomain(): Promise<void> {
+  const target = removeTarget.value;
+  if (!target) return;
+  removeDomainError.value = null;
+  try {
+    await removeEmailDomain.mutateAsync(target.domain);
+    removeDomainOpen.value = false;
+    toast({
+      title: t("members.domainRemoved"),
+      description: t("members.domainRemovedDescription", { domain: target.domain, org: org.value }),
+      variant: "success",
+    });
+  } catch (error) {
+    removeDomainError.value = describeError(error).title;
+  }
+}
+
+function formatDate(at: string): string {
+  const parsed = new Date(at);
+  return Number.isNaN(parsed.getTime()) ? at : parsed.toISOString().slice(0, 10);
+}
 </script>
 
 <template>
@@ -169,7 +285,7 @@ async function removeRole(role: OrgRoleDetail): Promise<void> {
     <PageHeader
       :title="t('members.title')"
       :subtitle="t('members.subtitle', { org })"
-      :stats="members.data.value ? [t('members.count', { count: members.data.value.items.length })] : []"
+      :stats="stats"
     >
       <template #actions>
         <Button variant="ghost" size="sm" @click="members.refetch()">
@@ -229,6 +345,76 @@ async function removeRole(role: OrgRoleDetail): Promise<void> {
         </TableBody>
       </Table>
     </QueryBoundary>
+
+    <Card>
+      <CardHeader>
+        <CardTitle>{{ t('members.emailDomains') }}</CardTitle>
+        <CardDescription>{{ t('members.emailDomainsHint', { org }) }}</CardDescription>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-2.5">
+        <p v-if="domainsQuery.isPending.value" class="text-[12px] text-ink-faint">
+          {{ t('common.loading') }}
+        </p>
+
+        <p v-else-if="domainsQuery.error.value" class="flex items-center gap-2 text-[12.5px] text-deny">
+          {{ describeError(domainsQuery.error.value).title }}
+          <Button variant="link" size="xs" @click="domainsQuery.refetch()">
+            {{ t('common.retry') }}
+          </Button>
+        </p>
+
+        <div v-else-if="domains.length > 0" class="divide-y divide-rule rounded-md border border-rule">
+          <div
+            v-for="entry in domains"
+            :key="entry.domain"
+            class="flex items-center gap-3 px-3 py-2"
+          >
+            <span class="mono-data min-w-0 flex-1 truncate text-[12.5px] text-ink">{{ entry.domain }}</span>
+            <span class="mono-data shrink-0 text-[11px] text-ink-faint">{{ formatDate(entry.created_at) }}</span>
+            <Button
+              variant="secondary"
+              size="xs"
+              :disabled="removeEmailDomain.isPending.value"
+              @click="openRemoveDomain(entry)"
+            >
+              {{ t('members.domainRemove') }}
+            </Button>
+          </div>
+        </div>
+
+        <div v-else class="rounded-md border border-dashed border-rule px-3 py-3">
+          <p class="text-[12.5px] font-medium text-ink">{{ t('members.emailDomainsEmpty') }}</p>
+          <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+            {{ t('members.emailDomainsEmptyHint') }}
+          </p>
+        </div>
+
+        <form class="flex items-end gap-2 pt-1" @submit.prevent="addDomain">
+          <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+            <Label for="org-email-domain">{{ t('members.domainField') }}</Label>
+            <Input
+              id="org-email-domain"
+              v-model="domainInput"
+              :invalid="domainInput.length > 0 && !domainLooksValid(domainInput)"
+              :placeholder="t('members.domainPlaceholder')"
+              autocomplete="off"
+              spellcheck="false"
+              class="mono-data text-[12.5px]"
+            />
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            type="submit"
+            :disabled="addEmailDomain.isPending.value || !domainLooksValid(domainInput)"
+          >
+            {{ addEmailDomain.isPending.value ? t('common.saving') : t('members.addDomain') }}
+          </Button>
+        </form>
+        <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('members.domainHint') }}</p>
+        <p v-if="domainError" class="text-[12.5px] text-deny">{{ domainError }}</p>
+      </CardContent>
+    </Card>
 
     <Dialog v-model:open="open">
       <DialogContent class="max-w-[440px]">
@@ -332,6 +518,35 @@ async function removeRole(role: OrgRoleDetail): Promise<void> {
 
         <DialogFooter>
           <Button variant="ghost" type="button" @click="rolesDialogOpen = false">{{ t('common.close') }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="removeDomainOpen">
+      <DialogContent class="max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>
+            {{ t('members.domainRemoveTitle', { domain: removeTarget?.domain ?? '' }) }}
+          </DialogTitle>
+          <DialogDescription>
+            {{ t('members.domainRemoveDescription', { domain: removeTarget?.domain ?? '', org }) }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <p v-if="removeDomainError" class="text-[12.5px] text-deny">{{ removeDomainError }}</p>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="removeDomainOpen = false">
+            {{ t('common.cancel') }}
+          </Button>
+          <Button
+            variant="danger"
+            type="button"
+            :disabled="removeEmailDomain.isPending.value"
+            @click="confirmRemoveDomain"
+          >
+            {{ removeEmailDomain.isPending.value ? t('common.saving') : t('members.domainRemove') }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

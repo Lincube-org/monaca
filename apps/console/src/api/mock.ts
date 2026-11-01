@@ -12,6 +12,7 @@ import {
   seedAccounts,
   seedClients,
   seedConnectors,
+  seedEmailDomains,
   seedMemberRoleIndexes,
   seedMembers,
   seedOrgRoles,
@@ -19,10 +20,12 @@ import {
   seedSignInExperience,
   verifyLog,
   type AuditLog,
+  type SeededEmailDomain,
 } from "./fixtures";
 import type {
   AccountWithRoles,
   AddMemberRequest,
+  AddOrgEmailDomainRequest,
   Agent,
   ApiResource,
   AssignOrgRoleRequest,
@@ -45,6 +48,7 @@ import type {
   ListAuditQuery,
   Member,
   Organization,
+  OrganizationEmailDomain,
   OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
@@ -92,6 +96,7 @@ class MockStore {
   private connectors: Connector[] = seedConnectors();
   private experience: SignInExperience = seedSignInExperience();
   private members: Member[] = seedMembers(this.accounts);
+  private emailDomains: SeededEmailDomain[] = seedEmailDomains();
   private orgRoles: OrgRoleDetail[] = seedOrgRoles();
   /** account id → role ids held in this org. A role may be held by many members. */
   private memberRoles = new Map<string, Set<string>>();
@@ -752,6 +757,89 @@ class MockStore {
     return { items: [...this.members], next: null };
   }
 
+  private orgBySlug(slug: string): Organization {
+    const org = this.organizations.find((candidate) => candidate.slug === slug);
+    if (!org) {
+      throw new ApiError("organization not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    return org;
+  }
+
+  listOrgEmailDomains(org: string): Page<OrganizationEmailDomain> {
+    const row = this.orgBySlug(org);
+    const items = this.emailDomains
+      .filter((entry) => entry.org === row.slug)
+      // Oldest first, as `org_email_domains` orders by `created_at`.
+      .slice()
+      .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+      .map((entry) => ({ domain: entry.domain, created_at: entry.created_at }));
+    return { items, next: null };
+  }
+
+  async addOrgEmailDomain(
+    org: string,
+    body: AddOrgEmailDomainRequest,
+  ): Promise<OrganizationEmailDomain> {
+    const row = this.orgBySlug(org);
+    const domain = normaliseDomain(body.domain);
+    if (domain === null) {
+      throw new ApiError("domain must be a DNS name of lowercase letters, digits, `-` and `.`", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    // One org per domain in the tenant: two orgs claiming the same address would split a sign-in.
+    if (this.emailDomains.some((entry) => entry.domain === domain)) {
+      throw new ApiError("email domain is already taken", {
+        status: 409,
+        code: "MONACA_DOMAIN_EXISTS",
+      });
+    }
+
+    const created_at = new Date().toISOString();
+    this.emailDomains = [...this.emailDomains, { org: row.slug, domain, created_at }];
+    await this.append({
+      action: "org.domain.added",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: row.id,
+      decision: "allow",
+      payload: { org: row.slug, domain },
+    });
+    return { domain, created_at };
+  }
+
+  async removeOrgEmailDomain(org: string, rawDomain: string): Promise<void> {
+    const row = this.orgBySlug(org);
+    const domain = normaliseDomain(rawDomain);
+    if (domain === null) {
+      throw new ApiError("domain must be a DNS name of lowercase letters, digits, `-` and `.`", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    const index = this.emailDomains.findIndex(
+      (entry) => entry.org === row.slug && entry.domain === domain,
+    );
+    if (index < 0) {
+      throw new ApiError("domain not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+
+    this.emailDomains = [
+      ...this.emailDomains.slice(0, index),
+      ...this.emailDomains.slice(index + 1),
+    ];
+    await this.append({
+      action: "org.domain.removed",
+      actor: this.session().account_id,
+      subjectType: "org",
+      subjectId: row.id,
+      decision: "allow",
+      payload: { org: row.slug, domain },
+    });
+  }
+
   async addMember(body: AddMemberRequest): Promise<Member> {
     const account = this.accounts.find((candidate) => candidate.id === body.account_id);
     if (!account) {
@@ -1266,6 +1354,24 @@ function normaliseUris(raw: readonly string[], field: string): string[] {
   return uris;
 }
 
+/** The server's `normalise_domain`: trim, lowercase, and accept only a plain DNS name. */
+function normaliseDomain(raw: string): string | null {
+  const domain = raw.trim().toLowerCase();
+  if (domain.length < 2 || domain.length > 100) return null;
+  const labels = domain.split(".");
+  const valid = labels.every(
+    (label) =>
+      label.length >= 1 &&
+      label.length <= 63 &&
+      !label.startsWith("-") &&
+      !label.endsWith("-") &&
+      [...label].every(
+        (char) => (char >= "a" && char <= "z") || (char >= "0" && char <= "9") || char === "-",
+      ),
+  );
+  return valid ? domain : null;
+}
+
 /** A 256-bit base64url secret, the shape the server's `generate_client_secret` produces. */
 function generateClientSecret(): string {
   const bytes = new Uint8Array(32);
@@ -1379,6 +1485,18 @@ export const mockApi: MonacaApi = {
   async listMembers() {
     await delay();
     return store.listMembers();
+  },
+  async listOrgEmailDomains(org) {
+    await delay();
+    return store.listOrgEmailDomains(org);
+  },
+  async addOrgEmailDomain(org, body) {
+    await delay();
+    return store.addOrgEmailDomain(org, body);
+  },
+  async removeOrgEmailDomain(org, domain) {
+    await delay();
+    return store.removeOrgEmailDomain(org, domain);
   },
   async addMember(_org, body) {
     await delay();

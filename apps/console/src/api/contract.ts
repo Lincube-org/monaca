@@ -1,6 +1,7 @@
 import type {
   AccountWithRoles,
   AddMemberRequest,
+  AddOrgEmailDomainRequest,
   Agent,
   ApiResource,
   AssignOrgRoleRequest,
@@ -23,6 +24,7 @@ import type {
   ListAuditQuery,
   Member,
   Organization,
+  OrganizationEmailDomain,
   OrgRoleDetail,
   Page,
   ProblemDetails,
@@ -98,6 +100,16 @@ export interface MonacaApi {
 
   listMembers(org: string): Promise<Page<Member>>;
   addMember(org: string, body: AddMemberRequest): Promise<Member>;
+
+  /**
+   * The domains whose accounts join the org at sign-in, without an explicit membership.
+   *
+   * Organization-scoped like the member list: the same domain may not be registered to two orgs in
+   * one tenant, and removing one stops future joins without touching existing members.
+   */
+  listOrgEmailDomains(org: string): Promise<Page<OrganizationEmailDomain>>;
+  addOrgEmailDomain(org: string, body: AddOrgEmailDomainRequest): Promise<OrganizationEmailDomain>;
+  removeOrgEmailDomain(org: string, domain: string): Promise<void>;
 
   /**
    * Org roles are scoped to the org in the path; the same member may hold different roles, and so

@@ -2,6 +2,7 @@ import { ApiError, type MonacaApi } from "./contract";
 import type {
   AccountWithRoles,
   AddMemberRequest,
+  AddOrgEmailDomainRequest,
   Agent,
   ApiResource,
   AssignOrgRoleRequest,
@@ -24,6 +25,7 @@ import type {
   ListAuditQuery,
   Member,
   Organization,
+  OrganizationEmailDomain,
   OrgRoleDetail,
   Page,
   ProblemDetails,
@@ -213,6 +215,24 @@ export const httpApi: MonacaApi = {
       method: "POST",
       body: JSON.stringify(body),
     });
+  },
+
+  listOrgEmailDomains(org: string): Promise<Page<OrganizationEmailDomain>> {
+    return request<Page<OrganizationEmailDomain>>(`/orgs/${encodeURIComponent(org)}/email-domains`);
+  },
+
+  addOrgEmailDomain(org: string, body: AddOrgEmailDomainRequest): Promise<OrganizationEmailDomain> {
+    return request<OrganizationEmailDomain>(`/orgs/${encodeURIComponent(org)}/email-domains`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  removeOrgEmailDomain(org: string, domain: string): Promise<void> {
+    return request<void>(
+      `/orgs/${encodeURIComponent(org)}/email-domains/${encodeURIComponent(domain)}`,
+      { method: "DELETE" },
+    );
   },
 
   listOrgRoles(org: string): Promise<Page<OrgRoleDetail>> {

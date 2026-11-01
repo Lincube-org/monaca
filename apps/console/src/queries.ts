@@ -6,6 +6,7 @@ import { queryKeys } from "@/api/keys";
 import type {
   AccountWithRoles,
   AddMemberRequest,
+  AddOrgEmailDomainRequest,
   Agent,
   ApiResource,
   AssignOrgRoleRequest,
@@ -27,6 +28,7 @@ import type {
   ListAuditQuery,
   Member,
   Organization,
+  OrganizationEmailDomain,
   OrgRoleDetail,
   Page,
   RegisterAgentKeyRequest,
@@ -196,6 +198,44 @@ export function useMembers(org: OrgRef): UseQueryReturnType<Page<Member>, Error>
     queryKey: computed(() => queryKeys.members(orgValue(org))),
     queryFn: () => api.listMembers(orgValue(org)),
     staleTime: STALE.slow,
+  });
+}
+
+/**
+ * The domains that admit their accounts to this org at sign-in (§6.2).
+ *
+ * Kept separate from the member list because it answers a different question — who may still join,
+ * not who is already in — and because it changes on a different cadence.
+ */
+export function useOrgEmailDomains(
+  org: OrgRef,
+): UseQueryReturnType<Page<OrganizationEmailDomain>, Error> {
+  return useQuery({
+    queryKey: computed(() => queryKeys.orgEmailDomains(orgValue(org))),
+    queryFn: () => api.listOrgEmailDomains(orgValue(org)),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useAddOrgEmailDomain(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<OrganizationEmailDomain, Error, AddOrgEmailDomainRequest>({
+    mutationFn: (body) => api.addOrgEmailDomain(orgValue(org), body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgEmailDomains(orgValue(org)) });
+      invalidateAudit(client, orgValue(org));
+    },
+  });
+}
+
+export function useRemoveOrgEmailDomain(org: OrgRef) {
+  const client = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: (domain) => api.removeOrgEmailDomain(orgValue(org), domain),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.orgEmailDomains(orgValue(org)) });
+      invalidateAudit(client, orgValue(org));
+    },
   });
 }
 

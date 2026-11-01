@@ -119,6 +119,27 @@ export function seedMembers(accounts: readonly Account[]): Member[] {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Organization email domains
+// ---------------------------------------------------------------------------------------------
+
+/** A domain entry as the mock stores it; the wire shape drops `org`. */
+export interface SeededEmailDomain {
+  org: string;
+  domain: string;
+  created_at: string;
+}
+
+/**
+ * The demo tenant's own domain.
+ *
+ * Every seeded account is at `demo.localhost`, so this is the one domain that would admit the demo
+ * directory just in time at sign-in — registered the way an admin would have registered it.
+ */
+export function seedEmailDomains(): SeededEmailDomain[] {
+  return [{ org: DEFAULT_ORG, domain: "demo.localhost", created_at: at(895 * 60) }];
+}
+
+// ---------------------------------------------------------------------------------------------
 // Organization roles
 // ---------------------------------------------------------------------------------------------
 

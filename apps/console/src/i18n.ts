@@ -334,6 +334,27 @@ export const messages = {
     unassignedDescription: "{role} is no longer held by {email}.",
     unassignFailed: "Could not remove the role",
     allRolesAssigned: "Every role is already assigned to this member.",
+    emailDomains: "Email domains",
+    emailDomainsHint:
+      "Accounts whose primary email is at one of these domains join {org} automatically at sign-in. Any other domain keeps the ordinary 403.",
+    emailDomainsEmpty: "No email domains",
+    emailDomainsEmptyHint:
+      "Register a domain to let its accounts join this organization without being added first.",
+    domainsCount: "{count} domains",
+    domainsCountOne: "1 domain",
+    domainField: "Domain",
+    domainPlaceholder: "example.com",
+    domainHint: "Lowercase letters, digits and dashes. A domain belongs to one organization in this tenant.",
+    addDomain: "Add domain",
+    invalidDomain: "Enter a DNS name such as example.com.",
+    domainAdded: "Domain added",
+    domainAddedDescription: "Accounts at {domain} now join {org} at sign-in.",
+    domainRemove: "Remove",
+    domainRemoveTitle: "Remove {domain}?",
+    domainRemoveDescription:
+      "Future sign-ins from {domain} no longer join {org}. Members it already admitted keep their membership.",
+    domainRemoved: "Domain removed",
+    domainRemovedDescription: "{domain} no longer admits its accounts to {org}.",
   },
   roles: {
     title: "Roles",

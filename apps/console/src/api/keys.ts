@@ -24,6 +24,8 @@ export const queryKeys = {
 
   members: (org: string) => ["members", org] as const,
 
+  orgEmailDomains: (org: string) => ["org-email-domains", org] as const,
+
   orgRoles: (org: string) => ["org-roles", org] as const,
   memberRoles: (org: string, accountId: string) => ["member-roles", org, accountId] as const,
 

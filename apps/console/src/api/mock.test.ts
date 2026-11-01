@@ -1101,3 +1101,82 @@ describe("members", () => {
     expect((failure as ApiError).status).toBe(404);
   });
 });
+
+describe("organization email domains", () => {
+  async function freshDomain(): Promise<string> {
+    return `team-${Math.random().toString(36).slice(2, 8)}.example.com`;
+  }
+
+  it("lists the seeded domain oldest first", async () => {
+    const page = await mockApi.listOrgEmailDomains(ORG);
+    expect(page.next).toBe(null);
+    expect(page.items.map((entry) => entry.domain)).toEqual(["demo.localhost"]);
+    expect(Number.isNaN(Date.parse(page.items[0]!.created_at))).toBe(false);
+  });
+
+  it("normalises a domain, registers it, and appends org.domain.added", async () => {
+    const raw = await freshDomain();
+    const created = await mockApi.addOrgEmailDomain(ORG, { domain: `  ${raw.toUpperCase()} ` });
+    expect(created.domain).toBe(raw);
+
+    const listed = await mockApi.listOrgEmailDomains(ORG);
+    expect(listed.items.some((entry) => entry.domain === raw)).toBe(true);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.domain.added", limit: 200 });
+    const newest = audit.items[0];
+    expect(newest?.payload).toMatchObject({ org: ORG, domain: raw });
+    expect(newest?.subject.type).toBe("org");
+
+    await mockApi.removeOrgEmailDomain(ORG, raw);
+  });
+
+  it("refuses a duplicate domain and a malformed DNS name", async () => {
+    const duplicate = await mockApi
+      .addOrgEmailDomain(ORG, { domain: "Demo.LocalHost" })
+      .catch((error: unknown) => error);
+    expect(duplicate).toBeInstanceOf(ApiError);
+    expect((duplicate as ApiError).status).toBe(409);
+    expect((duplicate as ApiError).code).toBe("MONACA_DOMAIN_EXISTS");
+
+    for (const bad of ["a", "@", "x..y", "-x.example.com", "x.example.com."]) {
+      const rejected = await mockApi
+        .addOrgEmailDomain(ORG, { domain: bad })
+        .catch((error: unknown) => error);
+      expect(rejected).toBeInstanceOf(ApiError);
+      expect((rejected as ApiError).status).toBe(400);
+    }
+  });
+
+  it("removes a domain, refuses the second removal, and records org.domain.removed", async () => {
+    const raw = await freshDomain();
+    await mockApi.addOrgEmailDomain(ORG, { domain: raw });
+    await mockApi.removeOrgEmailDomain(ORG, raw);
+
+    expect((await mockApi.listOrgEmailDomains(ORG)).items.some((entry) => entry.domain === raw)).toBe(false);
+
+    const second = await mockApi.removeOrgEmailDomain(ORG, raw).catch((error: unknown) => error);
+    expect(second).toBeInstanceOf(ApiError);
+    expect((second as ApiError).status).toBe(404);
+
+    const audit = await mockApi.listAudit(ORG, { action: "org.domain.removed", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({ org: ORG, domain: raw });
+  });
+
+  it("is org-scoped: an unknown slug is a 404 and does not touch the directory", async () => {
+    const missing = await mockApi
+      .listOrgEmailDomains("no-such-org")
+      .catch((error: unknown) => error);
+    expect(missing).toBeInstanceOf(ApiError);
+    expect((missing as ApiError).status).toBe(404);
+
+    const added = await mockApi
+      .addOrgEmailDomain("no-such-org", { domain: await freshDomain() })
+      .catch((error: unknown) => error);
+    expect(added).toBeInstanceOf(ApiError);
+    expect((added as ApiError).status).toBe(404);
+
+    expect((await mockApi.listOrgEmailDomains(ORG)).items.map((entry) => entry.domain)).toEqual([
+      "demo.localhost",
+    ]);
+  });
+});

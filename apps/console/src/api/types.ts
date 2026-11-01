@@ -58,6 +58,18 @@ export interface Organization {
 export type OrgRole = "owner" | "admin" | "member";
 
 /**
+ * An email domain registered to an organization (§6.2).
+ *
+ * An account whose primary email is at the domain joins the org automatically at sign-in. Domains
+ * are stored lowercased and belong to at most one org in the tenant; removing one does not revoke
+ * the memberships it already created.
+ */
+export interface OrganizationEmailDomain {
+  domain: string;
+  created_at: string;
+}
+
+/**
  * A named set of scopes defined inside one organization (§6.2).
  *
  * Distinct from the membership rank in `Member.role`: an org role grants scopes only while signing
@@ -226,6 +238,11 @@ export interface CreateGrantRequest {
 export interface AddMemberRequest {
   account_id: string;
   role: OrgRole;
+}
+
+/** A DNS name; the server lowercases it and rejects malformed values with a 400. */
+export interface AddOrgEmailDomainRequest {
+  domain: string;
 }
 
 export interface CreateOrganizationRequest {
