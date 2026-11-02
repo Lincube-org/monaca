@@ -136,6 +136,11 @@ const allowedVariables = computed(() =>
   (selected.value?.variables ?? []).map((name) => `{{${name}}}`).join(", "),
 );
 
+/** A placeholder as copy spells it. Building the braces in script keeps a stray `}}` out of the template. */
+function braced(name: string): string {
+  return `{{${name}}}`;
+}
+
 const saveDisabled = computed(
   () =>
     !dirty.value ||
@@ -353,7 +358,7 @@ function formatStamp(at: string): string {
                   variant="outline"
                   class="mono-data"
                 >
-                  {{ `{{${name}}}` }}
+                  {{ braced(name) }}
                 </Badge>
               </div>
               <p class="text-[11.5px] leading-snug text-ink-faint">
@@ -362,7 +367,7 @@ function formatStamp(at: string): string {
               <p v-if="placeholderIssue !== null" class="text-[11.5px] leading-snug text-deny">
                 {{
                   t('emailTemplates.unknownPlaceholder', {
-                    name: `{{${placeholderIssue}}}`,
+                    name: braced(placeholderIssue),
                     allowed: allowedVariables,
                   })
                 }}
