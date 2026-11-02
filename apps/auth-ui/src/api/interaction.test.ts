@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { InteractionError, getInteraction, navigateTo } from "./interaction";
+import { InteractionError, getInteraction, navigateTo, startSignUp } from "./interaction";
 
 /**
  * `navigateTo` is the one place the sign-in page acts on a value it received from the network. The
@@ -55,6 +55,45 @@ describe("navigateTo", () => {
   });
 
   globalThis.window = original;
+});
+
+describe("startSignUp", () => {
+  /**
+   * The one-step shape exists only when the tenant turned email verification off. The page decides
+   * that from the public switches, so the request it builds is the load-bearing part: a password or
+   * profile field left out here silently becomes a two-step registration.
+   */
+  test("posts the whole profile to /sign-up and passes the sign-in result through", async () => {
+    const original = globalThis.fetch;
+    let seen: { url: string; init?: RequestInit } | undefined;
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      seen = { url, init };
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ redirect_to: "http://localhost:5174/bff/callback?code=abc&state=xyz" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    }) as unknown as typeof fetch;
+
+    const body = {
+      email: "new@demo.localhost",
+      password: "a-long-enough-password",
+      username: "NewPerson",
+      display_name: "New Person",
+      avatar_url: "https://cdn.example/avatar.png",
+    };
+    const result = await startSignUp("demo", "int_01h455vb4pex5vsknk084sn02q", body);
+
+    expect(result).toEqual({
+      redirect_to: "http://localhost:5174/bff/callback?code=abc&state=xyz",
+    });
+    expect(seen?.url).toBe("/t/demo/interaction/int_01h455vb4pex5vsknk084sn02q/sign-up");
+    expect(seen?.init?.method).toBe("POST");
+    expect(JSON.parse(String(seen?.init?.body))).toEqual(body);
+
+    globalThis.fetch = original;
+  });
 });
 
 describe("InteractionError codes", () => {

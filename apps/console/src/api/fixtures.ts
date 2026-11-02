@@ -465,6 +465,12 @@ export function seedSignInExperience(): SignInExperience {
     password_rejected_words: [],
     session_ttl_secs: 2_592_000,
     refresh_token_ttl_secs: 2_592_000,
+    sign_up_identifiers: ["email"],
+    sign_up_email_verification_required: true,
+    username_case_sensitive: false,
+    username_min_length: 3,
+    username_max_length: 32,
+    sign_up_profile_fields: ["name"],
     branding: {
       display_name: null,
       logo_url: null,

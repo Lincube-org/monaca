@@ -197,6 +197,8 @@ const newPassword = ref("");
 const displayName = ref("");
 /** Optional username chosen at sign-up; the account can also set it later in the account centre. */
 const username = ref("");
+/** Optional avatar chosen at sign-up when the tenant collects that field. */
+const avatarUrl = ref("");
 
 /** Provider buttons; the tenant's public list is fetched once and never blocks the page. */
 const socialConnectors = ref<SocialConnector[]>([]);
@@ -308,6 +310,44 @@ const scopes = computed(() => details.value?.scopes ?? []);
 /** True while the page collects a code rather than an address. */
 const awaitingCode = computed(() => mode.value !== "password" && stage.value === "verify");
 
+/**
+ * The tenant's registration policy, defaulting to the contract's safe values while the read is in
+ * flight or failed: prove the address, collect only a name, offer no username.
+ */
+const emailVerificationRequired = computed(
+  () => experience.value?.sign_up_email_verification_required ?? true,
+);
+const usernameIdentifierAllowed = computed(
+  () => experience.value?.sign_up_identifiers.includes("username") ?? false,
+);
+const profileNameAllowed = computed(
+  () => experience.value?.sign_up_profile_fields.includes("name") ?? true,
+);
+const profileAvatarAllowed = computed(
+  () => experience.value?.sign_up_profile_fields.includes("avatar") ?? false,
+);
+const usernameMinLength = computed(() => experience.value?.username_min_length ?? 3);
+const usernameMaxLength = computed(() => experience.value?.username_max_length ?? 32);
+
+/** A sign-up that creates the account in one request, because the address needs no proof. */
+const directSignUp = computed(() => mode.value === "signup" && !emailVerificationRequired.value);
+/** The sign-up's detail fields: shown while verifying, or on the single direct form. */
+const signUpOpen = computed(
+  () => mode.value === "signup" && (awaitingCode.value || directSignUp.value),
+);
+
+/** The username grammar is the tenant's, not a page constant (§6.1). */
+function validUsername(value: string): boolean {
+  return new RegExp(`^[A-Za-z0-9_-]{${usernameMinLength.value},${usernameMaxLength.value}}$`).test(
+    value,
+  );
+}
+
+/** An absolute http(s) image URL, the same shape the account API accepts. */
+function validAvatarUrl(value: string): boolean {
+  return value.length <= 2048 && /^https?:\/\/\S+$/.test(value);
+}
+
 const pageTitle = computed<MessageKey>(() => {
   if (consentRequired.value) return "consent.title";
   if (mfaEnrollmentRequired.value) return "mfaEnroll.title";
@@ -336,7 +376,7 @@ const modeNote = computed<MessageKey>(() => {
     case "code":
       return "emailCode.note";
     case "signup":
-      return "signUp.note";
+      return emailVerificationRequired.value ? "signUp.note" : "signUp.noteDirect";
     case "reset":
       return "reset.note";
     default:
@@ -373,6 +413,7 @@ const primaryLabel = computed<MessageKey>(() => {
       if (awaitingCode.value) return submitting.value ? "emailCode.verifying" : "emailCode.verify";
       return submitting.value ? "emailCode.sending" : "emailCode.send";
     case "signup":
+      if (directSignUp.value) return submitting.value ? "signUp.submitting" : "signUp.submit";
       if (awaitingCode.value) return submitting.value ? "signUp.submitting" : "signUp.submit";
       return submitting.value ? "signUp.sending" : "signUp.continue";
     case "reset":
@@ -641,6 +682,7 @@ function switchMode(next: Mode): void {
   newPassword.value = "";
   displayName.value = "";
   username.value = "";
+  avatarUrl.value = "";
   fieldError.value = null;
   submitError.value = null;
   passkeyError.value = null;
@@ -894,13 +936,63 @@ async function requestCode(): Promise<void> {
     fieldError.value = "errors.emailRequired";
     return;
   }
+  // A one-step sign-up carries the secrets this request would otherwise leave for the verify step,
+  // so they are checked here before anything is sent.
+  if (mode.value === "signup" && directSignUp.value) {
+    if (newPassword.value.length === 0) {
+      fieldError.value = "errors.passwordRequired";
+      return;
+    }
+    if (!passwordMeetsPolicy(newPassword.value, passwordMinLength.value, passwordMinTypes.value)) {
+      fieldError.value = "errors.weakPassword";
+      return;
+    }
+    if (
+      usernameIdentifierAllowed.value &&
+      username.value.trim() !== "" &&
+      !validUsername(username.value.trim())
+    ) {
+      fieldError.value = "errors.usernameInvalid";
+      return;
+    }
+    if (
+      profileAvatarAllowed.value &&
+      avatarUrl.value.trim() !== "" &&
+      !validAvatarUrl(avatarUrl.value.trim())
+    ) {
+      fieldError.value = "errors.avatarInvalid";
+      return;
+    }
+  }
   if (!tenantFromUrl.value || !interactionId.value) return;
 
   submitting.value = true;
   try {
     const address = email.value.trim();
     if (mode.value === "signup") {
-      await startSignUp(tenantFromUrl.value, interactionId.value, address);
+      const result = await startSignUp(
+        tenantFromUrl.value,
+        interactionId.value,
+        directSignUp.value
+          ? {
+              email: address,
+              password: newPassword.value,
+              username: usernameIdentifierAllowed.value
+                ? username.value.trim() || undefined
+                : undefined,
+              display_name: profileNameAllowed.value
+                ? displayName.value.trim() || undefined
+                : undefined,
+              avatar_url: profileAvatarAllowed.value
+                ? avatarUrl.value.trim() || undefined
+                : undefined,
+            }
+          : { email: address },
+      );
+      if (!("verification_required" in result)) {
+        handleResult(result);
+        return;
+      }
     } else if (mode.value === "code") {
       await requestSignInCode(tenantFromUrl.value, interactionId.value, address);
     } else {
@@ -962,8 +1054,17 @@ async function verifyCode(): Promise<void> {
     fieldError.value = "errors.weakPassword";
     return;
   }
-  if (mode.value === "signup" && username.value.trim() !== "" && !/^[A-Za-z0-9_-]{3,32}$/.test(username.value.trim())) {
+  if (mode.value === "signup" && username.value.trim() !== "" && !validUsername(username.value.trim())) {
     fieldError.value = "errors.usernameInvalid";
+    return;
+  }
+  if (
+    mode.value === "signup" &&
+    profileAvatarAllowed.value &&
+    avatarUrl.value.trim() !== "" &&
+    !validAvatarUrl(avatarUrl.value.trim())
+  ) {
+    fieldError.value = "errors.avatarInvalid";
     return;
   }
   if (!tenantFromUrl.value || !interactionId.value) return;
@@ -978,8 +1079,9 @@ async function verifyCode(): Promise<void> {
         email: address,
         code: submitted,
         password: newPassword.value,
-        display_name: displayName.value.trim() || undefined,
-        username: username.value.trim() || undefined,
+        display_name: profileNameAllowed.value ? displayName.value.trim() || undefined : undefined,
+        username: usernameIdentifierAllowed.value ? username.value.trim() || undefined : undefined,
+        avatar_url: profileAvatarAllowed.value ? avatarUrl.value.trim() || undefined : undefined,
       });
     } else if (mode.value === "code") {
       result = await verifySignInCode(tenantFromUrl.value, interactionId.value, {
@@ -1473,7 +1575,10 @@ async function cancel(): Promise<void> {
               </div>
             </div>
 
-            <div v-if="awaitingCode && (mode === 'signup' || mode === 'reset')" class="flex flex-col gap-1.5">
+            <div
+              v-if="(awaitingCode && (mode === 'signup' || mode === 'reset')) || directSignUp"
+              class="flex flex-col gap-1.5"
+            >
               <Label for="signin-new-password">{{ t(newPasswordLabel) }}</Label>
               <div class="relative">
                 <Input
@@ -1500,7 +1605,7 @@ async function cancel(): Promise<void> {
               <p class="text-[11.5px] leading-snug text-ink-faint">{{ t(newPasswordHint, { min: passwordMinLength, types: passwordMinTypes }) }}</p>
             </div>
 
-            <div v-if="awaitingCode && mode === 'signup'" class="flex flex-col gap-1.5">
+            <div v-if="signUpOpen && profileNameAllowed" class="flex flex-col gap-1.5">
               <Label for="signin-display-name">{{ t("signUp.displayName") }}</Label>
               <Input
                 id="signin-display-name"
@@ -1512,8 +1617,28 @@ async function cancel(): Promise<void> {
               />
             </div>
 
+            <!-- Opt-in profile fields; the tenant decides which of these the form collects. -->
+            <div v-if="signUpOpen && profileAvatarAllowed" class="flex flex-col gap-1.5">
+              <Label for="signin-avatar">{{ t("signUp.avatar") }}</Label>
+              <Input
+                id="signin-avatar"
+                v-model="avatarUrl"
+                type="url"
+                name="avatar"
+                autocomplete="photo"
+                spellcheck="false"
+                autocapitalize="none"
+                :placeholder="t('signUp.avatarPlaceholder')"
+                :invalid="fieldError === 'errors.avatarInvalid'"
+                :aria-describedby="fieldError === 'errors.avatarInvalid' ? 'signin-error' : 'signin-avatar-hint'"
+              />
+              <p id="signin-avatar-hint" class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t("signUp.avatarHint") }}
+              </p>
+            </div>
+
             <!-- A username is a second sign-in identifier; optional at sign-up, changeable later. -->
-            <div v-if="awaitingCode && mode === 'signup'" class="flex flex-col gap-1.5">
+            <div v-if="signUpOpen && usernameIdentifierAllowed" class="flex flex-col gap-1.5">
               <Label for="signin-username">{{ t("signUp.username") }}</Label>
               <Input
                 id="signin-username"
@@ -1525,8 +1650,11 @@ async function cancel(): Promise<void> {
                 autocapitalize="none"
                 :placeholder="t('signUp.usernamePlaceholder')"
                 :invalid="fieldError === 'errors.usernameInvalid'"
+                :aria-describedby="fieldError === 'errors.usernameInvalid' ? 'signin-error' : 'signin-username-hint'"
               />
-              <p class="text-[11.5px] leading-snug text-ink-faint">{{ t("signUp.usernameHint") }}</p>
+              <p id="signin-username-hint" class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t("signUp.usernameHint", { min: usernameMinLength, max: usernameMaxLength }) }}
+              </p>
             </div>
 
             <!-- Field-level or submission error, in one place, wired through aria-describedby. -->
@@ -1543,7 +1671,7 @@ async function cancel(): Promise<void> {
             <div class="flex flex-col gap-2">
               <Button type="submit" variant="primary" block :disabled="submitting" :aria-busy="submitting">
                 <Loader2 v-if="submitting" class="animate-spin" />
-                <Mail v-else-if="mode !== 'password' && !awaitingCode" />
+                <Mail v-else-if="mode !== 'password' && !awaitingCode && !directSignUp" />
                 <LockKeyhole v-else />
                 {{ t(primaryLabel) }}
               </Button>

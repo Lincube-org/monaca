@@ -79,6 +79,18 @@ pub struct SignInExperienceRow {
     pub session_ttl_secs: i32,
     /// How long a refresh token stays usable, in seconds.
     pub refresh_token_ttl_secs: i32,
+    /// The identifiers a new account may claim at sign-up (`email`, `username`).
+    pub sign_up_identifiers: Vec<String>,
+    /// Whether an address must be proved with an emailed code before the account exists.
+    pub sign_up_email_verification_required: bool,
+    /// Whether usernames keep their case and are compared exactly.
+    pub username_case_sensitive: bool,
+    /// The shortest accepted username, in characters.
+    pub username_min_length: i32,
+    /// The longest accepted username, in characters.
+    pub username_max_length: i32,
+    /// The profile fields the sign-up form collects (`name`, `avatar`).
+    pub sign_up_profile_fields: Vec<String>,
     /// When the switches last changed.
     pub updated_at: OffsetDateTime,
 }
@@ -839,7 +851,9 @@ impl Store {
                     mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,
                     password_min_length, password_min_character_types, password_reject_user_info,
                     password_reject_repetition_and_sequence, password_rejected_words,
-                    session_ttl_secs, refresh_token_ttl_secs, updated_at
+                    session_ttl_secs, refresh_token_ttl_secs, sign_up_identifiers,
+                    sign_up_email_verification_required, username_case_sensitive,
+                    username_min_length, username_max_length, sign_up_profile_fields, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
         .fetch_one(&pool)
@@ -867,6 +881,12 @@ impl Store {
         mfa_trusted_devices_enabled: Option<bool>,
         mfa_trusted_device_ttl_days: Option<i32>,
         single_sign_on_enabled: Option<bool>,
+        sign_up_identifiers: Option<Vec<String>>,
+        sign_up_email_verification_required: Option<bool>,
+        username_case_sensitive: Option<bool>,
+        username_min_length: Option<i32>,
+        username_max_length: Option<i32>,
+        sign_up_profile_fields: Option<Vec<String>>,
     ) -> Result<SignInExperienceRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SignInExperienceRow>(
@@ -888,6 +908,13 @@ impl Store {
                  mfa_trusted_devices_enabled = COALESCE($14, mfa_trusted_devices_enabled),
                  mfa_trusted_device_ttl_days = COALESCE($15, mfa_trusted_device_ttl_days),
                  single_sign_on_enabled = COALESCE($16, single_sign_on_enabled),
+                 sign_up_identifiers = COALESCE($17, sign_up_identifiers),
+                 sign_up_email_verification_required =
+                   COALESCE($18, sign_up_email_verification_required),
+                 username_case_sensitive = COALESCE($19, username_case_sensitive),
+                 username_min_length = COALESCE($20, username_min_length),
+                 username_max_length = COALESCE($21, username_max_length),
+                 sign_up_profile_fields = COALESCE($22, sign_up_profile_fields),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
@@ -896,7 +923,9 @@ impl Store {
                        password_min_length, password_min_character_types,
                        password_reject_user_info, password_reject_repetition_and_sequence,
                        password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
-                       updated_at",
+                       sign_up_identifiers, sign_up_email_verification_required,
+                       username_case_sensitive, username_min_length, username_max_length,
+                       sign_up_profile_fields, updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
@@ -914,6 +943,12 @@ impl Store {
         .bind(mfa_trusted_devices_enabled)
         .bind(mfa_trusted_device_ttl_days)
         .bind(single_sign_on_enabled)
+        .bind(sign_up_identifiers)
+        .bind(sign_up_email_verification_required)
+        .bind(username_case_sensitive)
+        .bind(username_min_length)
+        .bind(username_max_length)
+        .bind(sign_up_profile_fields)
         .fetch_one(&pool)
         .await?)
     }
@@ -1207,13 +1242,15 @@ impl Store {
 
     /// An account and its password PHC string, by sign-in identifier (§6.1).
     ///
-    /// The identifier is either an email address or a username, both matched case-insensitively.
+    /// The identifier is either an email address or a username. Emails are compared
+    /// case-insensitively; a username follows the tenant's policy, which `case_sensitive` carries.
     /// An email always wins: a username may not contain `@` (§6.1), so the two namespaces can only
     /// overlap through data written outside this API, and the email is the safer interpretation.
     pub async fn account_by_identifier(
         &self,
         tenant: &TenantRow,
         identifier: &str,
+        case_sensitive: bool,
     ) -> Result<Option<(AccountRow, Option<String>)>, StoreError> {
         if let Some(account) = self.account_by_email(tenant, identifier).await? {
             return Ok(Some(account));
@@ -1224,10 +1261,12 @@ impl Store {
                     a.is_tenant_admin, a.created_at
              FROM tenant.accounts a
              JOIN tenant.account_identifiers i ON i.account_id = a.id
-             WHERE i.kind = 'username' AND lower(i.value) = lower($1)
+             WHERE i.kind = 'username'
+               AND (($2 AND i.value = $1) OR (NOT $2 AND lower(i.value) = lower($1)))
              LIMIT 1",
         )
         .bind(identifier)
+        .bind(case_sensitive)
         .fetch_optional(&pool)
         .await?;
 

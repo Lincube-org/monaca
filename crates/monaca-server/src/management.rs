@@ -398,6 +398,7 @@ pub async fn update_account(
         Some(value) => Some(value),
         None => None,
     };
+    let experience = state.store.sign_in_experience(&tenant).await?;
     let display_name = body
         .display_name
         .as_deref()
@@ -406,7 +407,7 @@ pub async fn update_account(
     let username = body
         .username
         .as_deref()
-        .map(crate::protocol::check_username)
+        .map(|raw| crate::protocol::check_username(raw, &experience))
         .transpose()?;
     let avatar_url = body
         .avatar_url
@@ -617,6 +618,18 @@ pub struct UpdateSignInExperienceBody {
     pub session_ttl_secs: Option<i32>,
     /// How long a refresh token stays usable, 3600–31536000 seconds.
     pub refresh_token_ttl_secs: Option<i32>,
+    /// The identifiers a new account may claim at sign-up (`email`, `username`).
+    pub sign_up_identifiers: Option<Vec<String>>,
+    /// Whether an address must be proved with an emailed code before the account exists.
+    pub sign_up_email_verification_required: Option<bool>,
+    /// Whether usernames keep their case and are compared exactly.
+    pub username_case_sensitive: Option<bool>,
+    /// The shortest accepted username, 3–32 characters.
+    pub username_min_length: Option<i32>,
+    /// The longest accepted username, 3–32 characters.
+    pub username_max_length: Option<i32>,
+    /// The profile fields the sign-up form collects (`name`, `avatar`).
+    pub sign_up_profile_fields: Option<Vec<String>>,
     /// The hosted page's optional look.
     pub branding: Option<BrandingPatch>,
 }
@@ -659,6 +672,12 @@ pub async fn update_sign_in_experience(
         && body.password_rejected_words.is_none()
         && body.session_ttl_secs.is_none()
         && body.refresh_token_ttl_secs.is_none()
+        && body.sign_up_identifiers.is_none()
+        && body.sign_up_email_verification_required.is_none()
+        && body.username_case_sensitive.is_none()
+        && body.username_min_length.is_none()
+        && body.username_max_length.is_none()
+        && body.sign_up_profile_fields.is_none()
         && body.branding.is_none()
     {
         return Err(ApiError::problem(
@@ -698,6 +717,27 @@ pub async fn update_sign_in_experience(
             "mfa_trusted_device_ttl_days must be between 1 and 365",
         ));
     }
+    if let Some(identifiers) = body.sign_up_identifiers.as_deref() {
+        let allowed = identifiers
+            .iter()
+            .all(|identifier| matches!(identifier.as_str(), "email" | "username"));
+        if identifiers.is_empty() || !allowed || !identifiers.iter().any(|id| id == "email") {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "sign_up_identifiers must be a non-empty subset of email, username that contains email",
+            ));
+        }
+    }
+    if let Some(fields) = body.sign_up_profile_fields.as_deref()
+        && fields
+            .iter()
+            .any(|field| !matches!(field.as_str(), "name" | "avatar"))
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "sign_up_profile_fields may only name name or avatar",
+        ));
+    }
     let rejected_words = normalise_rejected_words(body.password_rejected_words.as_deref())?;
     if let Some(branding) = &body.branding {
         check_branding(branding)?;
@@ -720,6 +760,21 @@ pub async fn update_sign_in_experience(
     }
 
     let current = state.store.sign_in_experience(&tenant).await?;
+    let username_min = body
+        .username_min_length
+        .unwrap_or(current.username_min_length);
+    let username_max = body
+        .username_max_length
+        .unwrap_or(current.username_max_length);
+    if !(3..=32).contains(&username_min)
+        || !(3..=32).contains(&username_max)
+        || username_min > username_max
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "username lengths must be 3–32 characters and min must not exceed max",
+        ));
+    }
     let password = body
         .password_sign_in_enabled
         .unwrap_or(current.password_sign_in_enabled);
@@ -766,6 +821,12 @@ pub async fn update_sign_in_experience(
             body.mfa_trusted_devices_enabled,
             body.mfa_trusted_device_ttl_days,
             body.single_sign_on_enabled,
+            body.sign_up_identifiers,
+            body.sign_up_email_verification_required,
+            body.username_case_sensitive,
+            body.username_min_length,
+            body.username_max_length,
+            body.sign_up_profile_fields,
         )
         .await?;
     let branding = match &body.branding {
@@ -862,6 +923,12 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "password_rejected_words": experience.password_rejected_words,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
+        "sign_up_identifiers": experience.sign_up_identifiers,
+        "sign_up_email_verification_required": experience.sign_up_email_verification_required,
+        "username_case_sensitive": experience.username_case_sensitive,
+        "username_min_length": experience.username_min_length,
+        "username_max_length": experience.username_max_length,
+        "sign_up_profile_fields": experience.sign_up_profile_fields,
         "branding": branding_json(branding),
         "updated_at": ts(experience.updated_at),
     })

@@ -287,6 +287,18 @@ export interface SignInExperience {
   session_ttl_secs: number;
   /** How long a refresh token stays usable, in seconds (3600–31536000). */
   refresh_token_ttl_secs: number;
+  /** The identifiers a new account may claim at sign-up; `email` is always required. */
+  sign_up_identifiers: ("email" | "username")[];
+  /** Whether an address must be proved with an emailed code before the account exists. */
+  sign_up_email_verification_required: boolean;
+  /** Whether usernames keep their case and are compared exactly. */
+  username_case_sensitive: boolean;
+  /** The shortest accepted username, 3–32 characters. */
+  username_min_length: number;
+  /** The longest accepted username, 3–32 characters. */
+  username_max_length: number;
+  /** The optional profile fields the sign-up form collects. */
+  sign_up_profile_fields: ("name" | "avatar")[];
   branding: Branding;
   updated_at: string;
 }
@@ -524,6 +536,12 @@ export interface UpdateSignInExperienceRequest {
   password_rejected_words?: string[];
   session_ttl_secs?: number;
   refresh_token_ttl_secs?: number;
+  sign_up_identifiers?: ("email" | "username")[];
+  sign_up_email_verification_required?: boolean;
+  username_case_sensitive?: boolean;
+  username_min_length?: number;
+  username_max_length?: number;
+  sign_up_profile_fields?: ("name" | "avatar")[];
   branding?: BrandingPatch;
 }
 

@@ -1106,6 +1106,12 @@ describe("sign-in experience", () => {
     expect(experience.password_rejected_words).toEqual([]);
     expect(experience.session_ttl_secs).toBe(2_592_000);
     expect(experience.refresh_token_ttl_secs).toBe(2_592_000);
+    expect(experience.sign_up_identifiers).toEqual(["email"]);
+    expect(experience.sign_up_email_verification_required).toBe(true);
+    expect(experience.username_case_sensitive).toBe(false);
+    expect(experience.username_min_length).toBe(3);
+    expect(experience.username_max_length).toBe(32);
+    expect(experience.sign_up_profile_fields).toEqual(["name"]);
     expect(experience.branding).toEqual({
       display_name: null,
       logo_url: null,
@@ -1150,6 +1156,12 @@ describe("sign-in experience", () => {
       password_rejected_words: [],
       session_ttl_secs: 2_592_000,
       refresh_token_ttl_secs: 2_592_000,
+      sign_up_identifiers: ["email"],
+      sign_up_email_verification_required: true,
+      username_case_sensitive: false,
+      username_min_length: 3,
+      username_max_length: 32,
+      sign_up_profile_fields: ["name"],
       branding: {
         display_name: null,
         logo_url: null,
@@ -1165,6 +1177,59 @@ describe("sign-in experience", () => {
     });
 
     await mockApi.updateSignInExperience({ sign_up_enabled: true });
+  });
+
+  it("validates the registration policy and records the accepted patch", async () => {
+    // The wire can carry values the typed console never produces; the mock must still refuse them.
+    const rejects = async (patch: Record<string, unknown>) => {
+      const error = await mockApi
+        .updateSignInExperience(patch as unknown as Parameters<typeof mockApi.updateSignInExperience>[0])
+        .catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(400);
+    };
+    await rejects({ sign_up_identifiers: [] });
+    await rejects({ sign_up_identifiers: ["username"] });
+    await rejects({ sign_up_identifiers: ["email", "phone"] });
+    await rejects({ sign_up_profile_fields: ["phone"] });
+    await rejects({ username_min_length: 2 });
+    await rejects({ username_max_length: 33 });
+    await rejects({ username_min_length: 10, username_max_length: 9 });
+    expect((await mockApi.getSignInExperience()).sign_up_identifiers).toEqual(["email"]);
+
+    const updated = await mockApi.updateSignInExperience({
+      sign_up_identifiers: ["email", "username"],
+      sign_up_email_verification_required: false,
+      username_case_sensitive: true,
+      username_min_length: 4,
+      username_max_length: 16,
+      sign_up_profile_fields: ["name", "avatar"],
+    });
+    expect(updated.sign_up_identifiers).toEqual(["email", "username"]);
+    expect(updated.sign_up_email_verification_required).toBe(false);
+    expect(updated.username_case_sensitive).toBe(true);
+    expect(updated.username_min_length).toBe(4);
+    expect(updated.username_max_length).toBe(16);
+    expect(updated.sign_up_profile_fields).toEqual(["name", "avatar"]);
+
+    const audit = await mockApi.listAudit(ORG, { action: "sign_in_experience.updated", limit: 200 });
+    expect(audit.items[0]?.payload).toMatchObject({
+      sign_up_identifiers: ["email", "username"],
+      sign_up_email_verification_required: false,
+      username_case_sensitive: true,
+      username_min_length: 4,
+      username_max_length: 16,
+      sign_up_profile_fields: ["name", "avatar"],
+    });
+
+    await mockApi.updateSignInExperience({
+      sign_up_identifiers: ["email"],
+      sign_up_email_verification_required: true,
+      username_case_sensitive: false,
+      username_min_length: 3,
+      username_max_length: 32,
+      sign_up_profile_fields: ["name"],
+    });
   });
 
   it("toggles passwordless passkey sign-in and records the new value", async () => {

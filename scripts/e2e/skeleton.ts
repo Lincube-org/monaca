@@ -463,6 +463,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "public read echoes them; a relative logo URL and a malformed support email are 400; an empty string clears " +
       "only the named field, and clearing every branding field restores the built-in look",
   },
+  {
+    step: "49",
+    title: "registration policy",
+    assertion:
+      "PATCH /v1/sign-in-experience validates sign_up_identifiers (email required, username optional), " +
+      "sign_up_profile_fields (name, avatar), and username bounds (3–32, min ≤ max), and the public read follows; " +
+      "with email verification off, POST …/sign-up {email,password,username,display_name,avatar_url} creates the " +
+      "account and signs in, storing the username folded to lowercase and the profile fields; a username outside " +
+      "the bounds, a relative avatar, a missing password, an identifier or profile field the policy does not offer " +
+      "are 400; switching verification on makes the request step mail a code and refuse a password",
+  },
 ];
 
 interface StepResult {
@@ -7784,6 +7795,322 @@ async function brandingExtrasFlow(base: string, adminToken: string): Promise<Ste
 }
 
 /**
+ * Step 49: the tenant chooses who can register, what proves the address, and what sign-up collects.
+ *
+ * Two shapes come out of the same endpoint: with verification on, `sign-up` only mails a code and
+ * the password belongs to `sign-up/verify`; with it off, one request creates the account. The
+ * profile fields and username bounds are read from the tenant's policy at both entrances, so a
+ * direct sign-up that ignores them is refused rather than silently narrowed.
+ */
+async function registrationPolicyFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const headers = managementHeaders(adminToken);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const policy = {
+    sign_up_identifiers: ["email", "username"],
+    sign_up_email_verification_required: false,
+    username_case_sensitive: false,
+    username_min_length: 4,
+    username_max_length: 16,
+    sign_up_profile_fields: ["name", "avatar"],
+  };
+  const defaults = {
+    sign_up_identifiers: ["email"],
+    sign_up_email_verification_required: true,
+    username_case_sensitive: false,
+    username_min_length: 3,
+    username_max_length: 32,
+    sign_up_profile_fields: ["name"],
+  };
+  const patch = (body: unknown): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+  const sameList = (value: unknown, expected: string[]): boolean =>
+    Array.isArray(value) &&
+    value.length === expected.length &&
+    expected.every((item, index) => value[index] === item);
+
+  const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `r-${runId}-${tag}-${"z".repeat(24)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-registration-${tag}-${runId}`,
+        nonce: `n-registration-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  const signUp = (
+    target: { interaction: string },
+    body: Record<string, unknown>,
+  ): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/interaction/${target.interaction}/sign-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const owner = `registration-${runId}@demo.localhost`;
+  const password = `pw-${runId}-registration`;
+  const username = `Reg-${runId}`;
+
+  try {
+    checks.push([
+      "an empty identifier list is 400",
+      (await patch({ sign_up_identifiers: [] })).status === 400,
+    ]);
+    checks.push([
+      "identifiers without email are 400",
+      (await patch({ sign_up_identifiers: ["username"] })).status === 400,
+    ]);
+    checks.push([
+      "an unknown identifier is 400",
+      (await patch({ sign_up_identifiers: ["email", "phone"] })).status === 400,
+    ]);
+    checks.push([
+      "an unknown profile field is 400",
+      (await patch({ sign_up_profile_fields: ["name", "phone"] })).status === 400,
+    ]);
+    checks.push([
+      "a username minimum below 3 is 400",
+      (await patch({ username_min_length: 2 })).status === 400,
+    ]);
+    checks.push([
+      "a username maximum above 32 is 400",
+      (await patch({ username_max_length: 33 })).status === 400,
+    ]);
+    checks.push([
+      "a minimum above the maximum is 400",
+      (await patch({ username_min_length: 10, username_max_length: 9 })).status === 400,
+    ]);
+
+    const written = await patch(policy);
+    checks.push([
+      "PATCH writes the registration policy",
+      written.status === 200 &&
+        sameList((written.body as { sign_up_identifiers?: unknown })?.sign_up_identifiers, policy.sign_up_identifiers) &&
+        (written.body as { sign_up_email_verification_required?: unknown })
+          ?.sign_up_email_verification_required === false &&
+        (written.body as { username_min_length?: unknown })?.username_min_length === 4 &&
+        (written.body as { username_max_length?: unknown })?.username_max_length === 16,
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read carries the policy",
+      publicRead.status === 200 &&
+        sameList(
+          (publicRead.body as { sign_up_identifiers?: unknown })?.sign_up_identifiers,
+          policy.sign_up_identifiers,
+        ) &&
+        sameList(
+          (publicRead.body as { sign_up_profile_fields?: unknown })?.sign_up_profile_fields,
+          policy.sign_up_profile_fields,
+        ) &&
+        (publicRead.body as { sign_up_email_verification_required?: unknown })
+          ?.sign_up_email_verification_required === false,
+    ]);
+
+    const direct = await begin("direct");
+    if (direct === undefined) return failPolicy("authorize did not open an interaction");
+    const created = await signUp(direct, {
+      email: owner,
+      password,
+      username,
+      display_name: "Registration Owner",
+      avatar_url: "https://cdn.example/registration.png",
+    });
+    const redirectTo = (created.body as { redirect_to?: unknown })?.redirect_to;
+    const sessionCookie = /monaca_session=([0-9a-f-]{36})/.exec(
+      created.headers.get("set-cookie") ?? "",
+    )?.[1];
+    checks.push([
+      "a direct sign-up creates the account in one request",
+      created.status === 200 &&
+        typeof redirectTo === "string" &&
+        sessionCookie !== undefined &&
+        (created.body as { verification_required?: unknown })?.verification_required === undefined,
+    ]);
+    if (typeof redirectTo !== "string" || sessionCookie === undefined) {
+      return failPolicy(`direct sign-up → ${created.status} ${text(created.body)}`);
+    }
+
+    const ownRead = await call(`${base}/t/${TENANT}/account`, {
+      headers: { cookie: `monaca_session=${sessionCookie}` },
+    });
+    checks.push([
+      "the account carries the collected profile and the folded username",
+      ownRead.status === 200 &&
+        (ownRead.body as { username?: unknown })?.username === username.toLowerCase() &&
+        (ownRead.body as { display_name?: unknown })?.display_name === "Registration Owner" &&
+        (ownRead.body as { avatar_url?: unknown })?.avatar_url ===
+          "https://cdn.example/registration.png",
+    ]);
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(
+      base,
+      {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        client_id: "monaca-console",
+        code_verifier: direct.verifier,
+      },
+      basic,
+    );
+    const claims = jwtClaims((token.body as { id_token?: unknown } | undefined)?.id_token);
+    checks.push([
+      "the sign-up token carries the name and avatar",
+      token.status === 200 &&
+        claims?.name === "Registration Owner" &&
+        claims?.picture === "https://cdn.example/registration.png",
+    ]);
+
+    const belowBound = await begin("short");
+    checks.push([
+      "a username below the tenant minimum is 400",
+      belowBound !== undefined &&
+        (
+          await signUp(belowBound, {
+            email: `registration-short-${runId}@demo.localhost`,
+            password,
+            username: "abc",
+          })
+        ).status === 400,
+    ]);
+
+    const relativeAvatar = await begin("avatar");
+    checks.push([
+      "a relative avatar is 400",
+      relativeAvatar !== undefined &&
+        (
+          await signUp(relativeAvatar, {
+            email: `registration-avatar-${runId}@demo.localhost`,
+            password,
+            avatar_url: "avatar.png",
+          })
+        ).status === 400,
+    ]);
+
+    const noPassword = await begin("password");
+    checks.push([
+      "a direct sign-up without a password is 400",
+      noPassword !== undefined &&
+        (await signUp(noPassword, { email: `registration-pw-${runId}@demo.localhost` })).status === 400,
+    ]);
+
+    const emailOnly = await patch({ sign_up_identifiers: ["email"] });
+    const rejectedUsername = await begin("username-off");
+    checks.push([
+      "a username the identifier policy does not offer is 400",
+      emailOnly.status === 200 &&
+        rejectedUsername !== undefined &&
+        (
+          await signUp(rejectedUsername, {
+            email: `registration-nouser-${runId}@demo.localhost`,
+            password,
+            username: "reguser",
+          })
+        ).status === 400,
+    ]);
+
+    const nameOnly = await patch({ sign_up_profile_fields: ["name"] });
+    const rejectedAvatar = await begin("avatar-off");
+    checks.push([
+      "an avatar the profile policy does not collect is 400",
+      nameOnly.status === 200 &&
+        rejectedAvatar !== undefined &&
+        (
+          await signUp(rejectedAvatar, {
+            email: `registration-noavatar-${runId}@demo.localhost`,
+            password,
+            avatar_url: "https://cdn.example/no.png",
+          })
+        ).status === 400,
+    ]);
+
+    const verified = await patch({ sign_up_email_verification_required: true });
+    const verifiedInteraction = await begin("verified");
+    const codeRequest = verifiedInteraction
+      ? await signUp(verifiedInteraction, { email: `registration-code-${runId}@demo.localhost` })
+      : undefined;
+    checks.push([
+      "switching verification back on makes sign-up mail a code",
+      verified.status === 200 &&
+        codeRequest?.status === 200 &&
+        (codeRequest.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    // The password belongs to the verify step while verification is on; sending it here is refused.
+    const earlyPassword = verifiedInteraction
+      ? await signUp(verifiedInteraction, {
+          email: `registration-early-${runId}@demo.localhost`,
+          password,
+        })
+      : undefined;
+    checks.push([
+      "the request step refuses a password while verification is on",
+      earlyPassword?.status === 400,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await patch(defaults).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "49",
+    title: "registration policy",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: validation 400s → policy → public read → direct sign-up → profile → bounds → identifier/profile/verification guards`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+
+  function failPolicy(why: string): StepResult {
+    return {
+      step: "49",
+      title: "registration policy",
+      status: "fail",
+      ms: Math.round(performance.now() - t),
+      detail: why,
+    };
+  }
+}
+
+/**
  * Step 37: an administrator can edit an account's profile, and the edit is audited.
  *
  * The username is a sign-in identifier, so its uniqueness and grammar are the same rules the
@@ -9900,6 +10227,7 @@ async function main(): Promise<number> {
   push(await accountAvatarFlow(base, adminToken));
   push(await trustedDevicePolicyFlow(base, adminToken));
   push(await ssoSwitchFlow(base, adminToken));
+  push(await registrationPolicyFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

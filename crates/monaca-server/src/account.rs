@@ -222,12 +222,17 @@ pub async fn update_account(
     Json(body): Json<UpdateProfileBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, mut account) = signed_in_account(&state, &tenant, &headers).await?;
+    let experience = state.store.sign_in_experience(&tenant).await?;
     let display_name = body
         .display_name
         .as_deref()
         .map(check_display_name)
         .transpose()?;
-    let username = body.username.as_deref().map(check_username).transpose()?;
+    let username = body
+        .username
+        .as_deref()
+        .map(|raw| check_username(raw, &experience))
+        .transpose()?;
     let avatar_url = body
         .avatar_url
         .as_deref()

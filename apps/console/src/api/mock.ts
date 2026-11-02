@@ -1310,6 +1310,12 @@ class MockStore {
       body.password_rejected_words === undefined &&
       body.session_ttl_secs === undefined &&
       body.refresh_token_ttl_secs === undefined &&
+      body.sign_up_identifiers === undefined &&
+      body.sign_up_email_verification_required === undefined &&
+      body.username_case_sensitive === undefined &&
+      body.username_min_length === undefined &&
+      body.username_max_length === undefined &&
+      body.sign_up_profile_fields === undefined &&
       (body.branding === undefined || brandingPatchIsEmpty(body.branding))
     ) {
       throw new ApiError("at least one switch must be present", {
@@ -1346,6 +1352,36 @@ class MockStore {
       !(body.mfa_trusted_device_ttl_days >= 1 && body.mfa_trusted_device_ttl_days <= 365)
     ) {
       throw new ApiError("mfa_trusted_device_ttl_days must be between 1 and 365", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (body.sign_up_identifiers !== undefined) {
+      const identifiers = body.sign_up_identifiers;
+      if (
+        identifiers.length === 0 ||
+        !identifiers.includes("email") ||
+        identifiers.some((identifier) => identifier !== "email" && identifier !== "username")
+      ) {
+        throw new ApiError(
+          "sign_up_identifiers must be a non-empty subset of email, username that contains email",
+          { status: 400, code: "MONACA_INVALID_REQUEST" },
+        );
+      }
+    }
+    if (
+      body.sign_up_profile_fields !== undefined &&
+      body.sign_up_profile_fields.some((field) => field !== "name" && field !== "avatar")
+    ) {
+      throw new ApiError("sign_up_profile_fields may only name name or avatar", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const usernameMin = body.username_min_length ?? this.experience.username_min_length;
+    const usernameMax = body.username_max_length ?? this.experience.username_max_length;
+    if (usernameMin < 3 || usernameMax > 32 || usernameMin > usernameMax) {
+      throw new ApiError("username lengths must be 3–32 characters and min must not exceed max", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
@@ -1420,6 +1456,17 @@ class MockStore {
       session_ttl_secs: body.session_ttl_secs ?? this.experience.session_ttl_secs,
       refresh_token_ttl_secs:
         body.refresh_token_ttl_secs ?? this.experience.refresh_token_ttl_secs,
+      sign_up_identifiers:
+        body.sign_up_identifiers ?? this.experience.sign_up_identifiers,
+      sign_up_email_verification_required:
+        body.sign_up_email_verification_required ??
+        this.experience.sign_up_email_verification_required,
+      username_case_sensitive:
+        body.username_case_sensitive ?? this.experience.username_case_sensitive,
+      username_min_length: usernameMin,
+      username_max_length: usernameMax,
+      sign_up_profile_fields:
+        body.sign_up_profile_fields ?? this.experience.sign_up_profile_fields,
       branding: { ...this.branding },
       updated_at: new Date().toISOString(),
     };
@@ -1449,6 +1496,12 @@ class MockStore {
         password_rejected_words: updated.password_rejected_words,
         session_ttl_secs: updated.session_ttl_secs,
         refresh_token_ttl_secs: updated.refresh_token_ttl_secs,
+        sign_up_identifiers: updated.sign_up_identifiers,
+        sign_up_email_verification_required: updated.sign_up_email_verification_required,
+        username_case_sensitive: updated.username_case_sensitive,
+        username_min_length: updated.username_min_length,
+        username_max_length: updated.username_max_length,
+        sign_up_profile_fields: updated.sign_up_profile_fields,
         branding: { ...updated.branding },
       },
     });

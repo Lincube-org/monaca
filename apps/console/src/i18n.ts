@@ -553,6 +553,23 @@ export const messages = {
       "Adds a create-account path to the hosted page. While it is off, the sign-up endpoints answer 403 MONACA_SIGN_UP_DISABLED.",
     signUpField: "Allow users to create their own accounts",
     signUpFieldHint: "A new account joins no organization; add it from Members afterwards.",
+    signUpPolicyHint:
+      "What the sign-up form accepts. Email is always an identifier; the rest is optional.",
+    signUpUsername: "Offer a username at sign-up",
+    signUpUsernameHint: "Without this, a new account can only be identified by its email address.",
+    signUpVerifyEmail: "Require an emailed code",
+    signUpVerifyEmailHint:
+      "When off, POST sign-up creates the account and signs in at once, so an address is not proved.",
+    usernameMin: "Shortest username",
+    usernameMax: "Longest username",
+    usernameCase: "Usernames are case-sensitive",
+    usernameCaseHint:
+      "When on, `Ada` and `ada` are different usernames and sign-in matches the typed case.",
+    signUpProfileFields: "Profile fields at sign-up",
+    profileName: "Display name",
+    profileAvatar: "Avatar URL",
+    invalidUsernameLength:
+      "Username lengths must be between 3 and 32 characters, and the shortest may not exceed the longest.",
     methods: "Sign-in methods",
     methodsHint:
       "At least one first-factor method must stay enabled — a tenant with neither has no way to sign in at all.",

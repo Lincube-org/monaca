@@ -97,6 +97,18 @@ export interface SignInExperience {
   password_reject_repetition_and_sequence: boolean;
   /** Lowercased words a password may not contain. */
   password_rejected_words: string[];
+  /** Which identifiers a new account may be registered with; `email` is always present. */
+  sign_up_identifiers: ("email" | "username")[];
+  /** Whether the address is proven with an emailed code before the account exists. */
+  sign_up_email_verification_required: boolean;
+  /** Whether usernames keep their case; when false the server folds them to lowercase. */
+  username_case_sensitive: boolean;
+  /** The tenant's shortest accepted username. */
+  username_min_length: number;
+  /** The tenant's longest accepted username. */
+  username_max_length: number;
+  /** Which optional profile fields the sign-up form collects, in addition to the address. */
+  sign_up_profile_fields: ("name" | "avatar")[];
   /** The optional hosted-page look. */
   branding: Branding;
 }
@@ -253,11 +265,35 @@ export function submitSignIn(
   });
 }
 
-/** Start self-service registration: mails a code for the address. */
-export function startSignUp(tenant: string, iid: string, email: string): Promise<CodeRequestResult> {
-  return call<CodeRequestResult>(`${base(tenant, iid)}/sign-up`, {
+/**
+ * What a sign-up collects on its first request.
+ *
+ * With email verification on, only `email` is read; the rest belongs to `sign-up/verify`. With it
+ * off, the same request creates the account, so it carries the password and the profile fields the
+ * tenant collects.
+ */
+export interface SignUpRequest {
+  email: string;
+  password?: string;
+  username?: string;
+  display_name?: string;
+  avatar_url?: string;
+}
+
+/**
+ * Start self-service registration.
+ *
+ * The answer follows the tenant's verification policy: a code request when the address must be
+ * proven, the ordinary sign-in result when the account was created in this request.
+ */
+export function startSignUp(
+  tenant: string,
+  iid: string,
+  body: SignUpRequest,
+): Promise<CodeRequestResult | SignInResult> {
+  return call<CodeRequestResult | SignInResult>(`${base(tenant, iid)}/sign-up`, {
     method: "POST",
-    body: JSON.stringify({ email }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -265,7 +301,14 @@ export function startSignUp(tenant: string, iid: string, email: string): Promise
 export function verifySignUp(
   tenant: string,
   iid: string,
-  body: { email: string; code: string; password: string; display_name?: string; username?: string },
+  body: {
+    email: string;
+    code: string;
+    password: string;
+    display_name?: string;
+    username?: string;
+    avatar_url?: string;
+  },
 ): Promise<SignInResult> {
   return call<SignInResult>(`${base(tenant, iid)}/sign-up/verify`, {
     method: "POST",

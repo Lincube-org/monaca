@@ -94,6 +94,12 @@ pub async fn sign_in_experience(
         "password_rejected_words": experience.password_rejected_words,
         "session_ttl_secs": experience.session_ttl_secs,
         "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
+        "sign_up_identifiers": experience.sign_up_identifiers,
+        "sign_up_email_verification_required": experience.sign_up_email_verification_required,
+        "username_case_sensitive": experience.username_case_sensitive,
+        "username_min_length": experience.username_min_length,
+        "username_max_length": experience.username_max_length,
+        "sign_up_profile_fields": experience.sign_up_profile_fields,
         "branding": crate::management::branding_json(&branding),
     })))
 }
@@ -454,12 +460,8 @@ pub async fn sign_in(
         .await
         .map_err(ApiError::Interaction)?;
     let tenant = state.tenant(&interaction.tenant).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .password_sign_in_enabled
-    {
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.password_sign_in_enabled {
         return Err(ApiError::problem(
             kinds::PASSWORD_SIGN_IN_DISABLED,
             "password sign-in is disabled for this tenant",
@@ -480,7 +482,7 @@ pub async fn sign_in(
 
     let account = state
         .store
-        .account_by_identifier(&tenant, identifier)
+        .account_by_identifier(&tenant, identifier, experience.username_case_sensitive)
         .await?;
 
     let authenticated = match account {
@@ -883,6 +885,22 @@ pub struct EmailBody {
     pub email: String,
 }
 
+/// `POST …/sign-up` body.
+#[derive(Debug, Deserialize)]
+pub struct SignUpBody {
+    /// The new account's address.
+    pub email: String,
+    /// The initial password; only read when email verification is disabled, because otherwise the
+    /// password belongs to the verification step.
+    pub password: Option<String>,
+    /// An optional username when the tenant offers that identifier (§6.1).
+    pub username: Option<String>,
+    /// An optional display name when the tenant collects one at sign-up.
+    pub display_name: Option<String>,
+    /// An optional avatar URL when the tenant collects one at sign-up.
+    pub avatar_url: Option<String>,
+}
+
 /// `POST …/sign-up/verify` body.
 #[derive(Debug, Deserialize)]
 pub struct SignUpVerifyBody {
@@ -896,6 +914,8 @@ pub struct SignUpVerifyBody {
     pub display_name: Option<String>,
     /// Optional username, a second sign-in identifier (§6.1).
     pub username: Option<String>,
+    /// An optional avatar URL when the tenant collects one at sign-up.
+    pub avatar_url: Option<String>,
 }
 
 /// The body of the email-code sign-in verification.
@@ -1062,27 +1082,32 @@ fn has_sequential_run(password: &str, run: usize) -> bool {
     false
 }
 
-/// The shortest and longest accepted username, in characters.
-const MIN_USERNAME_LEN: usize = 3;
-const MAX_USERNAME_LEN: usize = 32;
-
-/// Validate and normalise a username (§6.1).
+/// Validate and normalise a username under the tenant's policy (§6.1).
 ///
 /// It is a sign-in identifier, so it may not contain `@` (that is how the sign-in endpoint tells the
-/// two namespaces apart) and it is stored lowercased, matching the case-insensitive unique index.
-pub(crate) fn check_username(raw: &str) -> Result<String, ApiError> {
-    let username = raw.trim().to_lowercase();
+/// two namespaces apart). A tenant that keeps usernames case-sensitive stores them as typed and
+/// compares exactly; otherwise they are stored lowercased, matching the case-insensitive lookup.
+pub(crate) fn check_username(
+    raw: &str,
+    experience: &SignInExperienceRow,
+) -> Result<String, ApiError> {
+    let trimmed = raw.trim();
+    let username = if experience.username_case_sensitive {
+        trimmed.to_owned()
+    } else {
+        trimmed.to_lowercase()
+    };
+    let min = experience.username_min_length.max(1) as usize;
+    let max = experience.username_max_length.max(1) as usize;
     let length = username.chars().count();
-    if !(MIN_USERNAME_LEN..=MAX_USERNAME_LEN).contains(&length)
+    if !(min..=max).contains(&length)
         || !username
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            format!(
-                "username must be {MIN_USERNAME_LEN}-{MAX_USERNAME_LEN} letters, digits, `_` or `-`"
-            ),
+            format!("username must be {min}-{max} letters, digits, `_` or `-`"),
         ));
     }
     Ok(username)
@@ -1214,99 +1239,106 @@ pub(crate) async fn take_verification_code(
     Ok(())
 }
 
-/// `POST /t/{tenant}/interaction/{iid}/sign-up` — start self-service registration.
-pub async fn sign_up(
-    State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
-    Json(body): Json<EmailBody>,
-) -> Result<Json<Value>, ApiError> {
-    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .sign_up_enabled
+/// Validate the optional profile fields a sign-up carries against the tenant's policy.
+fn check_sign_up_profile(
+    experience: &SignInExperienceRow,
+    username: Option<&str>,
+    display_name: Option<&str>,
+    avatar_url: Option<&str>,
+) -> Result<(Option<String>, Option<String>, Option<String>), ApiError> {
+    let username = match username.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => {
+            if !experience
+                .sign_up_identifiers
+                .iter()
+                .any(|identifier| identifier == "username")
+            {
+                return Err(ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    "username is not an available sign-up identifier",
+                ));
+            }
+            Some(check_username(raw, experience)?)
+        }
+        None => None,
+    };
+    let display_name = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if display_name.is_some()
+        && !experience
+            .sign_up_profile_fields
+            .iter()
+            .any(|field| field == "name")
     {
         return Err(ApiError::problem(
-            kinds::SIGN_UP_DISABLED,
-            "self-service sign-up is disabled for this tenant",
+            kinds::INVALID_REQUEST,
+            "display_name is not collected at sign-up",
         ));
     }
-    let email = normalise_email(&body.email)?;
-    if state
-        .store
-        .account_by_email(&tenant, &email)
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::problem(
-            kinds::ACCOUNT_EXISTS,
-            "an account with this email already exists",
-        ));
-    }
-    request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email).await
+    let avatar_url = match avatar_url.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => {
+            if !experience
+                .sign_up_profile_fields
+                .iter()
+                .any(|field| field == "avatar")
+            {
+                return Err(ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    "avatar_url is not collected at sign-up",
+                ));
+            }
+            crate::account::check_avatar_url(raw)?
+        }
+        None => None,
+    };
+    Ok((
+        username,
+        display_name.map(str::to_owned),
+        avatar_url,
+    ))
 }
 
-/// `POST /t/{tenant}/interaction/{iid}/sign-up/verify` — prove the address and sign in.
-pub async fn sign_up_verify(
-    State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(body): Json<SignUpVerifyBody>,
+/// Create the account, join the interaction's org and finish the sign-in.
+#[allow(clippy::too_many_arguments)]
+async fn complete_sign_up(
+    state: Arc<AppState>,
+    tenant: TenantRow,
+    interaction: Interaction,
+    iid: &str,
+    headers: &HeaderMap,
+    email: &str,
+    password: &str,
+    username: Option<String>,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    let experience = state.store.sign_in_experience(&tenant).await?;
-    if !experience.sign_up_enabled {
-        return Err(ApiError::problem(
-            kinds::SIGN_UP_DISABLED,
-            "self-service sign-up is disabled for this tenant",
-        ));
-    }
-    let email = normalise_email(&body.email)?;
-    let local_part = email.split('@').next().unwrap_or(&email);
-    let mut identifiers = vec![local_part];
-    if let Some(username) = body.username.as_deref() {
-        identifiers.push(username);
-    }
-    check_password(&body.password, &experience, &identifiers)?;
-    // A second registration for the same address is a conflict even with a valid code, because
-    // the code proves the address, not the account's absence.
-    if state
-        .store
-        .account_by_email(&tenant, &email)
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::problem(
-            kinds::ACCOUNT_EXISTS,
-            "an account with this email already exists",
-        ));
-    }
-    take_verification_code(&state, &tenant, PURPOSE_SIGN_UP, &email, &body.code).await?;
-    let username = body.username.as_deref().map(check_username).transpose()?;
-
-    let phc = hash_password(body.password.clone(), state.argon)
+    let phc = hash_password(password.to_owned(), state.argon)
         .await
         .map_err(ApiError::internal)?;
-    let display_name = body
-        .display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_owned());
+    let display_name =
+        display_name.unwrap_or_else(|| email.split('@').next().unwrap_or(email).to_owned());
     let account = state
         .store
         .create_account(
             &tenant,
             AccountId::new(),
-            &email,
+            email,
             &display_name,
             Some(&phc),
             false,
             username.as_deref(),
         )
         .await?;
+    let account = match avatar_url.as_deref() {
+        Some(url) => {
+            state
+                .store
+                .update_avatar_url(&tenant, account.account_id(), Some(url))
+                .await?
+        }
+        None => account,
+    };
 
     // The new account joins the org the interaction issues into, so the flow can complete without
     // an admin round-trip. The org and tenant chains both record it (§8.1).
@@ -1362,7 +1394,142 @@ pub async fn sign_up_verify(
         tracing::warn!(%err, "could not append account.created audit event");
     }
 
-    finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
+    finish_sign_in(state, tenant, interaction, iid, headers, account).await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-up` — start self-service registration.
+///
+/// When the tenant requires an emailed code, this only requests one and the password and profile
+/// fields belong to `sign-up/verify`. When it does not, the same request creates the account and
+/// signs in, because there is nothing left to prove.
+pub async fn sign_up(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<SignUpBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.sign_up_enabled {
+        return Err(ApiError::problem(
+            kinds::SIGN_UP_DISABLED,
+            "self-service sign-up is disabled for this tenant",
+        ));
+    }
+    let email = normalise_email(&body.email)?;
+    if state
+        .store
+        .account_by_email(&tenant, &email)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::ACCOUNT_EXISTS,
+            "an account with this email already exists",
+        ));
+    }
+    let has_profile = body.username.is_some()
+        || body.display_name.is_some()
+        || body.avatar_url.is_some();
+    if experience.sign_up_email_verification_required {
+        if body.password.is_some() || has_profile {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "email verification is required; send the password and profile fields to sign-up/verify",
+            ));
+        }
+        return Ok(request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email)
+            .await?
+            .into_response());
+    }
+    let Some(password) = body.password else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "password is required when email verification is disabled",
+        ));
+    };
+    let (username, display_name, avatar_url) = check_sign_up_profile(
+        &experience,
+        body.username.as_deref(),
+        body.display_name.as_deref(),
+        body.avatar_url.as_deref(),
+    )?;
+    let local_part = email.split('@').next().unwrap_or(&email);
+    let mut identifiers = vec![local_part];
+    if let Some(username) = username.as_deref() {
+        identifiers.push(username);
+    }
+    check_password(&password, &experience, &identifiers)?;
+    complete_sign_up(
+        state,
+        tenant,
+        interaction,
+        &iid,
+        &headers,
+        &email,
+        &password,
+        username,
+        display_name,
+        avatar_url,
+    )
+    .await
+}
+
+/// `POST /t/{tenant}/interaction/{iid}/sign-up/verify` — prove the address and sign in.
+pub async fn sign_up_verify(
+    State(state): State<Arc<AppState>>,
+    Path((_tenant, iid)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<SignUpVerifyBody>,
+) -> Result<Response, ApiError> {
+    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.sign_up_enabled {
+        return Err(ApiError::problem(
+            kinds::SIGN_UP_DISABLED,
+            "self-service sign-up is disabled for this tenant",
+        ));
+    }
+    let email = normalise_email(&body.email)?;
+    let (username, display_name, avatar_url) = check_sign_up_profile(
+        &experience,
+        body.username.as_deref(),
+        body.display_name.as_deref(),
+        body.avatar_url.as_deref(),
+    )?;
+    let local_part = email.split('@').next().unwrap_or(&email);
+    let mut identifiers = vec![local_part];
+    if let Some(username) = username.as_deref() {
+        identifiers.push(username);
+    }
+    check_password(&body.password, &experience, &identifiers)?;
+    // A second registration for the same address is a conflict even with a valid code, because
+    // the code proves the address, not the account's absence.
+    if state
+        .store
+        .account_by_email(&tenant, &email)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::problem(
+            kinds::ACCOUNT_EXISTS,
+            "an account with this email already exists",
+        ));
+    }
+    take_verification_code(&state, &tenant, PURPOSE_SIGN_UP, &email, &body.code).await?;
+    complete_sign_up(
+        state,
+        tenant,
+        interaction,
+        &iid,
+        &headers,
+        &email,
+        &body.password,
+        username,
+        display_name,
+        avatar_url,
+    )
+    .await
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/sign-in/code` — request a passwordless sign-in code.

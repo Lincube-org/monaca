@@ -84,7 +84,25 @@ const privacyUrl = ref("");
 const supportEmail = ref("");
 const websiteUrl = ref("");
 const customCss = ref("");
+const signUpUsername = ref(false);
+const signUpEmailVerification = ref(true);
+const usernameCaseSensitive = ref(false);
+const usernameMinLength = ref(3);
+const usernameMaxLength = ref(32);
+const signUpProfileName = ref(true);
+const signUpProfileAvatar = ref(false);
 const formError = ref<string | null>(null);
+
+function signUpIdentifiers(): ("email" | "username")[] {
+  return signUpUsername.value ? ["email", "username"] : ["email"];
+}
+
+function signUpProfileFields(): ("name" | "avatar")[] {
+  const fields: ("name" | "avatar")[] = [];
+  if (signUpProfileName.value) fields.push("name");
+  if (signUpProfileAvatar.value) fields.push("avatar");
+  return fields;
+}
 
 /** The last server values the form was synchronised with; the save diffs against it. */
 const baseline = ref<SignInExperience | null>(null);
@@ -160,6 +178,12 @@ interface SwitchForm {
   rejectedWords: string[];
   sessionDays: number;
   refreshDays: number;
+  signUpIdentifiers: ("email" | "username")[];
+  signUpEmailVerification: boolean;
+  usernameCaseSensitive: boolean;
+  usernameMinLength: number;
+  usernameMaxLength: number;
+  signUpProfileFields: ("name" | "avatar")[];
   branding: Branding;
 }
 
@@ -181,6 +205,12 @@ function formValues(): SwitchForm {
     rejectedWords: rejectedWordsValues(),
     sessionDays: sessionDays.value,
     refreshDays: refreshDays.value,
+    signUpIdentifiers: signUpIdentifiers(),
+    signUpEmailVerification: signUpEmailVerification.value,
+    usernameCaseSensitive: usernameCaseSensitive.value,
+    usernameMinLength: usernameMinLength.value,
+    usernameMaxLength: usernameMaxLength.value,
+    signUpProfileFields: signUpProfileFields(),
     branding: brandingValues(),
   };
 }
@@ -203,6 +233,12 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     sameWords(value.password_rejected_words, form.rejectedWords) &&
     storedDays(value.session_ttl_secs, SESSION_MAX_DAYS) === form.sessionDays &&
     storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS) === form.refreshDays &&
+    sameWords(value.sign_up_identifiers, form.signUpIdentifiers) &&
+    value.sign_up_email_verification_required === form.signUpEmailVerification &&
+    value.username_case_sensitive === form.usernameCaseSensitive &&
+    value.username_min_length === form.usernameMinLength &&
+    value.username_max_length === form.usernameMaxLength &&
+    sameWords(value.sign_up_profile_fields, form.signUpProfileFields) &&
     sameBranding(value.branding, form.branding)
   );
 }
@@ -225,6 +261,13 @@ function adopt(value: SignInExperience): void {
   rejectedWordsText.value = value.password_rejected_words.join("\n");
   sessionDays.value = storedDays(value.session_ttl_secs, SESSION_MAX_DAYS);
   refreshDays.value = storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS);
+  signUpUsername.value = value.sign_up_identifiers.includes("username");
+  signUpEmailVerification.value = value.sign_up_email_verification_required;
+  usernameCaseSensitive.value = value.username_case_sensitive;
+  usernameMinLength.value = value.username_min_length;
+  usernameMaxLength.value = value.username_max_length;
+  signUpProfileName.value = value.sign_up_profile_fields.includes("name");
+  signUpProfileAvatar.value = value.sign_up_profile_fields.includes("avatar");
   brandName.value = value.branding.display_name ?? "";
   logoUrl.value = value.branding.logo_url ?? "";
   darkLogoUrl.value = value.branding.dark_logo_url ?? "";
@@ -275,6 +318,13 @@ watch(
     websiteUrl,
     customCss,
     rejectedWordsText,
+    signUpUsername,
+    signUpEmailVerification,
+    usernameCaseSensitive,
+    usernameMinLength,
+    usernameMaxLength,
+    signUpProfileName,
+    signUpProfileAvatar,
   ],
   () => (formError.value = null),
 );
@@ -396,6 +446,14 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidRejectedWords");
     return;
   }
+  if (
+    usernameMinLength.value < 3 ||
+    usernameMaxLength.value > 32 ||
+    usernameMinLength.value > usernameMaxLength.value
+  ) {
+    formError.value = t("signInExperience.invalidUsernameLength");
+    return;
+  }
   if (sessionDays.value < SESSION_MIN_DAYS || sessionDays.value > SESSION_MAX_DAYS) {
     formError.value = t("signInExperience.invalidSessionTtl");
     return;
@@ -462,6 +520,24 @@ async function save(): Promise<void> {
   if (storedDays(base.refresh_token_ttl_secs, REFRESH_MAX_DAYS) !== refreshDays.value) {
     body.refresh_token_ttl_secs = refreshDays.value * 86_400;
   }
+  if (!sameWords(base.sign_up_identifiers, signUpIdentifiers())) {
+    body.sign_up_identifiers = signUpIdentifiers();
+  }
+  if (signUpEmailVerification.value !== base.sign_up_email_verification_required) {
+    body.sign_up_email_verification_required = signUpEmailVerification.value;
+  }
+  if (usernameCaseSensitive.value !== base.username_case_sensitive) {
+    body.username_case_sensitive = usernameCaseSensitive.value;
+  }
+  if (usernameMinLength.value !== base.username_min_length) {
+    body.username_min_length = usernameMinLength.value;
+  }
+  if (usernameMaxLength.value !== base.username_max_length) {
+    body.username_max_length = usernameMaxLength.value;
+  }
+  if (!sameWords(base.sign_up_profile_fields, signUpProfileFields())) {
+    body.sign_up_profile_fields = signUpProfileFields();
+  }
   if (!sameBranding(base.branding, brandingValues())) {
     body.branding = {
       display_name: brandName.value.trim(),
@@ -490,6 +566,13 @@ async function save(): Promise<void> {
   } catch (error) {
     formError.value = describeError(error).title;
   }
+}
+
+function setUsernameLength(which: "min" | "max", value: string | number): void {
+  const parsed = typeof value === "number" ? value : Number.parseInt(value, 10);
+  const next = Number.isNaN(parsed) ? 0 : parsed;
+  if (which === "min") usernameMinLength.value = next;
+  else usernameMaxLength.value = next;
 }
 
 function formatStamp(at: string): string {
@@ -557,6 +640,112 @@ function formatStamp(at: string): string {
                   <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
                     {{ t('signInExperience.signUpFieldHint') }}
                   </p>
+                </div>
+              </div>
+
+              <div v-if="signUp" class="mt-4 flex flex-col gap-3 border-t border-rule pt-4">
+                <p class="text-[11.5px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.signUpPolicyHint') }}
+                </p>
+
+                <label class="flex items-start gap-2.5">
+                  <Checkbox
+                    id="sign-up-username"
+                    :model-value="signUpUsername"
+                    :disabled="update.isPending.value"
+                    @update:model-value="(value: boolean | 'indeterminate') => (signUpUsername = value === true)"
+                  />
+                  <span class="min-w-0 -mt-0.5">
+                    <Label for="sign-up-username">{{ t('signInExperience.signUpUsername') }}</Label>
+                    <span class="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+                      {{ t('signInExperience.signUpUsernameHint') }}
+                    </span>
+                  </span>
+                </label>
+
+                <label class="flex items-start gap-2.5">
+                  <Checkbox
+                    id="sign-up-verify-email"
+                    :model-value="signUpEmailVerification"
+                    :disabled="update.isPending.value"
+                    @update:model-value="(value: boolean | 'indeterminate') => (signUpEmailVerification = value === true)"
+                  />
+                  <span class="min-w-0 -mt-0.5">
+                    <Label for="sign-up-verify-email">{{ t('signInExperience.signUpVerifyEmail') }}</Label>
+                    <span class="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+                      {{ t('signInExperience.signUpVerifyEmailHint') }}
+                    </span>
+                  </span>
+                </label>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="flex flex-col gap-1.5">
+                    <Label for="username-min-length">{{ t('signInExperience.usernameMin') }}</Label>
+                    <Input
+                      id="username-min-length"
+                      type="number"
+                      min="3"
+                      max="32"
+                      :model-value="usernameMinLength"
+                      :invalid="usernameMinLength < 3 || usernameMinLength > 32"
+                      :disabled="update.isPending.value"
+                      class="w-[120px]"
+                      @update:model-value="(value: string | number) => setUsernameLength('min', value)"
+                    />
+                  </div>
+                  <div class="flex flex-col gap-1.5">
+                    <Label for="username-max-length">{{ t('signInExperience.usernameMax') }}</Label>
+                    <Input
+                      id="username-max-length"
+                      type="number"
+                      min="3"
+                      max="32"
+                      :model-value="usernameMaxLength"
+                      :invalid="usernameMaxLength > 32 || usernameMaxLength < usernameMinLength"
+                      :disabled="update.isPending.value"
+                      class="w-[120px]"
+                      @update:model-value="(value: string | number) => setUsernameLength('max', value)"
+                    />
+                  </div>
+                </div>
+
+                <label class="flex items-start gap-2.5">
+                  <Checkbox
+                    id="username-case-sensitive"
+                    :model-value="usernameCaseSensitive"
+                    :disabled="update.isPending.value"
+                    @update:model-value="(value: boolean | 'indeterminate') => (usernameCaseSensitive = value === true)"
+                  />
+                  <span class="min-w-0 -mt-0.5">
+                    <Label for="username-case-sensitive">{{ t('signInExperience.usernameCase') }}</Label>
+                    <span class="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+                      {{ t('signInExperience.usernameCaseHint') }}
+                    </span>
+                  </span>
+                </label>
+
+                <div class="flex flex-col gap-2">
+                  <Label>{{ t('signInExperience.signUpProfileFields') }}</Label>
+                  <div class="flex flex-wrap items-center gap-4">
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="sign-up-profile-name"
+                        :model-value="signUpProfileName"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (signUpProfileName = value === true)"
+                      />
+                      <span class="text-[12px]">{{ t('signInExperience.profileName') }}</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="sign-up-profile-avatar"
+                        :model-value="signUpProfileAvatar"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (signUpProfileAvatar = value === true)"
+                      />
+                      <span class="text-[12px]">{{ t('signInExperience.profileAvatar') }}</span>
+                    </label>
+                  </div>
                 </div>
               </div>
             </CardContent>
