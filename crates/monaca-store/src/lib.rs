@@ -36,7 +36,7 @@ pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
     BrandingRow, ClientRow, ConsentRow, EmailTemplateRow, GrantRow, LoginFailureRow,
     OrgInvitationRow, OrgRoleRow, ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow,
-    SignInExperienceRow, SignInGuardrailsPatch, SigningKeyRow, SocialConnectorRow,
+    SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow, SocialConnectorRow,
     SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow,
     VerificationRow, WebhookDeliveryRow, WebhookRow,
 };

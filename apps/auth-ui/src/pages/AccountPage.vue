@@ -39,13 +39,13 @@ import {
   type TrustedDevice,
 } from "@/api/account";
 import { PasskeyError, createPasskey, passkeysSupported } from "@/api/webauthn";
-import { getSignInExperience } from "@/api/interaction";
+import { getSignInCopy, getSignInExperience } from "@/api/interaction";
 import {
   listSocialConnectors,
   socialLinkUrl,
   type SocialConnector,
 } from "@/api/social";
-import { t } from "@/i18n";
+import { applyPhraseOverrides, t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 import { passwordMeetsPolicy } from "@/lib/password-policy";
 
@@ -247,6 +247,12 @@ async function load(): Promise<void> {
       window.history.replaceState(null, "", window.location.pathname);
     }
     socialConnectors.value = await listSocialConnectors(tenant.value);
+    try {
+      const copy = await getSignInCopy(tenant.value);
+      applyPhraseOverrides(copy.language, copy.phrases);
+    } catch {
+      // Keep the built-in copy; the account itself still loads.
+    }
     try {
       const switches = await getSignInExperience(tenant.value);
       passwordMinLength.value = switches.password_min_length;

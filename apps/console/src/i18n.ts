@@ -698,6 +698,38 @@ export const messages = {
     trustedDays: "Trust duration (days)",
     trustedDaysHint: "A remembered browser expires after this many days, between 1 and 365.",
     invalidTrustedDays: "The trust duration is 1–365 days.",
+    language: "Language and custom copy",
+    languageHint:
+      "The language the hosted page starts in, and any phrase it may replace with your own wording.",
+    defaultLanguage: "Default language",
+    defaultLanguageHint:
+      "Used when the visitor's browser asks for a language that has no copy of its own.",
+    saveDefault: "Save default",
+    editLanguage: "Edit a language",
+    editLanguageHint:
+      "Each save replaces that language's whole phrase set. A blank value removes one key; saving an empty set removes the language.",
+    removeLanguage: "Remove language",
+    phraseKey: "Key, such as signIn.title",
+    phraseValue: "Your copy",
+    addPhrase: "Add phrase",
+    savePhrases: "Save copy",
+    phrasesHint:
+      "Keys are the dotted camelCase names the hosted page renders. Not every built-in key needs a value; unknown keys are stored but never shown.",
+    removePhrase: "Remove phrase",
+    addLanguage: "Add a language",
+    languagePlaceholder: "de or pt-BR",
+    startLanguage: "Start editing",
+    addLanguageHint:
+      "Enter a BCP 47 tag. The language is stored once you save its copy; the default language cannot be removed.",
+    invalidCopyLanguage: "Enter a language tag such as de or pt-BR.",
+    invalidCopyKey: "Keys need 2–4 dotted camelCase segments, such as signIn.title.",
+    invalidCopyValue: "A phrase must be at most 500 characters.",
+    duplicateCopyKey: "Each key may appear once.",
+    defaultLanguageRequired:
+      "The default language cannot be removed; make another language the default first.",
+    copyUnavailable: "The custom copy could not be loaded. The other cards are unaffected.",
+    copySavedToast: "Custom copy updated",
+    copySavedDescription: "{tenant}'s hosted page now uses this copy.",
     save: "Save changes",
     saving: "Saving",
     discard: "Discard",

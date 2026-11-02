@@ -332,6 +332,37 @@ export interface CaptchaSettings {
 }
 
 /**
+ * One language's overrides of the hosted page's copy (§6.1 sign-in experience).
+ *
+ * The built-in dictionary is English; `phrases` replaces it key by key. A key the hosted page does
+ * not know is stored but never rendered, so a typo is inert rather than copy the page cannot place.
+ */
+export interface SignInCopyLanguage {
+  /** A lowercased BCP 47 tag. */
+  language: string;
+  /** Replacements keyed by the hosted page's dotted message keys, such as `signIn.title`. */
+  phrases: Record<string, string>;
+}
+
+export interface SignInCopy {
+  /** The language used when neither the browser nor `?lang=` names another. */
+  default_language: string;
+  /** The default language plus every language with overrides. */
+  languages: SignInCopyLanguage[];
+}
+
+/**
+ * The complete phrase set for `language` replaces what was stored; `null` or a blank string
+ * deletes one key, and an empty set removes the language. `default_language` may change in the
+ * same patch, so the two writes land together.
+ */
+export interface UpdateSignInCopyRequest {
+  default_language?: string;
+  language?: string;
+  phrases?: Record<string, string | null>;
+}
+
+/**
  * One mail purpose's copy (§6.2 `email-templates`).
  *
  * `subject` and `body` are the effective values: the tenant's row when `customized`, otherwise the

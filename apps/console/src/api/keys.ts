@@ -31,6 +31,8 @@ export const queryKeys = {
 
   signInExperience: () => ["sign-in-experience"] as const,
 
+  signInCopy: () => ["sign-in-copy"] as const,
+
   emailTemplates: () => ["email-templates"] as const,
 
   webhooks: () => ["webhooks"] as const,

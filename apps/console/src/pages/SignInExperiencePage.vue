@@ -17,16 +17,27 @@ import {
   Textarea,
   toast,
 } from "@monaca/ui";
-import { CircleAlert, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-vue-next";
+import { CircleAlert, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
 import { describeError } from "@/api/contract";
-import type { Branding, SignInExperience, UpdateSignInExperienceRequest } from "@/api/types";
+import type {
+  Branding,
+  SignInCopy,
+  SignInExperience,
+  UpdateSignInExperienceRequest,
+} from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
-import { useConnectors, useSignInExperience, useUpdateSignInExperience } from "@/queries";
+import {
+  useConnectors,
+  useSignInCopy,
+  useSignInExperience,
+  useUpdateSignInCopy,
+  useUpdateSignInExperience,
+} from "@/queries";
 import { useUiStore } from "@/stores/ui";
 
 /**
@@ -48,6 +59,8 @@ const ui = useUiStore();
 const experience = useSignInExperience();
 const connectors = useConnectors();
 const update = useUpdateSignInExperience();
+const copy = useSignInCopy();
+const updateCopy = useUpdateSignInCopy();
 
 const signUp = ref(false);
 const password = ref(true);
@@ -727,6 +740,207 @@ function setUsernameLength(which: "min" | "max", value: string | number): void {
   const next = Number.isNaN(parsed) ? 0 : parsed;
   if (which === "min") usernameMinLength.value = next;
   else usernameMaxLength.value = next;
+}
+
+/** The phrase-key grammar the server enforces: 2–4 dotted camelCase segments. */
+const PHRASE_KEY = /^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){1,3}$/;
+const MAX_PHRASES = 50;
+const MAX_PHRASE_CHARS = 500;
+const LANGUAGE =
+  /^[a-z]{2,3}(-[a-z0-9]{1,8})*$/;
+
+interface PhraseRow {
+  key: string;
+  value: string;
+}
+
+const copyBaseline = ref<SignInCopy | null>(null);
+const copyDefaultLanguage = ref("en");
+const copyLanguage = ref("");
+const copyPhraseRows = ref<PhraseRow[]>([]);
+const copyNewLanguage = ref("");
+const copyError = ref<string | null>(null);
+
+const copyLanguages = computed(() => copy.data.value?.languages ?? []);
+
+function phraseRowsFor(value: SignInCopy, language: string): PhraseRow[] {
+  const stored = value.languages.find((entry) => entry.language === language)?.phrases ?? {};
+  const rows = Object.entries(stored)
+    .sort(([left], [right]) => (left < right ? -1 : 1))
+    .map(([key, text]) => ({ key, value: text }));
+  return rows.length > 0 ? rows : [{ key: "", value: "" }];
+}
+
+function adoptCopy(value: SignInCopy): void {
+  copyBaseline.value = value;
+  copyDefaultLanguage.value = value.default_language;
+  const languages = value.languages.map((entry) => entry.language);
+  const selected = languages.includes(copyLanguage.value)
+    ? copyLanguage.value
+    : (languages[0] ?? "");
+  copyLanguage.value = selected;
+  copyPhraseRows.value = phraseRowsFor(value, selected);
+  copyError.value = null;
+}
+
+/** The rows as the server will store them: trimmed, blank rows dropped. */
+function copyPhraseValues(): Record<string, string> {
+  const phrases: Record<string, string> = {};
+  for (const row of copyPhraseRows.value) {
+    const key = row.key.trim();
+    const text = row.value.trim();
+    if (key === "" && text === "") continue;
+    if (text === "") continue;
+    phrases[key] = text;
+  }
+  return phrases;
+}
+
+const copyIssue = computed<"key" | "value" | "duplicate" | null>(() => {
+  const seen = new Set<string>();
+  for (const row of copyPhraseRows.value) {
+    const key = row.key.trim();
+    const text = row.value.trim();
+    if (key === "" && text === "") continue;
+    if (!PHRASE_KEY.test(key)) return "key";
+    if ([...text].length > MAX_PHRASE_CHARS) return "value";
+    if (seen.has(key)) return "duplicate";
+    seen.add(key);
+  }
+  return null;
+});
+
+function copyMatches(value: SignInCopy): boolean {
+  const stored = value.languages.find((entry) => entry.language === copyLanguage.value)?.phrases;
+  if (stored === undefined) return false;
+  const current = copyPhraseValues();
+  const keys = Object.keys(current);
+  return (
+    keys.length === Object.keys(stored).length &&
+    keys.every((key) => stored[key] === current[key])
+  );
+}
+
+const copyDirty = computed(() => copyBaseline.value !== null && !copyMatches(copyBaseline.value));
+
+/**
+ * A refetch must not discard edits in progress: adopt the incoming document when the rows still
+ * match the previous server state, when they match the new state, or before anything was edited.
+ */
+watch(
+  () => copy.data.value,
+  (next) => {
+    if (!next) return;
+    if (copyBaseline.value === null || !copyDirty.value || copyMatches(next)) adoptCopy(next);
+  },
+  { immediate: true },
+);
+
+function selectCopyLanguage(language: string): void {
+  copyLanguage.value = language;
+  if (copyBaseline.value) {
+    copyPhraseRows.value = phraseRowsFor(copyBaseline.value, language);
+  }
+  copyError.value = null;
+}
+
+function setPhraseRow(index: number, field: "key" | "value", raw: string | number): void {
+  const row = copyPhraseRows.value[index];
+  if (!row) return;
+  row[field] = String(raw);
+  copyError.value = null;
+}
+
+function addCopyRow(): void {
+  if (copyPhraseRows.value.length >= MAX_PHRASES) return;
+  copyPhraseRows.value.push({ key: "", value: "" });
+}
+
+function removeCopyRow(index: number): void {
+  copyPhraseRows.value.splice(index, 1);
+  if (copyPhraseRows.value.length === 0) copyPhraseRows.value.push({ key: "", value: "" });
+  copyError.value = null;
+}
+
+function normaliseCopyLanguage(raw: string): string | null {
+  const language = raw.trim().toLowerCase();
+  if (language.length < 2 || language.length > 35 || !LANGUAGE.test(language)) return null;
+  return language;
+}
+
+/** A new tag is only prepared for editing; the language exists once its copy is saved. */
+function startCopyLanguage(): void {
+  const language = normaliseCopyLanguage(copyNewLanguage.value);
+  if (language === null) {
+    copyError.value = t("signInExperience.invalidCopyLanguage");
+    return;
+  }
+  const known = copyLanguages.value.some((entry) => entry.language === language);
+  if (known) {
+    copyNewLanguage.value = "";
+    selectCopyLanguage(language);
+    return;
+  }
+  copyLanguage.value = language;
+  copyPhraseRows.value = [{ key: "", value: "" }];
+  copyNewLanguage.value = "";
+  copyError.value = null;
+}
+
+async function saveCopyDefault(): Promise<void> {
+  if (!copyBaseline.value || copyDefaultLanguage.value === copyBaseline.value.default_language) {
+    return;
+  }
+  copyError.value = null;
+  try {
+    const updated = await updateCopy.mutateAsync({
+      default_language: copyDefaultLanguage.value,
+    });
+    adoptCopy(updated);
+    toast({
+      title: t("signInExperience.copySavedToast"),
+      description: t("signInExperience.copySavedDescription", { tenant: ui.tenant }),
+      variant: "success",
+    });
+  } catch (error) {
+    copyError.value = describeError(error).title;
+  }
+}
+
+async function saveCopyPhrases(): Promise<void> {
+  if (copyLanguage.value === "" || copyIssue.value !== null) return;
+  copyError.value = null;
+  try {
+    const updated = await updateCopy.mutateAsync({
+      language: copyLanguage.value,
+      phrases: copyPhraseValues(),
+    });
+    adoptCopy(updated);
+    toast({
+      title: t("signInExperience.copySavedToast"),
+      description: t("signInExperience.copySavedDescription", { tenant: ui.tenant }),
+      variant: "success",
+    });
+  } catch (error) {
+    copyError.value = describeError(error).title;
+  }
+}
+
+async function removeCopyLanguage(): Promise<void> {
+  if (!copyBaseline.value || copyLanguage.value === copyBaseline.value.default_language) {
+    copyError.value = t("signInExperience.defaultLanguageRequired");
+    return;
+  }
+  copyError.value = null;
+  try {
+    const updated = await updateCopy.mutateAsync({
+      language: copyLanguage.value,
+      phrases: {},
+    });
+    adoptCopy(updated);
+  } catch (error) {
+    copyError.value = describeError(error).title;
+  }
 }
 
 function formatStamp(at: string): string {
@@ -1569,6 +1783,194 @@ function formatStamp(at: string): string {
                   {{ t('signInExperience.invalidTrustedDays') }}
                 </p>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{{ t('signInExperience.language') }}</CardTitle>
+              <CardDescription>{{ t('signInExperience.languageHint') }}</CardDescription>
+            </CardHeader>
+            <CardContent class="flex flex-col gap-4">
+              <p v-if="copy.isPending.value" class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t('common.loading') }}
+              </p>
+              <p v-else-if="copy.error.value" class="text-[11.5px] leading-snug text-deny">
+                {{ t('signInExperience.copyUnavailable') }}
+              </p>
+              <template v-else>
+                <div class="flex flex-col gap-1.5">
+                  <Label for="copy-default-language">{{ t('signInExperience.defaultLanguage') }}</Label>
+                  <div class="flex items-center gap-2">
+                    <NativeSelect
+                      id="copy-default-language"
+                      :model-value="copyDefaultLanguage"
+                      :disabled="updateCopy.isPending.value"
+                      @update:model-value="(value: string) => (copyDefaultLanguage = value)"
+                    >
+                      <option
+                        v-for="entry in copyLanguages"
+                        :key="entry.language"
+                        :value="entry.language"
+                      >
+                        {{ entry.language }}
+                      </option>
+                    </NativeSelect>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      :disabled="
+                        updateCopy.isPending.value ||
+                        copyDefaultLanguage === (copy.data.value?.default_language ?? '')
+                      "
+                      @click="saveCopyDefault"
+                    >
+                      {{ t('signInExperience.saveDefault') }}
+                    </Button>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.defaultLanguageHint') }}
+                  </p>
+                </div>
+
+                <Separator />
+
+                <div class="flex flex-col gap-1.5">
+                  <Label for="copy-language">{{ t('signInExperience.editLanguage') }}</Label>
+                  <div class="flex items-center gap-2">
+                    <NativeSelect
+                      id="copy-language"
+                      :model-value="copyLanguage"
+                      :disabled="updateCopy.isPending.value"
+                      @update:model-value="(value: string) => selectCopyLanguage(value)"
+                    >
+                      <option v-for="entry in copyLanguages" :key="entry.language" :value="entry.language">
+                        {{ entry.language }}
+                      </option>
+                      <option
+                        v-if="
+                          copyLanguage &&
+                          !copyLanguages.some((entry) => entry.language === copyLanguage)
+                        "
+                        :value="copyLanguage"
+                      >
+                        {{ copyLanguage }}
+                      </option>
+                    </NativeSelect>
+                    <Button
+                      v-if="
+                        copyLanguage !== (copy.data.value?.default_language ?? '') &&
+                        copyLanguages.some((entry) => entry.language === copyLanguage)
+                      "
+                      variant="ghost"
+                      size="sm"
+                      :disabled="updateCopy.isPending.value"
+                      @click="removeCopyLanguage"
+                    >
+                      {{ t('signInExperience.removeLanguage') }}
+                    </Button>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.editLanguageHint') }}
+                  </p>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                  <div
+                    v-for="(row, index) in copyPhraseRows"
+                    :key="index"
+                    class="flex items-start gap-2"
+                  >
+                    <Input
+                      :model-value="row.key"
+                      :placeholder="t('signInExperience.phraseKey')"
+                      :aria-label="t('signInExperience.phraseKey')"
+                      class="flex-1 font-mono"
+                      :disabled="updateCopy.isPending.value"
+                      @update:model-value="(value: string | number) => setPhraseRow(index, 'key', value)"
+                    />
+                    <Input
+                      :model-value="row.value"
+                      :placeholder="t('signInExperience.phraseValue')"
+                      :aria-label="t('signInExperience.phraseValue')"
+                      class="flex-[2]"
+                      :invalid="[...row.value.trim()].length > MAX_PHRASE_CHARS"
+                      :disabled="updateCopy.isPending.value"
+                      @update:model-value="(value: string | number) => setPhraseRow(index, 'value', value)"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      :aria-label="t('signInExperience.removePhrase')"
+                      :disabled="updateCopy.isPending.value"
+                      @click="removeCopyRow(index)"
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                  <p v-if="copyIssue !== null" class="text-[11.5px] leading-snug text-deny">
+                    {{
+                      copyIssue === 'key'
+                        ? t('signInExperience.invalidCopyKey')
+                        : copyIssue === 'value'
+                          ? t('signInExperience.invalidCopyValue')
+                          : t('signInExperience.duplicateCopyKey')
+                    }}
+                  </p>
+                  <div class="flex items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      :disabled="updateCopy.isPending.value || copyPhraseRows.length >= MAX_PHRASES"
+                      @click="addCopyRow"
+                    >
+                      {{ t('signInExperience.addPhrase') }}
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      :disabled="updateCopy.isPending.value || copyLanguage === '' || copyIssue !== null"
+                      @click="saveCopyPhrases"
+                    >
+                      {{ t('signInExperience.savePhrases') }}
+                    </Button>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.phrasesHint') }}
+                  </p>
+                </div>
+
+                <Separator />
+
+                <div class="flex flex-col gap-1.5">
+                  <Label for="copy-new-language">{{ t('signInExperience.addLanguage') }}</Label>
+                  <div class="flex items-center gap-2">
+                    <Input
+                      id="copy-new-language"
+                      :model-value="copyNewLanguage"
+                      :placeholder="t('signInExperience.languagePlaceholder')"
+                      class="w-[160px]"
+                      :disabled="updateCopy.isPending.value"
+                      @update:model-value="(value: string | number) => (copyNewLanguage = String(value))"
+                    />
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      :disabled="updateCopy.isPending.value || copyNewLanguage.trim() === ''"
+                      @click="startCopyLanguage"
+                    >
+                      {{ t('signInExperience.startLanguage') }}
+                    </Button>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.addLanguageHint') }}
+                  </p>
+                </div>
+
+                <p v-if="copyError !== null" class="text-[11.5px] leading-snug text-deny">
+                  {{ copyError }}
+                </p>
+              </template>
             </CardContent>
           </Card>
         </div>

@@ -41,6 +41,7 @@ import type {
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
+  SignInCopy,
   SignInExperience,
   SsoConnector,
   TenantRole,
@@ -50,6 +51,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -152,6 +154,14 @@ export interface MonacaApi {
    */
   getSignInExperience(): Promise<SignInExperience>;
   updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience>;
+
+  /**
+   * The hosted page's language and custom copy. A phrase is addressed by the same dotted key the
+   * page renders; an unknown key is stored but never shown. A patch replaces one language's whole
+   * set, so omitted keys are deletions.
+   */
+  getSignInCopy(): Promise<SignInCopy>;
+  updateSignInCopy(body: UpdateSignInCopyRequest): Promise<SignInCopy>;
 
   /**
    * The copy every outbox mail renders. A purpose without a tenant row answers the built-in

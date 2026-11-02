@@ -19,6 +19,7 @@ import {
   InteractionError,
   getInteraction,
   getSignInExperience,
+  getSignInCopy,
   submitSignIn,
   verifyMfa,
   getPasskeySignInOptions,
@@ -50,7 +51,7 @@ import {
   type SocialConnector,
 } from "@/api/social";
 import { findSsoConnector, ssoSignInUrl, type SsoConnector } from "@/api/sso";
-import { t } from "@/i18n";
+import { applyPhraseOverrides, t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 import { brandStyle, supportMailto, usableUrl } from "@/lib/branding";
 import { passwordMeetsPolicy } from "@/lib/password-policy";
@@ -588,6 +589,14 @@ onMounted(async () => {
     // a hint about who the client expects, not an assertion about who this browser is.
     if (details.value.login_hint) {
       email.value = details.value.login_hint;
+    }
+    // The tenant's language arrives with its overrides; the built-in copy stays for any key the
+    // tenant did not translate, and a failed read must not keep a visitor from signing in.
+    try {
+      const copy = await getSignInCopy(tenantFromUrl.value);
+      applyPhraseOverrides(copy.language, copy.phrases);
+    } catch {
+      // Keep the built-in copy.
     }
     // A valid SSO session already authenticated this interaction; only the consent step remains.
     if (details.value.signed_in && details.value.consent_required) {

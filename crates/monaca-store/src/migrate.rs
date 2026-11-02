@@ -229,6 +229,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "per-application CORS allowed origins (M1)",
         include_str!("../migrations/tenant_38.sql"),
     ),
+    (
+        39,
+        "tenant language and custom sign-in copy (M1)",
+        include_str!("../migrations/tenant_39.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

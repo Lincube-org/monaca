@@ -1751,6 +1751,124 @@ describe("sign-in experience", () => {
   });
 });
 
+describe("tenant language and custom copy", () => {
+  it("starts with the default language listed and no overrides", async () => {
+    expect(await mockApi.getSignInCopy()).toEqual({
+      default_language: "en",
+      languages: [{ language: "en", phrases: {} }],
+    });
+  });
+
+  it("replaces a language's whole phrase set and lists the default even when empty", async () => {
+    const stored = await mockApi.updateSignInCopy({
+      language: "DE",
+      phrases: {
+        "signIn.title": "  Anmelden  ",
+        "errors.accountLocked": "Gesperrt",
+        "brand.website": "   ",
+      },
+    });
+    expect(stored.default_language).toBe("en");
+    expect(stored.languages).toEqual([
+      {
+        language: "de",
+        phrases: { "signIn.title": "Anmelden", "errors.accountLocked": "Gesperrt" },
+      },
+      { language: "en", phrases: {} },
+    ]);
+
+    // The patch is the complete set: an omitted key is deleted, not kept.
+    const replaced = await mockApi.updateSignInCopy({
+      language: "de",
+      phrases: { "signIn.title": "Einloggen" },
+    });
+    expect(replaced.languages).toEqual([
+      { language: "de", phrases: { "signIn.title": "Einloggen" } },
+      { language: "en", phrases: {} },
+    ]);
+
+    // Emptying a non-default language removes it; null deletes one key as well.
+    const cleared = await mockApi.updateSignInCopy({
+      language: "de",
+      phrases: { "signIn.title": null },
+    });
+    expect(cleared.languages).toEqual([{ language: "en", phrases: {} }]);
+
+    // The new default is listed first-hand even with no overrides of its own.
+    const retagged = await mockApi.updateSignInCopy({ default_language: "PT-br" });
+    expect(retagged.default_language).toBe("pt-br");
+    expect(retagged.languages).toEqual([{ language: "pt-br", phrases: {} }]);
+
+    // A language with overrides survives a default change; the old default without copy does not.
+    await mockApi.updateSignInCopy({
+      language: "fr",
+      phrases: { "signIn.title": "Connexion" },
+    });
+    const defaulted = await mockApi.updateSignInCopy({ default_language: "de" });
+    expect(defaulted.languages).toEqual([
+      { language: "de", phrases: {} },
+      { language: "fr", phrases: { "signIn.title": "Connexion" } },
+    ]);
+
+    const restored = await mockApi.updateSignInCopy({
+      default_language: "en",
+      language: "fr",
+      phrases: {},
+    });
+    expect(restored).toEqual({
+      default_language: "en",
+      languages: [{ language: "en", phrases: {} }],
+    });
+  });
+
+  it("refuses an empty patch, malformed tags, malformed keys and oversized copy", async () => {
+    const cases = [
+      {},
+      { default_language: "e" },
+      { default_language: "en_us" },
+      { phrases: { "signIn.title": "x" } },
+      { language: "en_us", phrases: { "signIn.title": "x" } },
+      { language: "de", phrases: { signIn: "x" } },
+      { language: "de", phrases: { "SignIn.title": "x" } },
+      { language: "de", phrases: { "signIn.title.extra.more.still": "x" } },
+      { language: "de", phrases: { "signIn.title": "x".repeat(501) } },
+      {
+        language: "de",
+        phrases: Object.fromEntries(
+          Array.from({ length: 201 }, (_, index) => [`section.key${index}`, "x"]),
+        ),
+      },
+    ];
+    for (const body of cases) {
+      const failure = await mockApi.updateSignInCopy(body).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+    expect(await mockApi.getSignInCopy()).toEqual({
+      default_language: "en",
+      languages: [{ language: "en", phrases: {} }],
+    });
+  });
+
+  it("audits the default language, the edited language and the stored phrase count", async () => {
+    await mockApi.updateSignInCopy({
+      language: "de",
+      phrases: { "signIn.title": "Anmelden", "signIn.subtitle": "Willkommen" },
+    });
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_copy.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({
+      default_language: "en",
+      language: "de",
+      phrase_count: 2,
+    });
+
+    await mockApi.updateSignInCopy({ language: "de", phrases: {} });
+  });
+});
+
 describe("email templates", () => {
   it("lists every purpose in the server's order with its writable variables", async () => {
     const page = await mockApi.listEmailTemplates();

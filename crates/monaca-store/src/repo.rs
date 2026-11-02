@@ -91,6 +91,8 @@ pub struct SignInExperienceRow {
     pub username_max_length: i32,
     /// The profile fields the sign-up form collects (`name`, `avatar`).
     pub sign_up_profile_fields: Vec<String>,
+    /// The default language tag the hosted page announces and negotiates against.
+    pub language: String,
     /// Whether a CAPTCHA challenge gates the entrances named below.
     pub captcha_enabled: bool,
     /// `turnstile` | `recaptcha`.
@@ -111,6 +113,17 @@ pub struct SignInExperienceRow {
     pub login_lockout_duration_secs: i32,
     /// When the switches last changed.
     pub updated_at: OffsetDateTime,
+}
+
+/// One tenant override of a hosted-page phrase (§6.1 sign-in experience).
+#[derive(Debug, Clone, FromRow)]
+pub struct SignInPhraseRow {
+    /// The lowercased BCP 47 tag the override belongs to.
+    pub language: String,
+    /// The dotted key the hosted page renders, such as `signIn.title`.
+    pub phrase_key: String,
+    /// The replacement text.
+    pub value: String,
 }
 
 /// The failure counter for one normalised sign-in identifier (§6.1 lockout).
@@ -967,7 +980,7 @@ impl Store {
                     password_reject_repetition_and_sequence, password_rejected_words,
                     session_ttl_secs, refresh_token_ttl_secs, sign_up_identifiers,
                     sign_up_email_verification_required, username_case_sensitive,
-                    username_min_length, username_max_length, sign_up_profile_fields,
+                    username_min_length, username_max_length, sign_up_profile_fields, language,
                     captcha_enabled, captcha_provider, captcha_site_key, captcha_secret_enc,
                     captcha_on_sign_in, captcha_on_sign_up, captcha_on_password_reset,
                     login_lockout_threshold, login_lockout_duration_secs, updated_at
@@ -1042,7 +1055,7 @@ impl Store {
                        password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
                        sign_up_identifiers, sign_up_email_verification_required,
                        username_case_sensitive, username_min_length, username_max_length,
-                       sign_up_profile_fields, captcha_enabled, captcha_provider,
+                       sign_up_profile_fields, language, captcha_enabled, captcha_provider,
                        captcha_site_key, captcha_secret_enc, captcha_on_sign_in,
                        captcha_on_sign_up, captcha_on_password_reset, login_lockout_threshold,
                        login_lockout_duration_secs, updated_at",
@@ -1101,7 +1114,7 @@ impl Store {
                        password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
                        sign_up_identifiers, sign_up_email_verification_required,
                        username_case_sensitive, username_min_length, username_max_length,
-                       sign_up_profile_fields, captcha_enabled, captcha_provider,
+                       sign_up_profile_fields, language, captcha_enabled, captcha_provider,
                        captcha_site_key, captcha_secret_enc, captcha_on_sign_in,
                        captcha_on_sign_up, captcha_on_password_reset, login_lockout_threshold,
                        login_lockout_duration_secs, updated_at",
@@ -1119,6 +1132,64 @@ impl Store {
         .bind(patch.login_lockout_duration_secs)
         .fetch_one(&pool)
         .await?)
+    }
+
+    /// Every phrase override the tenant stored, across languages, in a stable order.
+    pub async fn sign_in_phrases(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<SignInPhraseRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SignInPhraseRow>(
+            "SELECT language, phrase_key, value FROM tenant.sign_in_phrases
+             ORDER BY language, phrase_key",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Replace one language's overrides and, when named, the tenant's default language — together.
+    ///
+    /// One transaction because the two writes are one administrative intent: a default language
+    /// pointing at a half-written phrase set is worse than either write alone. An empty `entries`
+    /// removes the language.
+    pub async fn update_sign_in_copy(
+        &self,
+        tenant: &TenantRow,
+        default_language: Option<&str>,
+        phrases: Option<(&str, &[(String, String)])>,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        if let Some(language) = default_language {
+            sqlx::query(
+                "UPDATE tenant.sign_in_experience
+                 SET language = $1, updated_at = now()
+                 WHERE singleton",
+            )
+            .bind(language)
+            .execute(&mut *tx)
+            .await?;
+        }
+        if let Some((language, entries)) = phrases {
+            sqlx::query("DELETE FROM tenant.sign_in_phrases WHERE language = $1")
+                .bind(language)
+                .execute(&mut *tx)
+                .await?;
+            for (key, value) in entries {
+                sqlx::query(
+                    "INSERT INTO tenant.sign_in_phrases (language, phrase_key, value, updated_at)
+                     VALUES ($1, $2, $3, now())",
+                )
+                .bind(language)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// The failure counter for one normalised sign-in identifier, when one exists.

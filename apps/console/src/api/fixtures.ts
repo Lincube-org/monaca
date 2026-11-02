@@ -17,6 +17,7 @@ import type {
   Member,
   OrgRole,
   OrgRoleDetail,
+  SignInCopy,
   SignInExperience,
   SsoConnector,
   TenantRole,
@@ -496,6 +497,19 @@ export function seedSignInExperience(): SignInExperience {
       custom_css: null,
     },
     updated_at: at(900 * 60),
+  };
+}
+
+/**
+ * A tenant that has customised no copy: English, and its default is the only language listed.
+ *
+ * The entry still exists because an editor starts from the default; an empty phrase map is the
+ * truthful state, not a missing row.
+ */
+export function seedSignInCopy(): SignInCopy {
+  return {
+    default_language: "en",
+    languages: [{ language: "en", phrases: {} }],
   };
 }
 

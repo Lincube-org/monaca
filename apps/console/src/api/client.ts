@@ -42,6 +42,7 @@ import type {
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
+  SignInCopy,
   SignInExperience,
   SsoConnector,
   TenantRole,
@@ -51,6 +52,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -300,6 +302,17 @@ export const httpApi: MonacaApi = {
 
   updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience> {
     return request<SignInExperience>("/sign-in-experience", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  getSignInCopy(): Promise<SignInCopy> {
+    return request<SignInCopy>("/sign-in-copy");
+  },
+
+  updateSignInCopy(body: UpdateSignInCopyRequest): Promise<SignInCopy> {
+    return request<SignInCopy>("/sign-in-copy", {
       method: "PATCH",
       body: JSON.stringify(body),
     });

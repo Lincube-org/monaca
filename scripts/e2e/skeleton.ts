@@ -517,6 +517,18 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "Access-Control-Allow-Methods, a GET …/jwks.json from the registered origin carries the allow-origin " +
       "header, an unregistered origin gets neither, and clearing the array removes the header",
   },
+  {
+    step: "54",
+    title: "language and custom copy",
+    assertion:
+      "PATCH /v1/sign-in-copy {language:'de',phrases:{'signIn.title':'Anmelden'}} is 200 and GET /v1/sign-in-copy " +
+      "lists de beside the default en; a bad tag, a single-segment key, a value over 500 characters and an empty " +
+      "patch are 400; PATCH {language:'de',phrases:{}} removes the language, PATCH {default_language:'de'} keeps " +
+      "the default listed, and each write is on the tenant audit chain as sign_in_copy.updated; " +
+      "GET /t/demo/sign-in-copy returns the default, ?lang=de and Accept-Language: de both choose it, an " +
+      "unconfigured ?lang=fr falls back to the default, and the hosted page renders the overridden phrase with " +
+      "lang=de on the document",
+  },
 ];
 
 interface StepResult {

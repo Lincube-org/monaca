@@ -175,6 +175,7 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             "/t/{tenant}/sign-in-experience",
             get(crate::protocol::sign_in_experience),
         )
+        .route("/t/{tenant}/sign-in-copy", get(crate::copy::sign_in_copy))
         .route(
             "/t/{tenant}/connectors/{connector}/authorize",
             get(crate::social::connector_authorize),
@@ -426,6 +427,10 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             "/v1/sign-in-experience",
             get(crate::management::get_sign_in_experience)
                 .patch(crate::management::update_sign_in_experience),
+        )
+        .route(
+            "/v1/sign-in-copy",
+            get(crate::copy::get_sign_in_copy).patch(crate::copy::update_sign_in_copy),
         )
         .route(
             "/v1/email-templates",

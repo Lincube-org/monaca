@@ -44,6 +44,7 @@ import type {
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
+  SignInCopy,
   SignInExperience,
   SsoConnector,
   TenantRole,
@@ -53,6 +54,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -562,6 +564,29 @@ export function useUpdateSignInExperience() {
     mutationFn: (body) => api.updateSignInExperience(body),
     onSuccess: (updated) => {
       client.setQueryData(queryKeys.signInExperience(), updated);
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useSignInCopy(): UseQueryReturnType<SignInCopy, Error> {
+  return useQuery({
+    queryKey: queryKeys.signInCopy(),
+    queryFn: () => api.getSignInCopy(),
+    staleTime: STALE.slow,
+  });
+}
+
+/**
+ * The patch answers with the whole document, so it is written straight into the cache: the edit is
+ * a complete phrase set, and a refetch would only return the same object one round trip later.
+ */
+export function useUpdateSignInCopy() {
+  const client = useQueryClient();
+  return useMutation<SignInCopy, Error, UpdateSignInCopyRequest>({
+    mutationFn: (body) => api.updateSignInCopy(body),
+    onSuccess: (updated) => {
+      client.setQueryData(queryKeys.signInCopy(), updated);
       invalidateTenantAudit(client);
     },
   });

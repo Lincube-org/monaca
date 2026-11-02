@@ -264,6 +264,29 @@ export function getSignInExperience(
 }
 
 /**
+ * The tenant's language and the phrase overrides for the language this visit negotiated (§6.1).
+ *
+ * `phrases` replaces built-in copy key by key. The page keeps its own dictionary for anything the
+ * tenant did not translate, so an override can never blank a screen; a key the page does not know
+ * cannot be reached at all.
+ */
+export interface SignInCopy {
+  /** The language chosen for this visit. */
+  language: string;
+  /** The tenant's default, used when neither `lang` nor the browser names a configured language. */
+  default_language: string;
+  /** Every language with overrides, plus the default. */
+  languages: string[];
+  /** Replacements keyed by the hosted page's dotted message keys. */
+  phrases: Record<string, string>;
+}
+
+export function getSignInCopy(tenant: string, language?: string | null): Promise<SignInCopy> {
+  const query = language ? `?lang=${encodeURIComponent(language)}` : "";
+  return call<SignInCopy>(`/t/${encodeURIComponent(tenant)}/sign-in-copy${query}`);
+}
+
+/**
  * Submit the primary factor. `identifier` is the email address or the username; the server treats
  * both case-insensitively (§6.1).
  */

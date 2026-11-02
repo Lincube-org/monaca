@@ -27,6 +27,7 @@ import {
   seedOrgInvitations,
   seedOrgRoles,
   seedResources,
+  seedSignInCopy,
   seedSignInExperience,
   seedSsoConnectors,
   seedTenantRoles,
@@ -81,6 +82,7 @@ import type {
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
+  SignInCopy,
   SignInExperience,
   SsoConnector,
   TenantRole,
@@ -90,6 +92,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -133,6 +136,8 @@ class MockStore {
   private connectors: Connector[] = seedConnectors();
   private ssoConnectors: SsoConnector[] = seedSsoConnectors();
   private experience: SignInExperience = seedSignInExperience();
+  /** The tenant's language and custom copy; only the default is listed until one is added. */
+  private signInCopy: SignInCopy = seedSignInCopy();
   /** One row per mail purpose; a default is what the server would send without a tenant override. */
   private emailTemplates: EmailTemplate[] = seedEmailTemplates();
   /** The optional hosted-page look; absent values fall back to the built-in style. */
@@ -1599,6 +1604,116 @@ class MockStore {
     return { ...updated, branding: { ...updated.branding } };
   }
 
+  getSignInCopy(): SignInCopy {
+    return {
+      default_language: this.signInCopy.default_language,
+      languages: this.signInCopy.languages.map((entry) => ({
+        language: entry.language,
+        phrases: { ...entry.phrases },
+      })),
+    };
+  }
+
+  /** The complete replacement set for one language; an emptied set removes the language. */
+  async updateSignInCopy(body: UpdateSignInCopyRequest): Promise<SignInCopy> {
+    if (body.default_language === undefined && body.phrases === undefined) {
+      throw new ApiError("at least one of default_language or phrases must be present", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const defaultLanguage =
+      body.default_language === undefined ? null : normaliseLanguage(body.default_language);
+    if (body.default_language !== undefined && defaultLanguage === null) {
+      throw new ApiError("default_language must be a BCP 47 language tag", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+
+    let editedLanguage: string | null = null;
+    let phraseCount: number | null = null;
+    const stored = new Map<string, Map<string, string>>(
+      this.signInCopy.languages.map((entry) => [
+        entry.language,
+        new Map(Object.entries(entry.phrases)),
+      ]),
+    );
+    if (body.phrases !== undefined) {
+      if (body.language === undefined) {
+        throw new ApiError("language is required when phrases are present", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      const language = normaliseLanguage(body.language);
+      if (language === null) {
+        throw new ApiError("language must be a BCP 47 language tag", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      const entries = Object.entries(body.phrases);
+      if (entries.length > MAX_PHRASES) {
+        throw new ApiError(`at most ${MAX_PHRASES} phrases may be stored for one language`, {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      const phrases = new Map<string, string>();
+      for (const [rawKey, rawValue] of entries) {
+        const key = rawKey.trim();
+        if (!validPhraseKey(key)) {
+          throw new ApiError("phrase keys must be dotted camelCase segments, such as signIn.title", {
+            status: 400,
+            code: "MONACA_INVALID_REQUEST",
+          });
+        }
+        const value = (rawValue ?? "").trim();
+        if (value.length === 0) continue;
+        if (value.length > MAX_PHRASE_CHARS) {
+          throw new ApiError(`phrase values must be at most ${MAX_PHRASE_CHARS} characters`, {
+            status: 400,
+            code: "MONACA_INVALID_REQUEST",
+          });
+        }
+        phrases.set(key, value);
+      }
+      stored.set(language, phrases);
+      editedLanguage = language;
+      phraseCount = phrases.size;
+    }
+
+    const nextDefault = defaultLanguage ?? this.signInCopy.default_language;
+    // The default is always listed even with no overrides; another language only when it has copy.
+    const languages = [...stored.entries()]
+      .filter(([language, phrases]) => language === nextDefault || phrases.size > 0)
+      .map(([language, phrases]) => ({
+        language,
+        phrases: Object.fromEntries(phrases),
+      }))
+      .sort((left, right) => (left.language < right.language ? -1 : 1));
+    if (!languages.some((entry) => entry.language === nextDefault)) {
+      languages.push({ language: nextDefault, phrases: {} });
+      languages.sort((left, right) => (left.language < right.language ? -1 : 1));
+    }
+    this.signInCopy = { default_language: nextDefault, languages };
+
+    await this.append({
+      action: "sign_in_copy.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: {
+        default_language: nextDefault,
+        language: editedLanguage,
+        phrase_count: phraseCount,
+      },
+    });
+    return this.getSignInCopy();
+  }
+
   listEmailTemplates(): Page<EmailTemplate> {
     return { items: this.emailTemplates.map(copyEmailTemplate), next: null };
   }
@@ -2771,6 +2886,29 @@ function normaliseOrigins(raw: readonly string[]): string[] {
   return origins;
 }
 
+/** One language's override cap and longest value — the server's `MAX_PHRASES`/`MAX_PHRASE_CHARS`. */
+const MAX_PHRASES = 200;
+const MAX_PHRASE_CHARS = 500;
+
+/**
+ * A lowercased BCP 47-shaped tag: a 2–3 letter primary subtag, then 1–8 alphanumeric subtags —
+ * the server's `normalise_language` and schema 39's column check.
+ */
+function normaliseLanguage(raw: string): string | null {
+  const language = raw.trim().toLowerCase();
+  if (language.length < 2 || language.length > 35) return null;
+  const [primary, ...subtags] = language.split("-");
+  if (primary === undefined || !/^[a-z]{2,3}$/.test(primary)) return null;
+  if (subtags.some((subtag) => !/^[a-z0-9]{1,8}$/.test(subtag))) return null;
+  return language;
+}
+
+/** A dotted key of 2–4 camelCase segments — the server's `valid_phrase_key`. */
+function validPhraseKey(key: string): boolean {
+  if (key.length < 3 || key.length > 100) return false;
+  return /^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*){1,3}$/.test(key);
+}
+
 /** The server's `normalise_domain`: trim, lowercase, and accept only a plain DNS name. */
 function normaliseDomain(raw: string): string | null {
   const domain = raw.trim().toLowerCase();
@@ -2968,6 +3106,14 @@ export const mockApi: MonacaApi = {
   async updateSignInExperience(body) {
     await delay();
     return store.updateSignInExperience(body);
+  },
+  async getSignInCopy() {
+    await delay();
+    return store.getSignInCopy();
+  },
+  async updateSignInCopy(body) {
+    await delay();
+    return store.updateSignInCopy(body);
   },
   async listEmailTemplates() {
     await delay();

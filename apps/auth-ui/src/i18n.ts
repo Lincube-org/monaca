@@ -1,3 +1,5 @@
+import { ref } from "vue";
+
 /**
  * Every user-visible string in the hosted sign-in page.
  *
@@ -355,13 +357,40 @@ type Leaves<T, Prefix extends string = ""> = {
 
 export type MessageKey = Leaves<typeof messages>;
 
-function lookup(key: string): string | undefined {
+/**
+ * The tenant's phrase overrides for the language this visit negotiated (§6.2 sign-in copy).
+ *
+ * A module-level ref because `t()` is called straight from templates: reading it inside `lookup`
+ * makes every rendered string re-resolve when the copy arrives, without threading a store through
+ * every component. Unknown keys are dropped, so the built-in dictionary decides what a page can say.
+ */
+const overrides = ref<Record<string, string>>({});
+
+export function applyPhraseOverrides(language: string, phrases: Record<string, string>): void {
+  const applied: Record<string, string> = {};
+  for (const [key, value] of Object.entries(phrases)) {
+    if (typeof value === "string" && lookupDefault(key) !== undefined) applied[key] = value;
+  }
+  overrides.value = applied;
+  if (language && typeof document !== "undefined") document.documentElement.lang = language;
+}
+
+/** Forget the tenant's copy, for a page that navigates away or a test that starts over. */
+export function clearPhraseOverrides(): void {
+  overrides.value = {};
+}
+
+function lookupDefault(key: string): string | undefined {
   let node: unknown = messages;
   for (const part of key.split(".")) {
     if (typeof node !== "object" || node === null) return undefined;
     node = (node as Record<string, unknown>)[part];
   }
   return typeof node === "string" ? node : undefined;
+}
+
+function lookup(key: string): string | undefined {
+  return overrides.value[key] ?? lookupDefault(key);
 }
 
 export function t(key: MessageKey, params?: Record<string, string | number>): string {
