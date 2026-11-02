@@ -15,6 +15,7 @@ import {
   disableTotp,
   generateBackupCodes,
   getAccount,
+  listAuthorizedApps,
   listPasskeys,
   listSessions,
   listTrustedDevices,
@@ -22,6 +23,7 @@ import {
   renamePasskey,
   requestAccountDeletion,
   requestEmailChange,
+  revokeAuthorizedApp,
   revokeOtherSessions,
   revokeSession,
   revokeTrustedDevice,
@@ -32,6 +34,7 @@ import {
   type AccountPasskey,
   type AccountProfile,
   type AccountSession,
+  type AuthorizedApp,
   type TotpEnrollment,
   type TrustedDevice,
 } from "@/api/account";
@@ -92,6 +95,12 @@ const trustedDevices = ref<TrustedDevice[] | null>(null);
 const devicesBusyId = ref<string | null>(null);
 const devicesError = ref<string | null>(null);
 const devicesNotice = ref<MessageKey | null>(null);
+
+/** Third-party applications this account approved; withdrawing one asks again next time. */
+const authorizedApps = ref<AuthorizedApp[] | null>(null);
+const appsBusyId = ref<string | null>(null);
+const appsError = ref<string | null>(null);
+const appsNotice = ref<MessageKey | null>(null);
 
 /** Irreversible deletion: a mailed code proves the address, then the account is gone. */
 const deletionStep = ref<"idle" | "sent">("idle");
@@ -204,6 +213,16 @@ async function loadTrustedDevices(): Promise<void> {
   }
 }
 
+async function loadAuthorizedApps(): Promise<void> {
+  try {
+    authorizedApps.value = (await listAuthorizedApps(tenant.value)).items;
+    appsError.value = null;
+  } catch (error) {
+    authorizedApps.value = null;
+    appsError.value = messageOf(error);
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   try {
@@ -238,6 +257,7 @@ async function load(): Promise<void> {
     await loadSessions();
     await loadPasskeys();
     await loadTrustedDevices();
+    await loadAuthorizedApps();
   } catch (error) {
     account.value = null;
     loadError.value = error instanceof AccountError ? error : new AccountError(0, String(error));
@@ -329,6 +349,22 @@ async function forgetDevice(deviceId: string): Promise<void> {
     devicesError.value = messageOf(error);
   } finally {
     devicesBusyId.value = null;
+  }
+}
+
+/** Withdraw one application's approval; the next authorize request shows the consent screen. */
+async function withdrawApp(clientId: string): Promise<void> {
+  appsBusyId.value = clientId;
+  appsError.value = null;
+  appsNotice.value = null;
+  try {
+    await revokeAuthorizedApp(tenant.value, clientId);
+    await loadAuthorizedApps();
+    appsNotice.value = "account.appsRevoked";
+  } catch (error) {
+    appsError.value = messageOf(error);
+  } finally {
+    appsBusyId.value = null;
   }
 }
 
@@ -1475,6 +1511,60 @@ async function removePasskey(passkey: AccountPasskey): Promise<void> {
             </Button>
             <p v-if="sessionsNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
               {{ t(sessionsNotice) }}
+            </p>
+          </div>
+
+          <!-- Authorized applications: third-party apps the account approved; withdrawing asks again. -->
+          <div class="flex flex-col gap-2 rounded-lg border border-rule bg-surface-muted px-3 py-3">
+            <div class="flex items-center gap-1.5">
+              <Link2 class="size-3.5 text-ink-faint" aria-hidden="true" />
+              <h2 class="text-[13px] font-semibold text-ink">{{ t("account.appsTitle") }}</h2>
+            </div>
+            <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("account.appsNote") }}</p>
+            <p
+              v-if="authorizedApps !== null && authorizedApps.length === 0"
+              class="text-[11.5px] leading-snug text-ink-faint"
+            >
+              {{ t("account.appsEmpty") }}
+            </p>
+            <div v-else-if="authorizedApps" class="flex flex-col gap-2">
+              <div
+                v-for="app in authorizedApps"
+                :key="app.client_id"
+                class="flex items-start justify-between gap-2"
+              >
+                <div class="flex min-w-0 flex-col gap-0.5">
+                  <span class="text-[12.5px] text-ink">{{ app.name }}</span>
+                  <span class="text-[11px] text-ink-faint">
+                    {{ app.scopes.join(", ") }} ·
+                    {{ t("account.appsGranted", { when: formatDate(app.granted_at) }) }}
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  :disabled="appsBusyId !== null"
+                  :aria-busy="appsBusyId === app.client_id"
+                  @click="withdrawApp(app.client_id)"
+                >
+                  {{
+                    appsBusyId === app.client_id
+                      ? t("account.appsRevoking")
+                      : t("account.appsRevoke")
+                  }}
+                </Button>
+              </div>
+            </div>
+            <p
+              v-if="appsError"
+              role="alert"
+              class="flex items-start gap-1.5 text-[12.5px] leading-snug text-deny"
+            >
+              <AlertCircle class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              {{ appsError }}
+            </p>
+            <p v-else-if="appsNotice" role="status" class="text-[12.5px] leading-snug text-ink-muted">
+              {{ t(appsNotice) }}
             </p>
           </div>
 

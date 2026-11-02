@@ -44,6 +44,8 @@ pub struct Interaction {
     pub dpop_jkt: Option<String>,
     /// Whether the consent screen must be shown before a code is issued.
     pub consent_required: bool,
+    /// Whether `prompt=consent` asked for the screen even if a grant already covers the scopes.
+    pub consent_prompted: bool,
     /// When the interaction stops being usable.
     pub expires_at: OffsetDateTime,
 }
@@ -133,6 +135,7 @@ mod tests {
             state: "s".into(),
             dpop_jkt: None,
             consent_required: false,
+            consent_prompted: false,
             expires_at: OffsetDateTime::from_unix_timestamp(1_767_225_600).expect("ts"),
         }
     }

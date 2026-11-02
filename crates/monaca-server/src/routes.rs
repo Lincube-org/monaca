@@ -231,6 +231,14 @@ pub fn account_routes() -> Router<Arc<AppState>> {
             delete(crate::account::revoke_session),
         )
         .route(
+            "/t/{tenant}/account/authorized-apps",
+            get(crate::account::list_authorized_apps),
+        )
+        .route(
+            "/t/{tenant}/account/authorized-apps/{client}",
+            delete(crate::account::revoke_authorized_app),
+        )
+        .route(
             "/t/{tenant}/account/mfa/totp",
             post(crate::account::begin_totp).delete(crate::account::disable_totp),
         )

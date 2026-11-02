@@ -50,6 +50,15 @@ export interface TrustedDevice {
   expires_at: string;
 }
 
+/** One third-party application the account approved, as the account centre lists it. */
+export interface AuthorizedApp {
+  client_id: string;
+  name: string;
+  scopes: string[];
+  granted_at: string;
+  updated_at: string;
+}
+
 /** A freshly generated sheet of recovery codes; the plaintext is shown only in this response. */
 export interface BackupCodeSheet {
   codes: string[];
@@ -159,6 +168,23 @@ export function listTrustedDevices(
 /** Forget one browser; revoking the caller's own browser also clears its cookie. */
 export function revokeTrustedDevice(tenant: string, device: string): Promise<void> {
   return call<void>(`${base(tenant)}/mfa/devices/${encodeURIComponent(device)}`, {
+    method: "DELETE",
+  });
+}
+
+/** The third-party applications this account approved, newest first. */
+export function listAuthorizedApps(
+  tenant: string,
+): Promise<{ items: AuthorizedApp[]; next: null }> {
+  return call<{ items: AuthorizedApp[]; next: null }>(`${base(tenant)}/authorized-apps`);
+}
+
+/**
+ * Withdraw an application's approval; the next authorize request asks again and the client's
+ * refresh tokens for this account stop renewing.
+ */
+export function revokeAuthorizedApp(tenant: string, clientId: string): Promise<void> {
+  return call<void>(`${base(tenant)}/authorized-apps/${encodeURIComponent(clientId)}`, {
     method: "DELETE",
   });
 }

@@ -270,27 +270,41 @@ pub async fn authorize(
             .filter(|account| account.state == "active")
         {
             if request.requires_consent(client.is_third_party) {
-                // `prompt=none` may not open a page; with a session but no recorded consent the
-                // only compliant answer is the `consent_required` error (OIDC Core §3.1.2.6).
-                if request.is_silent() {
-                    return Ok(redirect_error(
-                        &request.redirect_uri,
-                        "consent_required",
-                        &request.state,
-                    ));
-                }
-                // Consent still has to be shown, but not the password form: record the session as
-                // this interaction's authentication, and let the page render its consent step.
-                let interaction = build_interaction(&state, &tenant, &client, &request, &org, true);
-                state
-                    .mark_interaction_signed_in(
-                        &interaction.interaction_id.to_string(),
-                        account.id,
-                        session.id,
+                // A stored grant lets a returning user through without the screen. `prompt=consent`
+                // overrides it, and a first-party client never records one.
+                let approved = !request.forces_consent()
+                    && client.is_third_party
+                    && consent_covers(
+                        &state,
+                        &tenant,
+                        account.account_id(),
+                        client.id,
+                        &request.scopes,
                     )
-                    .await
-                    .map_err(ApiError::Interaction)?;
-                return Ok(found(&sign_in_location(&state, &tenant, &interaction)));
+                    .await?;
+                if !approved {
+                    // `prompt=none` may not open a page; with a session but no recorded consent the
+                    // only compliant answer is the `consent_required` error (OIDC Core §3.1.2.6).
+                    if request.is_silent() {
+                        return Ok(redirect_error(
+                            &request.redirect_uri,
+                            "consent_required",
+                            &request.state,
+                        ));
+                    }
+                    // Consent still has to be shown, but not the password form: record the session as
+                    // this interaction's authentication, and let the page render its consent step.
+                    let interaction = build_interaction(&state, &tenant, &client, &request, &org, true);
+                    state
+                        .mark_interaction_signed_in(
+                            &interaction.interaction_id.to_string(),
+                            account.id,
+                            session.id,
+                        )
+                        .await
+                        .map_err(ApiError::Interaction)?;
+                    return Ok(found(&sign_in_location(&state, &tenant, &interaction)));
+                }
             }
 
             let code = issue_code(
@@ -359,8 +373,25 @@ fn build_interaction(
         state: request.state.clone(),
         dpop_jkt: request.dpop_jkt.clone(),
         consent_required,
+        consent_prompted: request.forces_consent(),
         expires_at: state.now() + Duration::seconds(state.config.interaction_ttl.as_secs() as i64),
     }
+}
+
+/// Whether the account's stored approval for `client_row_id` covers every requested scope.
+async fn consent_covers(
+    state: &AppState,
+    tenant: &TenantRow,
+    account_id: AccountId,
+    client_row_id: Uuid,
+    scopes: &[String],
+) -> Result<bool, ApiError> {
+    let Some(grant) = state.store.consent(tenant, account_id, client_row_id).await? else {
+        return Ok(false);
+    };
+    Ok(scopes
+        .iter()
+        .all(|scope| grant.scopes.iter().any(|approved| approved == scope)))
 }
 
 /// Where the auth-ui sign-in page lives for this interaction.
@@ -784,14 +815,26 @@ async fn complete_sign_in(
 
     // A third-party client (or `prompt=consent`) pauses here: the page must ask the user to
     // approve the scopes before a code is minted. Sign-in is recorded but not consumed, so the
-    // consent step can redeem it.
+    // consent step can redeem it. An approval recorded earlier skips the screen unless
+    // `prompt=consent` explicitly asked for it again.
     if interaction.consent_required {
-        state
-            .mark_interaction_signed_in(iid, account.id, session_id)
-            .await
-            .map_err(ApiError::Interaction)?;
-        let response = Json(json!({ "consent_required": true })).into_response();
-        return Ok(with_session_cookie(response, session_id, session_ttl_secs, &state));
+        let approved = !interaction.consent_prompted
+            && consent_covers(
+                &state,
+                &tenant,
+                account.account_id(),
+                interaction.client_row_id,
+                &interaction.scopes,
+            )
+            .await?;
+        if !approved {
+            state
+                .mark_interaction_signed_in(iid, account.id, session_id)
+                .await
+                .map_err(ApiError::Interaction)?;
+            let response = Json(json!({ "consent_required": true })).into_response();
+            return Ok(with_session_cookie(response, session_id, session_ttl_secs, &state));
+        }
     }
 
     // Consume only after authentication succeeds, so a typo does not burn the interaction.
@@ -806,6 +849,7 @@ async fn complete_sign_in(
         interaction,
         account,
         Some(session_id),
+        false,
     )
     .await?;
     Ok(with_session_cookie(response, session_id, session_ttl_secs, &state))
@@ -2592,19 +2636,44 @@ pub async fn consent(
         .await?
         .ok_or_else(|| ApiError::problem(kinds::INVALID_REQUEST, "account is gone"))?;
 
-    approve_interaction(state, tenant, interaction, account, session_id).await
+    approve_interaction(state, tenant, interaction, account, session_id, true).await
 }
 
 /// Mint the authorization code for an approved interaction and return the client redirect.
+///
+/// `record_consent` is true only when the user actually answered the consent screen, so the
+/// silent and stored-grant paths do not rewrite a grant that already exists.
 async fn approve_interaction(
     state: Arc<AppState>,
     tenant: TenantRow,
     interaction: Interaction,
     account: AccountRow,
     session_id: Option<Uuid>,
+    record_consent: bool,
 ) -> Result<Response, ApiError> {
     let org_slug = interaction.organization.clone();
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
+
+    // A standing approval belongs to third-party applications; `prompt=consent` on a first-party
+    // client is a one-off confirmation, not something the account centre should list.
+    if record_consent
+        && state
+            .store
+            .client_by_id(&tenant, interaction.client_row_id)
+            .await?
+            .is_some_and(|client| client.is_third_party)
+        && let Err(err) = state
+            .store
+            .upsert_consent(
+                &tenant,
+                account.account_id(),
+                interaction.client_row_id,
+                &interaction.scopes,
+            )
+            .await
+    {
+        tracing::warn!(%err, "could not record the consent grant");
+    }
     // `auth_time` is the authentication instant, which is the session's creation when one exists.
     let auth_time = match session_id {
         Some(id) => state

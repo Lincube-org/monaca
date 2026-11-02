@@ -474,6 +474,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "the bounds, a relative avatar, a missing password, an identifier or profile field the policy does not offer " +
       "are 400; switching verification on makes the request step mail a code and refuse a password",
   },
+  {
+    step: "50",
+    title: "consent and authorized apps",
+    assertion:
+      "a third-party authorize pauses at consent and approving it issues the code; " +
+      "GET /t/{tenant}/account/authorized-apps lists the application and its scopes; a stored grant lets " +
+      "prompt=none mint a code without the screen while prompt=consent asks again; " +
+      "DELETE /t/{tenant}/account/authorized-apps/{client} is 204, removes the row, ends the account's refresh " +
+      "tokens for that client, makes the next silent request answer consent_required, and a second delete is 404",
+  },
 ];
 
 interface StepResult {
@@ -8111,6 +8121,301 @@ async function registrationPolicyFlow(
 }
 
 /**
+ * Step 50: a third-party approval is remembered, listed and withdrawable.
+ *
+ * The approval is observed from both ends: the account centre lists the application and, while
+ * the grant covers the request, a returning browser skips the screen (even with `prompt=none`);
+ * `prompt=consent` still asks. Withdrawing removes the row, ends the client's refresh tokens and
+ * makes the next silent request answer `consent_required`.
+ */
+async function consentFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const email = `consent-${runId}@demo.localhost`;
+  const password = `pw-${runId}-consent`;
+  const clientId = `e2e-consent-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const verifier = `cs-${runId}-${"v".repeat(32)}`;
+
+  let clientRowId: string | undefined;
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Consent Owner", password }),
+    });
+    const accountId = (created.body as { id?: unknown } | undefined)?.id;
+    checks.push([
+      "POST /v1/accounts creates the account",
+      created.status === 201 && typeof accountId === "string",
+    ]);
+    if (typeof accountId === "string") {
+      await call(`${base}/v1/orgs/${ORG}/members`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ account_id: accountId, role: "member" }),
+      });
+    }
+
+    const app = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E Consent",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid", "profile", "email", "offline_access"],
+        is_third_party: true,
+      }),
+    });
+    const appRowId = (app.body as { id?: unknown } | undefined)?.id;
+    if (typeof appRowId === "string") clientRowId = appRowId;
+    checks.push([
+      "a third-party client is registered",
+      app.status === 201 && clientRowId !== undefined,
+    ]);
+    if (clientRowId === undefined) {
+      return {
+        step: "50",
+        title: "consent and authorized apps",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `POST /v1/clients → ${app.status} ${text(app.body)}`,
+      };
+    }
+
+    const appRead = await call(`${base}/v1/clients/${clientRowId}`, { headers });
+    checks.push([
+      "the management read marks the application third-party",
+      (appRead.body as { is_third_party?: unknown } | undefined)?.is_third_party === true,
+    ]);
+
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = (tag: string, extra: Record<string, string> = {}, cookie?: string) =>
+      call(
+        `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+          response_type: "code",
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          scope: "openid profile email offline_access",
+          state: `st-consent-${runId}-${tag}`,
+          nonce: `n-consent-${runId}`,
+          code_challenge: challenge,
+          code_challenge_method: "S256",
+          organization: ORG,
+          ...extra,
+        })}`,
+        { redirect: "manual", ...(cookie === undefined ? {} : { headers: { cookie } }) },
+      );
+
+    const opened = await authorize("open");
+    const interaction = new URL(
+      opened.headers.get("location") ?? "",
+      base,
+    ).searchParams.get("interaction");
+    checks.push([
+      "a third-party authorize opens an interaction",
+      opened.status === 302 && interaction !== null,
+    ]);
+    if (interaction === null) {
+      return {
+        step: "50",
+        title: "consent and authorized apps",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `authorize → ${opened.status} ${text(opened.body)}`,
+      };
+    }
+
+    const signedIn = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      },
+    );
+    const paused = (signedIn.body as { consent_required?: unknown } | undefined)
+      ?.consent_required;
+    const sessionCookie = /monaca_session=([0-9a-f-]{36})/.exec(
+      signedIn.headers.get("set-cookie") ?? "",
+    )?.[1];
+    checks.push([
+      "sign-in pauses at the consent step with a session cookie",
+      signedIn.status === 200 && paused === true && sessionCookie !== undefined,
+    ]);
+    if (sessionCookie === undefined) {
+      return {
+        step: "50",
+        title: "consent and authorized apps",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `sign-in → ${signedIn.status} ${text(signedIn.body)}`,
+      };
+    }
+    const cookie = `monaca_session=${sessionCookie}`;
+
+    const approved = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/consent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "allow" }),
+      },
+    );
+    const redirectTo = (approved.body as { redirect_to?: unknown } | undefined)?.redirect_to;
+    checks.push([
+      "approving consent issues the authorization code",
+      approved.status === 200 && typeof redirectTo === "string",
+    ]);
+    if (typeof redirectTo !== "string") {
+      return {
+        step: "50",
+        title: "consent and authorized apps",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail: `consent → ${approved.status} ${text(approved.body)}`,
+      };
+    }
+
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    const token = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+      code_verifier: verifier,
+    });
+    const firstRefresh = (token.body as { refresh_token?: unknown } | undefined)?.refresh_token;
+    checks.push([
+      "the approved code exchanges for tokens with a refresh token",
+      token.status === 200 && typeof firstRefresh === "string",
+    ]);
+
+    const renewed = await tokenCall(base, {
+      grant_type: "refresh_token",
+      refresh_token: String(firstRefresh ?? ""),
+      client_id: clientId,
+    });
+    const secondRefresh = (renewed.body as { refresh_token?: unknown } | undefined)
+      ?.refresh_token;
+    checks.push([
+      "the refresh token renews before the approval is withdrawn",
+      renewed.status === 200 && typeof secondRefresh === "string",
+    ]);
+
+    type AppRow = { client_id?: unknown; name?: unknown; scopes?: unknown; granted_at?: unknown };
+    const listed = await call(`${base}/t/${TENANT}/account/authorized-apps`, {
+      headers: { cookie },
+    });
+    const items =
+      (listed.body as { items?: AppRow[] } | undefined)?.items ?? [];
+    const grant = items.find((row) => row.client_id === clientId);
+    checks.push([
+      "the account centre lists the application with the approved scopes",
+      listed.status === 200 &&
+        grant?.name === "E2E Consent" &&
+        Array.isArray(grant?.scopes) &&
+        grant.scopes.includes("openid") &&
+        grant.scopes.includes("offline_access") &&
+        typeof grant?.granted_at === "string" &&
+        !Number.isNaN(Date.parse(grant.granted_at)),
+    ]);
+
+    const silent = await authorize("silent", { prompt: "none" }, cookie);
+    const silentLocation = new URL(silent.headers.get("location") ?? "", base);
+    checks.push([
+      "a stored grant lets prompt=none skip the consent screen",
+      silent.status === 302 &&
+        silentLocation.searchParams.get("code") !== null &&
+        silentLocation.searchParams.get("error") === null,
+    ]);
+
+    const prompted = await authorize("prompted", { prompt: "consent" }, cookie);
+    const promptedInteraction = new URL(
+      prompted.headers.get("location") ?? "",
+      base,
+    ).searchParams.get("interaction");
+    checks.push([
+      "prompt=consent asks again despite the stored grant",
+      prompted.status === 302 && promptedInteraction !== null,
+    ]);
+    if (promptedInteraction !== null) {
+      await call(
+        `${base}/t/${TENANT}/interaction/${encodeURIComponent(promptedInteraction)}/abort`,
+        { method: "POST" },
+      );
+    }
+
+    const withdrawn = await call(
+      `${base}/t/${TENANT}/account/authorized-apps/${encodeURIComponent(clientId)}`,
+      { method: "DELETE", headers: { cookie } },
+    );
+    checks.push(["the account withdraws the approval", withdrawn.status === 204]);
+
+    const after = await call(`${base}/t/${TENANT}/account/authorized-apps`, {
+      headers: { cookie },
+    });
+    const remaining = (after.body as { items?: AppRow[] } | undefined)?.items ?? [];
+    checks.push([
+      "the withdrawn application disappears from the list",
+      after.status === 200 && remaining.every((row) => row.client_id !== clientId),
+    ]);
+
+    const dead = await tokenCall(base, {
+      grant_type: "refresh_token",
+      refresh_token: String(secondRefresh ?? ""),
+      client_id: clientId,
+    });
+    checks.push([
+      "withdrawal ends the application's refresh token",
+      dead.status === 400 && (dead.body as { error?: unknown } | undefined)?.error === "invalid_grant",
+    ]);
+
+    const silentAfter = await authorize("after", { prompt: "none" }, cookie);
+    const afterLocation = new URL(silentAfter.headers.get("location") ?? "", base);
+    checks.push([
+      "the next silent request asks for consent again",
+      silentAfter.status === 302 &&
+        afterLocation.searchParams.get("error") === "consent_required",
+    ]);
+
+    const secondWithdrawal = await call(
+      `${base}/t/${TENANT}/account/authorized-apps/${encodeURIComponent(clientId)}`,
+      { method: "DELETE", headers: { cookie } },
+    );
+    checks.push(["a second withdrawal is 404", secondWithdrawal.status === 404]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (clientRowId !== undefined) {
+      await call(`${base}/v1/clients/${clientRowId}`, { method: "DELETE", headers }).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "50",
+    title: "consent and authorized apps",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: third-party sign-in → consent → grant → list → silent skip → prompt re-ask → withdraw → refresh dies → ask again`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
  * Step 37: an administrator can edit an account's profile, and the edit is audited.
  *
  * The username is a sign-in identifier, so its uniqueness and grammar are the same rules the
@@ -10228,6 +10533,7 @@ async function main(): Promise<number> {
   push(await trustedDevicePolicyFlow(base, adminToken));
   push(await ssoSwitchFlow(base, adminToken));
   push(await registrationPolicyFlow(base, adminToken, parsed.consoleSecret));
+  push(await consentFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

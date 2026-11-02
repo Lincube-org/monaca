@@ -605,6 +605,92 @@ pub async fn revoke_other_sessions(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// One third-party application the account approved, as the account centre lists it.
+fn authorized_app_json(app: &monaca_store::AuthorizedAppRow) -> Value {
+    json!({
+        "client_id": app.client_id,
+        "name": app.name,
+        "scopes": app.scopes,
+        "granted_at": crate::management::ts(app.granted_at),
+        "updated_at": crate::management::ts(app.updated_at),
+    })
+}
+
+/// `GET /t/{tenant}/account/authorized-apps` — third-party applications this account approved.
+pub async fn list_authorized_apps(
+    State(state): State<Arc<AppState>>,
+    Path(tenant): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let apps = state
+        .store
+        .authorized_apps(&tenant, account.account_id())
+        .await?;
+    let items: Vec<Value> = apps.iter().map(authorized_app_json).collect();
+    Ok(Json(json!({ "items": items, "next": null })))
+}
+
+/// `DELETE /t/{tenant}/account/authorized-apps/{client}` — withdraw an approval.
+///
+/// Removing the grant makes the next authorize request ask again, and the account's refresh
+/// tokens for that client are revoked so the withdrawn access cannot renew itself.
+pub async fn revoke_authorized_app(
+    State(state): State<Arc<AppState>>,
+    Path((tenant, client)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let Some(client_row) = state.store.client_by_client_id(&tenant, &client).await? else {
+        return Err(ApiError::not_found("application"));
+    };
+    let Some(grant) = state
+        .store
+        .consent(&tenant, account.account_id(), client_row.id)
+        .await?
+    else {
+        return Err(ApiError::not_found("application"));
+    };
+    if !state
+        .store
+        .revoke_consent(&tenant, account.account_id(), client_row.id)
+        .await?
+    {
+        return Err(ApiError::not_found("application"));
+    }
+    if let Err(err) = state
+        .store
+        .revoke_account_client_refresh_tokens(&tenant, account.account_id(), client_row.id)
+        .await
+    {
+        tracing::warn!(%err, "could not revoke the application's refresh tokens");
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "consent.revoked".into(),
+        actor_chain: vec![AuditActor::account(account.account_id())],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account.account_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "client_id": client_row.client_id,
+            "name": client_row.name,
+            "scopes": grant.scopes,
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append consent.revoked audit event");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// One remembered browser as the account centre sees it, with `current` marking this one.
 fn trusted_device_json(device: &TrustedDeviceRow, current: Option<&str>) -> Value {
     json!({

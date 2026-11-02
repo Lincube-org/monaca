@@ -361,6 +361,36 @@ pub struct TrustedDeviceRow {
     pub expires_at: OffsetDateTime,
 }
 
+/// One recorded third-party approval in `tenant.consents`.
+#[derive(Debug, Clone, FromRow)]
+pub struct ConsentRow {
+    /// The account that approved the application.
+    pub account_id: Uuid,
+    /// The client's row id.
+    pub client_id: Uuid,
+    /// The scopes the account approved.
+    pub scopes: Vec<String>,
+    /// When the approval was first recorded.
+    pub granted_at: OffsetDateTime,
+    /// When the scopes were last refreshed.
+    pub updated_at: OffsetDateTime,
+}
+
+/// A consent joined with the client it names, as the account centre lists it.
+#[derive(Debug, Clone, FromRow)]
+pub struct AuthorizedAppRow {
+    /// The protocol `client_id` the application is known by.
+    pub client_id: String,
+    /// The application's display name.
+    pub name: String,
+    /// The scopes the account approved.
+    pub scopes: Vec<String>,
+    /// When the approval was first recorded.
+    pub granted_at: OffsetDateTime,
+    /// When the approval was last refreshed.
+    pub updated_at: OffsetDateTime,
+}
+
 /// A client in `tenant.clients`.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClientRow {
@@ -3426,6 +3456,84 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    // ---------------------------------------------------------------- consent grants
+
+    /// The account's recorded approval for a client, if any.
+    pub async fn consent(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        client_row_id: Uuid,
+    ) -> Result<Option<ConsentRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ConsentRow>(
+            "SELECT account_id, client_id, scopes, granted_at, updated_at
+             FROM tenant.consents WHERE account_id = $1 AND client_id = $2",
+        )
+        .bind(account_id.uuid())
+        .bind(client_row_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Record or refresh an approval; approving again keeps the original `granted_at`.
+    pub async fn upsert_consent(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        client_row_id: Uuid,
+        scopes: &[String],
+    ) -> Result<ConsentRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ConsentRow>(
+            "INSERT INTO tenant.consents (account_id, client_id, scopes)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (account_id, client_id)
+             DO UPDATE SET scopes = EXCLUDED.scopes, updated_at = now()
+             RETURNING account_id, client_id, scopes, granted_at, updated_at",
+        )
+        .bind(account_id.uuid())
+        .bind(client_row_id)
+        .bind(scopes)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Third-party applications this account approved, most recently used first.
+    pub async fn authorized_apps(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Vec<AuthorizedAppRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, AuthorizedAppRow>(
+            "SELECT c.client_id, c.name, g.scopes, g.granted_at, g.updated_at
+             FROM tenant.consents g
+             JOIN tenant.clients c ON c.id = g.client_id
+             WHERE g.account_id = $1
+             ORDER BY g.updated_at DESC, c.name",
+        )
+        .bind(account_id.uuid())
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Remove an approval; false when the account had not approved this client.
+    pub async fn revoke_consent(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        client_row_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.consents WHERE account_id = $1 AND client_id = $2")
+            .bind(account_id.uuid())
+            .bind(client_row_id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // ---------------------------------------------------------------- sessions
 
     /// Insert a sign-in session. The row id is the cookie value's source of truth.
@@ -3870,6 +3978,26 @@ impl Store {
              WHERE account_id = $1 AND revoked_at IS NULL",
         )
         .bind(account_id.uuid())
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Revoke every live refresh token an account holds for one client, so withdrawing an
+    /// application's approval also ends the renewal it was relying on.
+    pub async fn revoke_account_client_refresh_tokens(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        client_row_id: Uuid,
+    ) -> Result<u64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.refresh_tokens SET revoked_at = now()
+             WHERE account_id = $1 AND client_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(account_id.uuid())
+        .bind(client_row_id)
         .execute(&pool)
         .await?;
         Ok(result.rows_affected())
