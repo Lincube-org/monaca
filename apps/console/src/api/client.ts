@@ -28,6 +28,7 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  EmailTemplate,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
@@ -47,6 +48,7 @@ import type {
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
@@ -300,6 +302,23 @@ export const httpApi: MonacaApi = {
     return request<SignInExperience>("/sign-in-experience", {
       method: "PATCH",
       body: JSON.stringify(body),
+    });
+  },
+
+  listEmailTemplates(): Promise<Page<EmailTemplate>> {
+    return request<Page<EmailTemplate>>("/email-templates");
+  },
+
+  updateEmailTemplate(purpose: string, body: UpdateEmailTemplateRequest): Promise<EmailTemplate> {
+    return request<EmailTemplate>(`/email-templates/${encodeURIComponent(purpose)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  resetEmailTemplate(purpose: string): Promise<void> {
+    return request<void>(`/email-templates/${encodeURIComponent(purpose)}`, {
+      method: "DELETE",
     });
   },
 

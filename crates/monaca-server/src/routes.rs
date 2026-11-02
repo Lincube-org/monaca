@@ -423,6 +423,15 @@ pub fn management_routes() -> Router<Arc<AppState>> {
                 .patch(crate::management::update_sign_in_experience),
         )
         .route(
+            "/v1/email-templates",
+            get(crate::email_templates::list_email_templates),
+        )
+        .route(
+            "/v1/email-templates/{purpose}",
+            patch(crate::email_templates::update_email_template)
+                .delete(crate::email_templates::reset_email_template),
+        )
+        .route(
             "/v1/resources",
             get(crate::resources::list_resources).post(crate::resources::create_resource),
         )

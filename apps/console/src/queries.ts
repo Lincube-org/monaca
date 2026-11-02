@@ -32,6 +32,7 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  EmailTemplate,
   Grant,
   ListAuditQuery,
   Member,
@@ -49,6 +50,7 @@ import type {
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
@@ -560,6 +562,40 @@ export function useUpdateSignInExperience() {
     mutationFn: (body) => api.updateSignInExperience(body),
     onSuccess: (updated) => {
       client.setQueryData(queryKeys.signInExperience(), updated);
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+/**
+ * The mail copy is a list, so every write refetches it: a reset also flips `customized` and the
+ * `updated_at` the row shows, which a single-object write-back would only guess at.
+ */
+export function useEmailTemplates(): UseQueryReturnType<Page<EmailTemplate>, Error> {
+  return useQuery({
+    queryKey: queryKeys.emailTemplates(),
+    queryFn: () => api.listEmailTemplates(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useUpdateEmailTemplate() {
+  const client = useQueryClient();
+  return useMutation<EmailTemplate, Error, { purpose: string; body: UpdateEmailTemplateRequest }>({
+    mutationFn: ({ purpose, body }) => api.updateEmailTemplate(purpose, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.emailTemplates() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useResetEmailTemplate() {
+  const client = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: (purpose) => api.resetEmailTemplate(purpose),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.emailTemplates() });
       invalidateTenantAudit(client);
     },
   });

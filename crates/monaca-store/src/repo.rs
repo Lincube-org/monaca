@@ -391,6 +391,19 @@ pub struct AuthorizedAppRow {
     pub updated_at: OffsetDateTime,
 }
 
+/// One purpose's customised mail copy; a missing row means the built-in default.
+#[derive(Debug, Clone, FromRow)]
+pub struct EmailTemplateRow {
+    /// The mail purpose the copy applies to.
+    pub purpose: String,
+    /// The subject line, with `{{variable}}` placeholders already allowed by the server.
+    pub subject: String,
+    /// The plain-text body.
+    pub body: String,
+    /// When the copy was last written.
+    pub updated_at: OffsetDateTime,
+}
+
 /// A client in `tenant.clients`.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClientRow {
@@ -1054,6 +1067,75 @@ impl Store {
         .bind(custom_css)
         .fetch_one(&pool)
         .await?)
+    }
+
+    // ------------------------------------------------------------ email templates
+
+    /// Every purpose the tenant customised. Purposes without a row use the built-in default.
+    pub async fn email_templates(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<EmailTemplateRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, EmailTemplateRow>(
+            "SELECT purpose, subject, body, updated_at
+             FROM tenant.email_templates ORDER BY purpose",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One purpose's customised copy, or `None` when the default applies.
+    pub async fn email_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+    ) -> Result<Option<EmailTemplateRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, EmailTemplateRow>(
+            "SELECT purpose, subject, body, updated_at
+             FROM tenant.email_templates WHERE purpose = $1",
+        )
+        .bind(purpose)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Replace one purpose's copy; the next mail for that purpose renders it.
+    pub async fn upsert_email_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<EmailTemplateRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, EmailTemplateRow>(
+            "INSERT INTO tenant.email_templates (purpose, subject, body)
+             VALUES ($1,$2,$3)
+             ON CONFLICT (purpose) DO UPDATE
+             SET subject = EXCLUDED.subject, body = EXCLUDED.body, updated_at = now()
+             RETURNING purpose, subject, body, updated_at",
+        )
+        .bind(purpose)
+        .bind(subject)
+        .bind(body)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Drop the customisation so the built-in default applies again; `false` when none existed.
+    pub async fn delete_email_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.email_templates WHERE purpose = $1")
+            .bind(purpose)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // ------------------------------------------------------------------ webhooks

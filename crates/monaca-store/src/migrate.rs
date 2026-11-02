@@ -214,6 +214,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "third-party consent grants (M1)",
         include_str!("../migrations/tenant_35.sql"),
     ),
+    (
+        36,
+        "per-purpose email templates (M1)",
+        include_str!("../migrations/tenant_36.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

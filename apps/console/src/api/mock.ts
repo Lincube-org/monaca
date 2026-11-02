@@ -1,9 +1,15 @@
+// The pure helpers, not the barrel: the mock is loaded by `bun test`, and the barrel drags every
+// Vue SFC into a process that never renders one.
+import { isKnownWebhookEvent } from "@monaca/ui/components/domain/audit.ts";
+import { jwkThumbprintHex, publicEcJwk } from "@monaca/ui/lib/thumbprint.ts";
+
+import { unknownPlaceholder } from "@/lib/placeholders";
 import { newId } from "@/lib/typed-id";
-import { jwkThumbprintHex, isKnownWebhookEvent, publicEcJwk } from "@monaca/ui";
 
 import { ApiError, type MonacaApi } from "./contract";
 import {
   DEFAULT_ORG,
+  EMAIL_TEMPLATE_DEFAULTS,
   TENANT,
   appendToChain,
   buildAgents,
@@ -15,6 +21,7 @@ import {
   seedClients,
   seedConnectors,
   seedEmailDomains,
+  seedEmailTemplates,
   seedMemberRoleIndexes,
   seedMembers,
   seedOrgInvitations,
@@ -60,6 +67,7 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  EmailTemplate,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
@@ -78,6 +86,7 @@ import type {
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
@@ -123,6 +132,8 @@ class MockStore {
   private connectors: Connector[] = seedConnectors();
   private ssoConnectors: SsoConnector[] = seedSsoConnectors();
   private experience: SignInExperience = seedSignInExperience();
+  /** One row per mail purpose; a default is what the server would send without a tenant override. */
+  private emailTemplates: EmailTemplate[] = seedEmailTemplates();
   /** The optional hosted-page look; absent values fall back to the built-in style. */
   private branding: Branding = {
     display_name: null,
@@ -1508,6 +1519,82 @@ class MockStore {
     return { ...updated, branding: { ...updated.branding } };
   }
 
+  listEmailTemplates(): Page<EmailTemplate> {
+    return { items: this.emailTemplates.map(copyEmailTemplate), next: null };
+  }
+
+  async updateEmailTemplate(
+    purpose: string,
+    body: UpdateEmailTemplateRequest,
+  ): Promise<EmailTemplate> {
+    const template = this.emailTemplates.find((row) => row.purpose === purpose);
+    if (!template) {
+      throw new ApiError("unknown mail purpose", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const subject = body.subject.trim();
+    const copy = body.body.trim();
+    if (subject.length === 0 || [...subject].length > 200) {
+      throw new ApiError("subject must be 1–200 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (copy.length === 0 || [...copy].length > 10_000) {
+      throw new ApiError("body must be 1–10000 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    for (const [field, text] of [
+      ["subject", subject],
+      ["body", copy],
+    ] as const) {
+      const unknown = unknownPlaceholder(text, template.variables);
+      if (unknown !== undefined) {
+        throw new ApiError(`${field}: unknown placeholder {{${unknown}}}`, {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
+
+    template.subject = subject;
+    template.body = copy;
+    template.customized = true;
+    template.updated_at = new Date().toISOString();
+    await this.append({
+      action: "email_template.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { purpose, subject, body: copy },
+    });
+    return copyEmailTemplate(template);
+  }
+
+  async resetEmailTemplate(purpose: string): Promise<void> {
+    const index = this.emailTemplates.findIndex((row) => row.purpose === purpose);
+    const template = this.emailTemplates[index];
+    if (!template) {
+      throw new ApiError("unknown mail purpose", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    // A default purpose has nothing to drop; resetting it is already the requested state.
+    if (!template.customized) return;
+    const fallback = EMAIL_TEMPLATE_DEFAULTS.find((row) => row.purpose === purpose);
+    if (fallback) {
+      this.emailTemplates[index] = { ...fallback, variables: [...fallback.variables] };
+    }
+    await this.append({
+      action: "email_template.reset",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { purpose },
+    });
+  }
+
   listWebhooks(): Page<Webhook> {
     return {
       items: this.webhooks.map(({ secret: _secret, ...row }) => ({
@@ -2472,6 +2559,10 @@ function normaliseBrandingPatch(patch: BrandingPatch): Partial<Branding> {
   return out;
 }
 
+function copyEmailTemplate(template: EmailTemplate): EmailTemplate {
+  return { ...template, variables: [...template.variables] };
+}
+
 function cloneAccountSecurity(security: AccountSecurity): AccountSecurity {
   return {
     ...security,
@@ -2741,6 +2832,18 @@ export const mockApi: MonacaApi = {
   async updateSignInExperience(body) {
     await delay();
     return store.updateSignInExperience(body);
+  },
+  async listEmailTemplates() {
+    await delay();
+    return store.listEmailTemplates();
+  },
+  async updateEmailTemplate(purpose, body) {
+    await delay();
+    return store.updateEmailTemplate(purpose, body);
+  },
+  async resetEmailTemplate(purpose) {
+    await delay();
+    return store.resetEmailTemplate(purpose);
   },
   async listWebhooks() {
     await delay();

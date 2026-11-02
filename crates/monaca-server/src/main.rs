@@ -12,6 +12,7 @@ mod bootstrap;
 mod cli;
 mod clients;
 mod config;
+mod email_templates;
 mod error;
 mod internal;
 mod management;

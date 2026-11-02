@@ -66,6 +66,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Sign-in experience" },
   },
   {
+    path: "/email-templates",
+    name: "email-templates",
+    component: () => import("@/pages/EmailTemplatesPage.vue"),
+    meta: { title: "Email templates" },
+  },
+  {
     path: "/connectors",
     name: "connectors",
     component: () => import("@/pages/ConnectorsPage.vue"),

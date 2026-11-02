@@ -27,6 +27,7 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  EmailTemplate,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
@@ -46,6 +47,7 @@ import type {
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateSignInExperienceRequest,
@@ -150,6 +152,14 @@ export interface MonacaApi {
    */
   getSignInExperience(): Promise<SignInExperience>;
   updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience>;
+
+  /**
+   * The copy every outbox mail renders. A purpose without a tenant row answers the built-in
+   * default with `customized: false`; resetting drops the row and restores that default.
+   */
+  listEmailTemplates(): Promise<Page<EmailTemplate>>;
+  updateEmailTemplate(purpose: string, body: UpdateEmailTemplateRequest): Promise<EmailTemplate>;
+  resetEmailTemplate(purpose: string): Promise<void>;
 
   /**
    * Outbound webhook subscriptions, tenant-level like the sign-in switches: one endpoint may

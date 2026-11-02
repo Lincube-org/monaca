@@ -353,13 +353,20 @@ async fn notify(
     to: &str,
     purpose: &str,
 ) -> Result<(), ApiError> {
+    let (subject, body) = crate::email_templates::mail_copy(
+        state,
+        tenant,
+        purpose,
+        &[("tenant", tenant.slug.as_str())],
+    )
+    .await;
     let mut tx = state.store.begin_tenant(tenant).await?;
     state
         .store
         .outbox_append(
             &mut *tx,
             topics::MAIL,
-            &json!({ "to": to, "purpose": purpose }),
+            &json!({ "to": to, "purpose": purpose, "subject": subject, "body": body }),
         )
         .await?;
     tx.commit().await?;

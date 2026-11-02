@@ -303,6 +303,28 @@ export interface SignInExperience {
   updated_at: string;
 }
 
+/**
+ * One mail purpose's copy (§6.2 `email-templates`).
+ *
+ * `subject` and `body` are the effective values: the tenant's row when `customized`, otherwise the
+ * server's built-in default. `variables` names the `{{…}}` placeholders the purpose can render, so
+ * a typo is refused at save time rather than mailed literally.
+ */
+export interface EmailTemplate {
+  purpose: string;
+  subject: string;
+  body: string;
+  variables: string[];
+  customized: boolean;
+  /** When the copy was last written; `null` while the default applies. */
+  updated_at: string | null;
+}
+
+export interface UpdateEmailTemplateRequest {
+  subject: string;
+  body: string;
+}
+
 /** A create response for a confidential client carries the new secret exactly once. */
 export type CreatedClient = Client & { client_secret?: string };
 

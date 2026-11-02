@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import { jwkThumbprintHex, publicEcJwk } from "@monaca/ui";
+// Subpath, not the barrel: this suite never renders a component, and loading every SFC here
+// is both wasted work and a Bun test-runner flake waiting to happen.
+import { jwkThumbprintHex, publicEcJwk } from "@monaca/ui/lib/thumbprint.ts";
 
 import { ApiError } from "./contract";
 import { appendToChain, verifyLog, type AuditLog } from "./fixtures";
@@ -1572,6 +1574,114 @@ describe("sign-in experience", () => {
       session_ttl_secs: 2_592_000,
       refresh_token_ttl_secs: 2_592_000,
     });
+  });
+});
+
+describe("email templates", () => {
+  it("lists every purpose in the server's order with its writable variables", async () => {
+    const page = await mockApi.listEmailTemplates();
+    expect(page.items.map((template) => template.purpose)).toEqual([
+      "sign_up",
+      "sign_in",
+      "password_reset",
+      "email_change",
+      "delete_account",
+      "sign_in_link",
+      "email_changed",
+      "password_changed",
+      "account_deleted",
+    ]);
+    expect(page.next).toBeNull();
+
+    const link = page.items.find((template) => template.purpose === "sign_in_link");
+    expect(link?.variables).toEqual(["tenant", "url", "expires_in"]);
+    expect(link?.body).toContain("{{url}}");
+
+    const notice = page.items.find((template) => template.purpose === "password_changed");
+    expect(notice?.variables).toEqual(["tenant"]);
+
+    expect(page.items.every((template) => !template.customized && template.updated_at === null)).toBe(
+      true,
+    );
+  });
+
+  it("saves a custom copy, shows it on the next read, and resets back to the default", async () => {
+    const updated = await mockApi.updateEmailTemplate("sign_up", {
+      subject: "  Welcome to {{tenant}}  ",
+      body: "Use {{code}} within {{expires_in}} minutes.",
+    });
+    expect(updated.subject).toBe("Welcome to {{tenant}}");
+    expect(updated.customized).toBe(true);
+    expect(updated.updated_at).not.toBeNull();
+
+    const reread = (await mockApi.listEmailTemplates()).items.find(
+      (template) => template.purpose === "sign_up",
+    );
+    expect(reread?.body).toBe("Use {{code}} within {{expires_in}} minutes.");
+
+    const audit = await mockApi.listAudit(ORG, { action: "email_template.updated", limit: 200 });
+    expect(audit.items[0]?.payload).toEqual({
+      purpose: "sign_up",
+      subject: "Welcome to {{tenant}}",
+      body: "Use {{code}} within {{expires_in}} minutes.",
+    });
+
+    await mockApi.resetEmailTemplate("sign_up");
+    const reset = (await mockApi.listEmailTemplates()).items.find(
+      (template) => template.purpose === "sign_up",
+    );
+    expect(reset?.subject).toBe("Your {{tenant}} verification code");
+    expect(reset?.customized).toBe(false);
+    expect(reset?.updated_at).toBeNull();
+
+    const resets = await mockApi.listAudit(ORG, { action: "email_template.reset", limit: 200 });
+    expect(resets.items[0]?.payload).toEqual({ purpose: "sign_up" });
+  });
+
+  it("refuses an empty copy, an unknown placeholder, and an unknown purpose", async () => {
+    const empty = await mockApi
+      .updateEmailTemplate("sign_in", { subject: " ", body: "Enter {{code}}" })
+      .catch((error: unknown) => error);
+    expect(empty).toBeInstanceOf(ApiError);
+    expect((empty as ApiError).status).toBe(400);
+
+    const typo = await mockApi
+      .updateEmailTemplate("sign_in", { subject: "Your code", body: "Enter {{cod}} to sign in" })
+      .catch((error: unknown) => error);
+    expect(typo).toBeInstanceOf(ApiError);
+    expect((typo as ApiError).status).toBe(400);
+    expect((typo as ApiError).message).toContain("{{cod}}");
+
+    // A refused write leaves the stored row untouched.
+    const current = (await mockApi.listEmailTemplates()).items.find(
+      (template) => template.purpose === "sign_in",
+    );
+    expect(current?.subject).toBe("Your {{tenant}} sign-in code");
+    expect(current?.customized).toBe(false);
+
+    const missing = await mockApi
+      .resetEmailTemplate("no_such_purpose")
+      .catch((error: unknown) => error);
+    expect(missing).toBeInstanceOf(ApiError);
+    expect((missing as ApiError).status).toBe(404);
+  });
+
+  it("treats resetting a default as a no-op, audit row included", async () => {
+    const before = await mockApi.listAudit(ORG, { action: "email_template.reset", limit: 200 });
+    await mockApi.resetEmailTemplate("account_deleted");
+    const after = await mockApi.listAudit(ORG, { action: "email_template.reset", limit: 200 });
+    expect(after.items.length).toBe(before.items.length);
+  });
+
+  it("returns copies, so a caller cannot mutate the stored template", async () => {
+    const page = await mockApi.listEmailTemplates();
+    page.items[0]?.variables.push("evil");
+    const first = page.items[0];
+    if (first) first.subject = "mutated";
+
+    const fresh = (await mockApi.listEmailTemplates()).items[0];
+    expect(fresh?.variables).toEqual(["tenant", "code", "expires_in"]);
+    expect(fresh?.subject).toBe("Your {{tenant}} verification code");
   });
 });
 

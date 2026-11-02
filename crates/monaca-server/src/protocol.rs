@@ -1200,6 +1200,19 @@ pub(crate) async fn request_verification(
         .insert_verification_code(tenant, purpose, email, &hash_secret(&code), expires_at)
         .await?;
 
+    let expires_in = (VERIFICATION_CODE_TTL_SECS / 60).to_string();
+    let (subject, body) = crate::email_templates::mail_copy(
+        state,
+        tenant,
+        purpose,
+        &[
+            ("tenant", tenant.slug.as_str()),
+            ("code", code.as_str()),
+            ("expires_in", expires_in.as_str()),
+        ],
+    )
+    .await;
+
     // §6.3: the outbox is how the Bun side and the acceptance script see what would be mailed.
     let mut tx = state.store.begin_tenant(tenant).await?;
     state
@@ -1210,6 +1223,8 @@ pub(crate) async fn request_verification(
             &json!({
                 "to": email,
                 "purpose": purpose,
+                "subject": subject,
+                "body": body,
                 "code": code,
                 "expires_at": expires_at.unix_timestamp(),
             }),
@@ -1693,6 +1708,18 @@ pub async fn sign_in_link(
         ),
         &[("token", token.as_str())],
     );
+    let expires_in = (VERIFICATION_CODE_TTL_SECS / 60).to_string();
+    let (subject, body) = crate::email_templates::mail_copy(
+        &state,
+        &tenant,
+        PURPOSE_SIGN_IN_LINK,
+        &[
+            ("tenant", tenant.slug.as_str()),
+            ("url", url.as_str()),
+            ("expires_in", expires_in.as_str()),
+        ],
+    )
+    .await;
     let mut tx = state.store.begin_tenant(&tenant).await?;
     state
         .store
@@ -1702,6 +1729,8 @@ pub async fn sign_in_link(
             &json!({
                 "to": email,
                 "purpose": PURPOSE_SIGN_IN_LINK,
+                "subject": subject,
+                "body": body,
                 "token": token,
                 "url": url,
                 "expires_at": expires_at.unix_timestamp(),

@@ -12,6 +12,7 @@ import type {
   AuditIntegrity,
   Client,
   Connector,
+  EmailTemplate,
   Grant,
   Member,
   OrgRole,
@@ -485,6 +486,100 @@ export function seedSignInExperience(): SignInExperience {
     },
     updated_at: at(900 * 60),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Email templates
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The server's built-in mail copy, per purpose (§6.3).
+ *
+ * These mirror `crates/monaca-server/src/email_templates.rs` so the mock renders the words a real
+ * tenant would read before customising anything. `variables` is also the write-time whitelist: the
+ * mock refuses an unknown placeholder exactly as the server does.
+ */
+export const EMAIL_TEMPLATE_DEFAULTS: readonly EmailTemplate[] = Object.freeze([
+  {
+    purpose: "sign_up",
+    subject: "Your {{tenant}} verification code",
+    body: "Enter {{code}} to finish creating your account. The code expires in {{expires_in}} minutes.",
+    variables: ["tenant", "code", "expires_in"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "sign_in",
+    subject: "Your {{tenant}} sign-in code",
+    body: "Enter {{code}} to sign in. The code expires in {{expires_in}} minutes.",
+    variables: ["tenant", "code", "expires_in"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "password_reset",
+    subject: "Reset your {{tenant}} password",
+    body: "Enter {{code}} to choose a new password. The code expires in {{expires_in}} minutes.",
+    variables: ["tenant", "code", "expires_in"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "email_change",
+    subject: "Confirm your new {{tenant}} email address",
+    body: "Enter {{code}} to use this address on your account. The code expires in {{expires_in}} minutes.",
+    variables: ["tenant", "code", "expires_in"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "delete_account",
+    subject: "Delete your {{tenant}} account",
+    body: "Enter {{code}} to delete your account. This cannot be undone. The code expires in {{expires_in}} minutes.",
+    variables: ["tenant", "code", "expires_in"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "sign_in_link",
+    subject: "Your {{tenant}} sign-in link",
+    body: "Open {{url}} to sign in. The link expires in {{expires_in}} minutes.",
+    variables: ["tenant", "url", "expires_in"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "email_changed",
+    subject: "Your {{tenant}} email address changed",
+    body: "The email address on your {{tenant}} account was changed. If this was not you, contact your administrator.",
+    variables: ["tenant"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "password_changed",
+    subject: "Your {{tenant}} password changed",
+    body: "The password on your {{tenant}} account was changed. If this was not you, reset it now.",
+    variables: ["tenant"],
+    customized: false,
+    updated_at: null,
+  },
+  {
+    purpose: "account_deleted",
+    subject: "Your {{tenant}} account was deleted",
+    body: "Your {{tenant}} account was deleted. If this was not you, contact your administrator.",
+    variables: ["tenant"],
+    customized: false,
+    updated_at: null,
+  },
+]);
+
+/** A fresh copy per store, so one test's customisation never leaks into the next. */
+export function seedEmailTemplates(): EmailTemplate[] {
+  return EMAIL_TEMPLATE_DEFAULTS.map((template) => ({
+    ...template,
+    variables: [...template.variables],
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------

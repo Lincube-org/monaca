@@ -484,6 +484,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "DELETE /t/{tenant}/account/authorized-apps/{client} is 204, removes the row, ends the account's refresh " +
       "tokens for that client, makes the next silent request answer consent_required, and a second delete is 404",
   },
+  {
+    step: "51",
+    title: "email templates",
+    assertion:
+      "GET /v1/email-templates lists all nine purposes with their writable placeholders and the built-in copy; " +
+      "PATCH one with a custom subject and body is 200 and a real sign-up then mails the rendered copy from " +
+      "/internal/mail (tenant and code substituted, no literal placeholder); an unknown placeholder, an empty " +
+      "subject and an unknown purpose are 400/400/404; DELETE restores the built-in copy with 204 and a second " +
+      "DELETE is 204 too; email_template.updated and email_template.reset are on the tenant audit chain",
+  },
 ];
 
 interface StepResult {
@@ -8416,6 +8426,206 @@ async function consentFlow(base: string, adminToken: string): Promise<StepResult
 }
 
 /**
+ * Step 51: mail copy is per tenant, rendered at send time, and restorable.
+ *
+ * The proof that a template is more than a stored string is the outbox: after a custom sign-up
+ * template is saved, the dev mail for a real sign-up carries the tenant's words with the code and
+ * expiry filled in — not the built-in sentence and not a literal `{{code}}`.
+ */
+async function emailTemplatesFlow(
+  base: string,
+  adminToken: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const email = `mail-copy-${runId}@demo.localhost`;
+  const customSubject = "E2E {{tenant}} access code";
+  const customBody = "Hello from {{tenant}}. Use {{code}} within {{expires_in}} minutes.";
+
+  try {
+    const before = await call(`${base}/v1/email-templates`, { headers });
+    const items =
+      (
+        before.body as
+          | { items?: { purpose?: unknown; customized?: unknown; subject?: unknown; variables?: unknown }[] }
+          | undefined
+      )?.items ?? [];
+    const purposes = items.map((item) => item.purpose);
+    const signUpBefore = items.find((item) => item.purpose === "sign_up");
+    checks.push([
+      "the nine purposes are listed with the built-in sign-up copy",
+      before.status === 200 &&
+        purposes.length === 9 &&
+        purposes[0] === "sign_up" &&
+        signUpBefore?.customized === false &&
+        signUpBefore?.subject === "Your {{tenant}} verification code" &&
+        Array.isArray(signUpBefore?.variables) &&
+        signUpBefore.variables.includes("code"),
+    ]);
+
+    const saved = await call(`${base}/v1/email-templates/sign_up`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ subject: customSubject, body: customBody }),
+    });
+    checks.push([
+      "a custom copy is stored and marked customized",
+      saved.status === 200 &&
+        (saved.body as { subject?: unknown })?.subject === customSubject &&
+        (saved.body as { customized?: unknown })?.customized === true,
+    ]);
+
+    const [unknownPlaceholder, emptySubject, missingPurpose] = await Promise.all([
+      call(`${base}/v1/email-templates/sign_up`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ subject: "Has {{typo}}", body: customBody }),
+      }),
+      call(`${base}/v1/email-templates/sign_up`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ subject: " ", body: customBody }),
+      }),
+      call(`${base}/v1/email-templates/no_such_purpose`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ subject: "Any", body: "Any" }),
+      }),
+    ]);
+    checks.push([
+      "an unknown placeholder, an empty subject and an unknown purpose are refused",
+      unknownPlaceholder?.status === 400 &&
+        emptySubject?.status === 400 &&
+        missingPurpose?.status === 404,
+    ]);
+
+    // A real sign-up asks the server to mail the code; the outbox shows what the recipient reads.
+    const verifier = `et-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-email-template-${runId}`,
+        nonce: `n-email-template-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(authorize.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    const requested =
+      interaction === null
+        ? undefined
+        : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-up`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ email }),
+          });
+    checks.push([
+      "a sign-up interaction requests a code",
+      authorize.status === 302 &&
+        typeof interaction === "string" &&
+        requested?.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    const mail = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "sign_up" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const payload =
+      (
+        mail.body as
+          | { payload?: { subject?: unknown; body?: unknown; code?: unknown } }
+          | undefined
+      )?.payload;
+    const outboxBody = typeof payload?.body === "string" ? payload.body : "";
+    checks.push([
+      "the outbox carries the rendered copy, not the placeholders",
+      mail.status === 200 &&
+        payload?.subject === "E2E demo access code" &&
+        typeof payload?.code === "string" &&
+        outboxBody.includes(payload.code) &&
+        outboxBody.includes("Hello from demo.") &&
+        !outboxBody.includes("{{"),
+    ]);
+
+    const restored = await call(`${base}/v1/email-templates/sign_up`, { method: "DELETE", headers });
+    const afterReset = await call(`${base}/v1/email-templates`, { headers });
+    const signUpAfter = (
+      afterReset.body as
+        | { items?: { purpose?: unknown; customized?: unknown; subject?: unknown }[] }
+        | undefined
+    )?.items?.find((item) => item.purpose === "sign_up");
+    checks.push([
+      "DELETE restores the built-in copy",
+      restored.status === 204 &&
+        signUpAfter?.customized === false &&
+        signUpAfter?.subject === "Your {{tenant}} verification code",
+    ]);
+
+    const secondReset = await call(`${base}/v1/email-templates/sign_up`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["a second reset is still 204", secondReset.status === 204]);
+
+    const updatedAudit = await call(
+      `${base}/v1/orgs/${ORG}/audit?action=email_template.updated&limit=20`,
+      { headers },
+    );
+    const resetAudit = await call(
+      `${base}/v1/orgs/${ORG}/audit?action=email_template.reset&limit=20`,
+      { headers },
+    );
+    const updatedEvents =
+      (
+        updatedAudit.body as
+          | { items?: { payload?: { purpose?: unknown; subject?: unknown } }[] }
+          | undefined
+      )?.items ?? [];
+    const resetEvents =
+      (resetAudit.body as { items?: { payload?: { purpose?: unknown } }[] } | undefined)?.items ?? [];
+    checks.push([
+      "both writes are on the tenant audit chain",
+      updatedAudit.status === 200 &&
+        updatedEvents[0]?.payload?.purpose === "sign_up" &&
+        updatedEvents[0]?.payload?.subject === customSubject &&
+        resetAudit.status === 200 &&
+        resetEvents[0]?.payload?.purpose === "sign_up",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "51",
+    title: "email templates",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: defaults → custom copy → refused typo/empty/unknown → rendered outbox → reset → audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
  * Step 37: an administrator can edit an account's profile, and the edit is audited.
  *
  * The username is a sign-in identifier, so its uniqueness and grammar are the same rules the
@@ -10534,6 +10744,7 @@ async function main(): Promise<number> {
   push(await ssoSwitchFlow(base, adminToken));
   push(await registrationPolicyFlow(base, adminToken, parsed.consoleSecret));
   push(await consentFlow(base, adminToken));
+  push(await emailTemplatesFlow(base, adminToken, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
