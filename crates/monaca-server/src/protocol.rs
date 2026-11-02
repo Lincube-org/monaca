@@ -100,6 +100,7 @@ pub async fn sign_in_experience(
         "username_min_length": experience.username_min_length,
         "username_max_length": experience.username_max_length,
         "sign_up_profile_fields": experience.sign_up_profile_fields,
+        "captcha": crate::management::captcha_json(&experience, false),
         "branding": crate::management::branding_json(&branding),
     })))
 }
@@ -294,7 +295,8 @@ pub async fn authorize(
                     }
                     // Consent still has to be shown, but not the password form: record the session as
                     // this interaction's authentication, and let the page render its consent step.
-                    let interaction = build_interaction(&state, &tenant, &client, &request, &org, true);
+                    let interaction =
+                        build_interaction(&state, &tenant, &client, &request, &org, true);
                     state
                         .mark_interaction_signed_in(
                             &interaction.interaction_id.to_string(),
@@ -386,7 +388,11 @@ async fn consent_covers(
     client_row_id: Uuid,
     scopes: &[String],
 ) -> Result<bool, ApiError> {
-    let Some(grant) = state.store.consent(tenant, account_id, client_row_id).await? else {
+    let Some(grant) = state
+        .store
+        .consent(tenant, account_id, client_row_id)
+        .await?
+    else {
         return Ok(false);
     };
     Ok(scopes
@@ -477,6 +483,8 @@ pub struct SignInBody {
     pub email: Option<String>,
     /// The password.
     pub password: String,
+    /// The CAPTCHA widget's token when the tenant gates password sign-in.
+    pub captcha_token: Option<String>,
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/sign-in`.
@@ -498,6 +506,14 @@ pub async fn sign_in(
             "password sign-in is disabled for this tenant",
         ));
     }
+    crate::captcha::enforce(
+        &state,
+        &tenant,
+        &experience,
+        crate::captcha::Flow::SignIn,
+        body.captcha_token.as_deref(),
+    )
+    .await?;
     let org_slug = interaction.organization.clone();
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
     let org_ctx = org.ctx(&tenant);
@@ -516,6 +532,41 @@ pub async fn sign_in(
         .account_by_identifier(&tenant, identifier, experience.username_case_sensitive)
         .await?;
 
+    // Lockout is keyed by the identifier the attempt named, so a wrong password counts against
+    // the account it was aimed at rather than the source address. Only a real, active account
+    // owns a counter: an unknown address must not be able to create rows on request.
+    let lockout_enabled = experience.login_lockout_threshold > 0;
+    let account_can_lock = account
+        .as_ref()
+        .is_some_and(|(account, phc)| account.state == "active" && phc.is_some());
+    let lock_key = identifier.to_lowercase();
+    if lockout_enabled
+        && account_can_lock
+        && let Some(failure) = state.store.login_failure(&tenant, &lock_key).await?
+    {
+        match failure.locked_until {
+            Some(until) if until > state.now() => {
+                let event = sign_in_event(
+                    state.now(),
+                    &org_ctx.org_id,
+                    AuditDecision::Deny,
+                    identifier,
+                    "account_locked",
+                );
+                if let Err(err) = state.audit_org(&org_ctx, &event).await {
+                    tracing::warn!(%err, "could not append sign-in.failed audit event");
+                }
+                return Err(ApiError::problem(
+                    kinds::ACCOUNT_LOCKED,
+                    "too many failed sign-ins; try again later",
+                ));
+            }
+            // An expired lock starts a fresh count instead of carrying the old total over.
+            Some(_) => state.store.clear_login_failures(&tenant, &lock_key).await?,
+            None => {}
+        }
+    }
+
     let authenticated = match account {
         Some((account, Some(phc))) if account.state == "active" => {
             match verify_password(body.password.clone(), phc, state.argon).await {
@@ -530,6 +581,17 @@ pub async fn sign_in(
     };
 
     let Some(account) = authenticated else {
+        if lockout_enabled && account_can_lock {
+            state
+                .store
+                .record_login_failure(
+                    &tenant,
+                    &lock_key,
+                    experience.login_lockout_threshold,
+                    experience.login_lockout_duration_secs,
+                )
+                .await?;
+        }
         let event = sign_in_event(
             state.now(),
             &org_ctx.org_id,
@@ -545,6 +607,10 @@ pub async fn sign_in(
             "identifier or password is incorrect",
         ));
     };
+
+    if lockout_enabled && account_can_lock {
+        state.store.clear_login_failures(&tenant, &lock_key).await?;
+    }
 
     finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
@@ -833,7 +899,12 @@ async fn complete_sign_in(
                 .await
                 .map_err(ApiError::Interaction)?;
             let response = Json(json!({ "consent_required": true })).into_response();
-            return Ok(with_session_cookie(response, session_id, session_ttl_secs, &state));
+            return Ok(with_session_cookie(
+                response,
+                session_id,
+                session_ttl_secs,
+                &state,
+            ));
         }
     }
 
@@ -852,7 +923,12 @@ async fn complete_sign_in(
         false,
     )
     .await?;
-    Ok(with_session_cookie(response, session_id, session_ttl_secs, &state))
+    Ok(with_session_cookie(
+        response,
+        session_id,
+        session_ttl_secs,
+        &state,
+    ))
 }
 
 /// The browser-facing variant of [`finish_sign_in`].
@@ -927,6 +1003,8 @@ pub(crate) const PURPOSE_SIGN_IN_LINK: &str = "sign_in_link";
 pub struct EmailBody {
     /// The address to mail the code to.
     pub email: String,
+    /// The CAPTCHA widget's token when the tenant gates this request.
+    pub captcha_token: Option<String>,
 }
 
 /// `POST …/sign-up` body.
@@ -943,6 +1021,8 @@ pub struct SignUpBody {
     pub display_name: Option<String>,
     /// An optional avatar URL when the tenant collects one at sign-up.
     pub avatar_url: Option<String>,
+    /// The CAPTCHA widget's token when the tenant gates sign-up.
+    pub captcha_token: Option<String>,
 }
 
 /// `POST …/sign-up/verify` body.
@@ -1351,11 +1431,7 @@ fn check_sign_up_profile(
         }
         None => None,
     };
-    Ok((
-        username,
-        display_name.map(str::to_owned),
-        avatar_url,
-    ))
+    Ok((username, display_name.map(str::to_owned), avatar_url))
 }
 
 /// Create the account, join the interaction's org and finish the sign-in.
@@ -1475,6 +1551,14 @@ pub async fn sign_up(
             "self-service sign-up is disabled for this tenant",
         ));
     }
+    crate::captcha::enforce(
+        &state,
+        &tenant,
+        &experience,
+        crate::captcha::Flow::SignUp,
+        body.captcha_token.as_deref(),
+    )
+    .await?;
     let email = normalise_email(&body.email)?;
     if state
         .store
@@ -1487,9 +1571,8 @@ pub async fn sign_up(
             "an account with this email already exists",
         ));
     }
-    let has_profile = body.username.is_some()
-        || body.display_name.is_some()
-        || body.avatar_url.is_some();
+    let has_profile =
+        body.username.is_some() || body.display_name.is_some() || body.avatar_url.is_some();
     if experience.sign_up_email_verification_required {
         if body.password.is_some() || has_profile {
             return Err(ApiError::problem(
@@ -1497,9 +1580,11 @@ pub async fn sign_up(
                 "email verification is required; send the password and profile fields to sign-up/verify",
             ));
         }
-        return Ok(request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email)
-            .await?
-            .into_response());
+        return Ok(
+            request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email)
+                .await?
+                .into_response(),
+        );
     }
     let Some(password) = body.password else {
         return Err(ApiError::problem(
@@ -1598,17 +1683,21 @@ pub async fn sign_in_code(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .email_code_sign_in_enabled
-    {
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.email_code_sign_in_enabled {
         return Err(ApiError::problem(
             kinds::EMAIL_CODE_SIGN_IN_DISABLED,
             "email code sign-in is disabled for this tenant",
         ));
     }
+    crate::captcha::enforce(
+        &state,
+        &tenant,
+        &experience,
+        crate::captcha::Flow::SignIn,
+        body.captcha_token.as_deref(),
+    )
+    .await?;
     let email = normalise_email(&body.email)?;
     request_verification(&state, &tenant, PURPOSE_SIGN_IN, &email).await
 }
@@ -1661,17 +1750,22 @@ pub async fn sign_in_link(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .email_code_sign_in_enabled
-    {
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.email_code_sign_in_enabled {
         return Err(ApiError::problem(
             kinds::EMAIL_CODE_SIGN_IN_DISABLED,
             "email code sign-in is disabled for this tenant",
         ));
     }
+    // A mailed link is another way to start a sign-in, so the same challenge covers it.
+    crate::captcha::enforce(
+        &state,
+        &tenant,
+        &experience,
+        crate::captcha::Flow::SignIn,
+        body.captcha_token.as_deref(),
+    )
+    .await?;
     let email = normalise_email(&body.email)?;
     let now = state.now();
     if let Some(row) = state
@@ -1841,17 +1935,21 @@ pub async fn password_forgot(
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
-    if !state
-        .store
-        .sign_in_experience(&tenant)
-        .await?
-        .password_sign_in_enabled
-    {
+    let experience = state.store.sign_in_experience(&tenant).await?;
+    if !experience.password_sign_in_enabled {
         return Err(ApiError::problem(
             kinds::PASSWORD_SIGN_IN_DISABLED,
             "password sign-in is disabled for this tenant",
         ));
     }
+    crate::captcha::enforce(
+        &state,
+        &tenant,
+        &experience,
+        crate::captcha::Flow::PasswordReset,
+        body.captcha_token.as_deref(),
+    )
+    .await?;
     let email = normalise_email(&body.email)?;
     request_verification(&state, &tenant, PURPOSE_PASSWORD_RESET, &email).await
 }
@@ -1947,7 +2045,10 @@ async fn issue_trusted_device(
         .await?;
     let secure = session::secure_origin(&state.config);
     HeaderValue::from_str(&session::set_device_cookie(
-        &token, ttl_secs, secure, &tenant.slug,
+        &token,
+        ttl_secs,
+        secure,
+        &tenant.slug,
     ))
     .map_err(ApiError::internal)
 }
@@ -2105,7 +2206,10 @@ pub async fn mfa_enroll_start(
         .account_by_id(&tenant, AccountId::from_uuid(account_id))
         .await?
     else {
-        return Err(ApiError::problem(kinds::INVALID_CREDENTIALS, "this account cannot sign in"));
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "this account cannot sign in",
+        ));
     };
     if state
         .store
@@ -2193,10 +2297,16 @@ pub async fn mfa_enroll_verify(
         .map_err(ApiError::Interaction)?;
 
     let Some(account) = state.store.account_by_id(&tenant, account_id).await? else {
-        return Err(ApiError::problem(kinds::INVALID_CREDENTIALS, "this account cannot sign in"));
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "this account cannot sign in",
+        ));
     };
     if account.state != "active" {
-        return Err(ApiError::problem(kinds::INVALID_CREDENTIALS, "this account cannot sign in"));
+        return Err(ApiError::problem(
+            kinds::INVALID_CREDENTIALS,
+            "this account cannot sign in",
+        ));
     }
     finish_sign_in(state, tenant, interaction, &iid, &headers, account).await
 }
@@ -2612,7 +2722,12 @@ async fn establish_session(
 }
 
 /// Attach the SSO cookie to a sign-in response.
-fn with_session_cookie(mut response: Response, session_id: Uuid, ttl_secs: u64, state: &AppState) -> Response {
+fn with_session_cookie(
+    mut response: Response,
+    session_id: Uuid,
+    ttl_secs: u64,
+    state: &AppState,
+) -> Response {
     let secure = session::secure_origin(&state.config);
     let value = session::set_cookie(session_id, ttl_secs, secure);
     if let Ok(value) = HeaderValue::from_str(&value) {

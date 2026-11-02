@@ -43,6 +43,7 @@ import {
   type SignInResult,
 } from "@/api/interaction";
 import { PasskeyError, getPasskeyAssertion, passkeysSupported } from "@/api/webauthn";
+import CaptchaField from "@/components/CaptchaField.vue";
 import {
   listSocialConnectors,
   socialSignInUrl,
@@ -331,6 +332,43 @@ const usernameMaxLength = computed(() => experience.value?.username_max_length ?
 
 /** A sign-up that creates the account in one request, because the address needs no proof. */
 const directSignUp = computed(() => mode.value === "signup" && !emailVerificationRequired.value);
+
+/**
+ * The CAPTCHA challenge the current step needs.
+ *
+ * The tenant gates requests, not verifications: once a code is in flight the address is fixed and
+ * the code itself is the proof, so the widget disappears at the verify stage. A sign-in link is
+ * another way to start a sign-in and is gated with the code request.
+ */
+const captchaSettings = computed(() => experience.value?.captcha ?? null);
+const captchaToken = ref<string | null>(null);
+const captchaWidget = ref<InstanceType<typeof CaptchaField> | null>(null);
+const captchaRequired = computed(() => {
+  const captcha = captchaSettings.value;
+  if (!captcha?.enabled || !captcha.site_key || awaitingCode.value) return false;
+  switch (mode.value) {
+    case "password":
+    case "code":
+      return captcha.on_sign_in;
+    case "signup":
+      return captcha.on_sign_up;
+    case "reset":
+      return captcha.on_password_reset;
+  }
+});
+
+/** Drop the solved token and force the widget to issue a new one; tokens are single use. */
+function resetCaptcha(): void {
+  captchaToken.value = null;
+  captchaWidget.value?.reset();
+}
+
+/** Refuse the submit locally when the challenge has not been solved yet. */
+function captchaMissing(): boolean {
+  if (!captchaRequired.value || captchaToken.value) return false;
+  fieldError.value = "errors.captchaRequired";
+  return true;
+}
 /** The sign-up's detail fields: shown while verifying, or on the single direct form. */
 const signUpOpen = computed(
   () => mode.value === "signup" && (awaitingCode.value || directSignUp.value),
@@ -510,6 +548,10 @@ const submitErrorMessage = computed<MessageKey>(() => {
       return "errors.invalidCode";
     case "MONACA_TOO_MANY_ATTEMPTS":
       return "errors.tooManyAttempts";
+    case "MONACA_CAPTCHA_FAILED":
+      return "errors.captchaFailed";
+    case "MONACA_ACCOUNT_LOCKED":
+      return "errors.accountLocked";
     case "MONACA_INTERACTION_EXPIRED":
       return "errors.interactionExpired";
     case "MONACA_INTERACTION_CONSUMED":
@@ -686,6 +728,7 @@ function switchMode(next: Mode): void {
   fieldError.value = null;
   submitError.value = null;
   passkeyError.value = null;
+  resetCaptcha();
   ssoLookupToken += 1;
   ssoConnector.value = null;
   ssoRedirecting.value = false;
@@ -703,6 +746,7 @@ function changeEmail(): void {
   linkSent.value = false;
   fieldError.value = null;
   submitError.value = null;
+  resetCaptcha();
   void nextTick(() => emailInput.value?.$el?.focus?.());
 }
 
@@ -905,6 +949,7 @@ async function signIn(): Promise<void> {
     fieldError.value = "errors.passwordRequired";
     return;
   }
+  if (captchaMissing()) return;
   if (!tenantFromUrl.value || !interactionId.value) return;
 
   submitting.value = true;
@@ -912,12 +957,14 @@ async function signIn(): Promise<void> {
     const result = await submitSignIn(tenantFromUrl.value, interactionId.value, {
       identifier: email.value.trim(),
       password: password.value,
+      captcha_token: captchaToken.value ?? undefined,
     });
     handleResult(result);
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
     // Clear the password but keep the email: the user is about to try again.
     password.value = "";
+    resetCaptcha();
     if (!(error instanceof InteractionError)) {
       loadError.value = error instanceof Error ? error : new Error(String(error));
     }
@@ -964,6 +1011,7 @@ async function requestCode(): Promise<void> {
       return;
     }
   }
+  if (captchaMissing()) return;
   if (!tenantFromUrl.value || !interactionId.value) return;
 
   submitting.value = true;
@@ -986,17 +1034,28 @@ async function requestCode(): Promise<void> {
               avatar_url: profileAvatarAllowed.value
                 ? avatarUrl.value.trim() || undefined
                 : undefined,
+              captcha_token: captchaToken.value ?? undefined,
             }
-          : { email: address },
+          : { email: address, captcha_token: captchaToken.value ?? undefined },
       );
       if (!("verification_required" in result)) {
         handleResult(result);
         return;
       }
     } else if (mode.value === "code") {
-      await requestSignInCode(tenantFromUrl.value, interactionId.value, address);
+      await requestSignInCode(
+        tenantFromUrl.value,
+        interactionId.value,
+        address,
+        captchaToken.value ?? undefined,
+      );
     } else {
-      await requestPasswordReset(tenantFromUrl.value, interactionId.value, address);
+      await requestPasswordReset(
+        tenantFromUrl.value,
+        interactionId.value,
+        address,
+        captchaToken.value ?? undefined,
+      );
     }
     // The server answers the same way whether or not the address exists; a code is mailed either
     // way and the verify step is where an unknown address fails, with the same generic answer.
@@ -1006,6 +1065,7 @@ async function requestCode(): Promise<void> {
     codeInput.value?.$el?.focus?.();
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
+    resetCaptcha();
     if (!(error instanceof InteractionError)) {
       loadError.value = error instanceof Error ? error : new Error(String(error));
     }
@@ -1023,14 +1083,21 @@ async function sendSignInLink(): Promise<void> {
     fieldError.value = "errors.emailRequired";
     return;
   }
+  if (captchaMissing()) return;
   if (!tenantFromUrl.value || !interactionId.value) return;
 
   linkSubmitting.value = true;
   try {
-    await requestSignInLink(tenantFromUrl.value, interactionId.value, email.value.trim());
+    await requestSignInLink(
+      tenantFromUrl.value,
+      interactionId.value,
+      email.value.trim(),
+      captchaToken.value ?? undefined,
+    );
     linkSent.value = true;
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
+    resetCaptcha();
     if (!(error instanceof InteractionError)) {
       loadError.value = error instanceof Error ? error : new Error(String(error));
     }
@@ -1656,6 +1723,15 @@ async function cancel(): Promise<void> {
                 {{ t("signUp.usernameHint", { min: usernameMinLength, max: usernameMaxLength }) }}
               </p>
             </div>
+
+            <!-- The tenant's challenge, rendered only for the steps the tenant gates. -->
+            <CaptchaField
+              v-if="captchaRequired && captchaSettings?.site_key"
+              ref="captchaWidget"
+              :provider="captchaSettings.provider"
+              :site-key="captchaSettings.site_key"
+              @update:token="captchaToken = $event"
+            />
 
             <!-- Field-level or submission error, in one place, wired through aria-describedby. -->
             <p

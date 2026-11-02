@@ -11,11 +11,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
-use monaca_crypto::hash_password;
+use monaca_crypto::{hash_password, seal};
 use monaca_oidc::{is_absolute_http_url, valid_scope};
 use monaca_store::{
     AccountRow, AgentKeyRow, AgentRow, BrandingRow, GrantRow, RoleRow, SessionRow,
-    SignInExperienceRow, TenantRow,
+    SignInExperienceRow, SignInGuardrailsPatch, TenantRow,
 };
 use monaca_types::{
     AccountId, AgentId, AgentKeyId, EventId, GrantId, PasskeyId, RoleId, SessionId, TenantId,
@@ -345,7 +345,11 @@ pub async fn get_account(
         .account_roles(&tenant, account.account_id())
         .await?;
     let username = state.store.account_username(&tenant, id).await?;
-    Ok(Json(account_detail_json(&account, &roles, username.as_deref())))
+    Ok(Json(account_detail_json(
+        &account,
+        &roles,
+        username.as_deref(),
+    )))
 }
 
 /// The body of `PATCH /v1/accounts/{id}`.
@@ -465,10 +469,7 @@ pub async fn update_account(
         }
     }
 
-    let current_username = state
-        .store
-        .account_username(&tenant, account_id)
-        .await?;
+    let current_username = state.store.account_username(&tenant, account_id).await?;
     let mut changed: Vec<&str> = Vec::new();
     let mut profile_payload = serde_json::Map::new();
     if let Some(name) = display_name
@@ -533,11 +534,12 @@ pub async fn update_account(
         .await?
         .ok_or_else(|| ApiError::not_found("account"))?;
     let roles = state.store.account_roles(&tenant, account_id).await?;
-    let username = state
-        .store
-        .account_username(&tenant, account_id)
-        .await?;
-    Ok(Json(account_detail_json(&updated, &roles, username.as_deref())))
+    let username = state.store.account_username(&tenant, account_id).await?;
+    Ok(Json(account_detail_json(
+        &updated,
+        &roles,
+        username.as_deref(),
+    )))
 }
 
 /// The optional hosted-page branding in `PATCH /v1/sign-in-experience` (§6.2).
@@ -580,6 +582,40 @@ impl BrandingPatch {
             && self.support_email.is_none()
             && self.website_url.is_none()
             && self.custom_css.is_none()
+    }
+}
+
+/// The CAPTCHA switches in `PATCH /v1/sign-in-experience` (§6.2).
+///
+/// `secret` is write-only: sending it replaces the sealed value, sending an empty string removes
+/// it, and omitting it keeps the stored one. No response ever carries the secret back.
+#[derive(Debug, Default, Deserialize)]
+pub struct CaptchaPatch {
+    /// Whether a challenge gates the entrances named below.
+    pub enabled: Option<bool>,
+    /// `turnstile` | `recaptcha`.
+    pub provider: Option<String>,
+    /// The public site key; an empty string clears it.
+    pub site_key: Option<String>,
+    /// The provider secret; an empty string clears it.
+    pub secret: Option<String>,
+    /// Whether password sign-in demands a token.
+    pub on_sign_in: Option<bool>,
+    /// Whether sign-up demands a token.
+    pub on_sign_up: Option<bool>,
+    /// Whether password-reset code requests demand a token.
+    pub on_password_reset: Option<bool>,
+}
+
+impl CaptchaPatch {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.provider.is_none()
+            && self.site_key.is_none()
+            && self.secret.is_none()
+            && self.on_sign_in.is_none()
+            && self.on_sign_up.is_none()
+            && self.on_password_reset.is_none()
     }
 }
 
@@ -630,6 +666,12 @@ pub struct UpdateSignInExperienceBody {
     pub username_max_length: Option<i32>,
     /// The profile fields the sign-up form collects (`name`, `avatar`).
     pub sign_up_profile_fields: Option<Vec<String>>,
+    /// The CAPTCHA provider and the entrances it gates.
+    pub captcha: Option<CaptchaPatch>,
+    /// Consecutive wrong passwords before the identifier is refused; zero disables lockout.
+    pub login_lockout_threshold: Option<i32>,
+    /// How long a lock lasts, 30–86400 seconds.
+    pub login_lockout_duration_secs: Option<i32>,
     /// The hosted page's optional look.
     pub branding: Option<BrandingPatch>,
 }
@@ -678,6 +720,9 @@ pub async fn update_sign_in_experience(
         && body.username_min_length.is_none()
         && body.username_max_length.is_none()
         && body.sign_up_profile_fields.is_none()
+        && body.captcha.as_ref().is_none_or(CaptchaPatch::is_empty)
+        && body.login_lockout_threshold.is_none()
+        && body.login_lockout_duration_secs.is_none()
         && body.branding.is_none()
     {
         return Err(ApiError::problem(
@@ -736,6 +781,48 @@ pub async fn update_sign_in_experience(
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "sign_up_profile_fields may only name name or avatar",
+        ));
+    }
+    if let Some(captcha) = &body.captcha {
+        if let Some(provider) = captcha.provider.as_deref()
+            && !matches!(provider, "turnstile" | "recaptcha")
+        {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "captcha.provider must be turnstile or recaptcha",
+            ));
+        }
+        if let Some(site_key) = captcha.site_key.as_deref()
+            && site_key.trim().chars().count() > 200
+        {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "captcha.site_key must be at most 200 characters",
+            ));
+        }
+        if let Some(secret) = captcha.secret.as_deref()
+            && secret.trim().chars().count() > 500
+        {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "captcha.secret must be at most 500 characters",
+            ));
+        }
+    }
+    if let Some(threshold) = body.login_lockout_threshold
+        && !(0..=100).contains(&threshold)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "login_lockout_threshold must be between 0 and 100",
+        ));
+    }
+    if let Some(duration) = body.login_lockout_duration_secs
+        && !(30..=86_400).contains(&duration)
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "login_lockout_duration_secs must be between 30 and 86400",
         ));
     }
     let rejected_words = normalise_rejected_words(body.password_rejected_words.as_deref())?;
@@ -800,8 +887,37 @@ pub async fn update_sign_in_experience(
             "mfa_policy cannot be mandatory while MFA is disabled",
         ));
     }
+    // Enabling a challenge without both halves of the provider configuration would strand every
+    // gated visitor, so the resulting state is checked before the write.
+    let captcha_enabled = body
+        .captcha
+        .as_ref()
+        .and_then(|captcha| captcha.enabled)
+        .unwrap_or(current.captcha_enabled);
+    let captcha_site_key = match body
+        .captcha
+        .as_ref()
+        .and_then(|captcha| captcha.site_key.as_deref())
+    {
+        Some(value) => (!value.trim().is_empty()).then(|| value.trim()),
+        None => current.captcha_site_key.as_deref(),
+    };
+    let captcha_secret_set = match body
+        .captcha
+        .as_ref()
+        .and_then(|captcha| captcha.secret.as_deref())
+    {
+        Some(value) => !value.trim().is_empty(),
+        None => current.captcha_secret_enc.is_some(),
+    };
+    if captcha_enabled && (captcha_site_key.is_none() || !captcha_secret_set) {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "captcha.enabled requires a site key and a secret",
+        ));
+    }
 
-    let experience = state
+    let mut experience = state
         .store
         .update_sign_in_experience(
             &tenant,
@@ -829,11 +945,37 @@ pub async fn update_sign_in_experience(
             body.sign_up_profile_fields,
         )
         .await?;
+    let captcha = body.captcha.as_ref();
+    let guardrails = SignInGuardrailsPatch {
+        captcha_enabled: captcha.and_then(|captcha| captcha.enabled),
+        captcha_provider: captcha.and_then(|captcha| captcha.provider.clone()),
+        captcha_site_key: captcha
+            .and_then(|captcha| captcha.site_key.as_deref())
+            .map(|value| (!value.trim().is_empty()).then(|| value.trim().to_owned())),
+        captcha_secret_enc: match captcha.and_then(|captcha| captcha.secret.as_deref()) {
+            Some(value) if value.trim().is_empty() => Some(None),
+            Some(value) => Some(Some(
+                seal(&state.tenant_dek(&tenant)?, value.trim().as_bytes())
+                    .map_err(ApiError::internal)?,
+            )),
+            None => None,
+        },
+        captcha_on_sign_in: captcha.and_then(|captcha| captcha.on_sign_in),
+        captcha_on_sign_up: captcha.and_then(|captcha| captcha.on_sign_up),
+        captcha_on_password_reset: captcha.and_then(|captcha| captcha.on_password_reset),
+        login_lockout_threshold: body.login_lockout_threshold,
+        login_lockout_duration_secs: body.login_lockout_duration_secs,
+    };
+    if !guardrails.is_empty() {
+        experience = state
+            .store
+            .update_sign_in_guardrails(&tenant, &guardrails)
+            .await?;
+    }
     let branding = match &body.branding {
         Some(patch) => {
-            let trimmed = |value: &Option<String>| {
-                value.as_deref().map(str::trim).map(str::to_owned)
-            };
+            let trimmed =
+                |value: &Option<String>| value.as_deref().map(str::trim).map(str::to_owned);
             let display_name = trimmed(&patch.display_name);
             let logo_url = trimmed(&patch.logo_url);
             let dark_logo_url = trimmed(&patch.dark_logo_url);
@@ -843,7 +985,11 @@ pub async fn update_sign_in_experience(
             let privacy_url = trimmed(&patch.privacy_url);
             let support_email = trimmed(&patch.support_email);
             let website_url = trimmed(&patch.website_url);
-            let custom_css = patch.custom_css.as_deref().map(str::trim).map(str::to_owned);
+            let custom_css = patch
+                .custom_css
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_owned);
             state
                 .store
                 .update_branding(
@@ -894,6 +1040,9 @@ pub async fn update_sign_in_experience(
             "password_rejected_words": experience.password_rejected_words,
             "session_ttl_secs": experience.session_ttl_secs,
             "refresh_token_ttl_secs": experience.refresh_token_ttl_secs,
+            "captcha": captcha_json(&experience, true),
+            "login_lockout_threshold": experience.login_lockout_threshold,
+            "login_lockout_duration_secs": experience.login_lockout_duration_secs,
             "branding": branding_json(&branding),
         }),
     };
@@ -929,9 +1078,29 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "username_min_length": experience.username_min_length,
         "username_max_length": experience.username_max_length,
         "sign_up_profile_fields": experience.sign_up_profile_fields,
+        "captcha": captcha_json(experience, true),
+        "login_lockout_threshold": experience.login_lockout_threshold,
+        "login_lockout_duration_secs": experience.login_lockout_duration_secs,
         "branding": branding_json(branding),
         "updated_at": ts(experience.updated_at),
     })
+}
+
+/// The CAPTCHA object. A management reader also learns whether a secret is stored — never the
+/// secret itself, which exists only sealed in the tenant database.
+pub(crate) fn captcha_json(experience: &SignInExperienceRow, management: bool) -> Value {
+    let mut captcha = json!({
+        "enabled": experience.captcha_enabled,
+        "provider": experience.captcha_provider,
+        "site_key": experience.captcha_site_key,
+        "on_sign_in": experience.captcha_on_sign_in,
+        "on_sign_up": experience.captcha_on_sign_up,
+        "on_password_reset": experience.captcha_on_password_reset,
+    });
+    if management {
+        captcha["secret_set"] = json!(experience.captcha_secret_enc.is_some());
+    }
+    captcha
 }
 
 /// The public shape of the branding object; `null` means "use the built-in look".
@@ -1363,11 +1532,12 @@ pub async fn get_account_security(
         return Err(ApiError::not_found("account"));
     }
 
-    let totp = state.store.totp_secret(&tenant, account_id).await?.is_some();
-    let backup_codes = state
+    let totp = state
         .store
-        .backup_code_count(&tenant, account_id)
-        .await?;
+        .totp_secret(&tenant, account_id)
+        .await?
+        .is_some();
+    let backup_codes = state.store.backup_code_count(&tenant, account_id).await?;
     let passkeys = state.store.passkeys(&tenant, account_id).await?;
     let trusted_devices = state
         .store

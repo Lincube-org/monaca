@@ -34,10 +34,11 @@ pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
-    BrandingRow, ClientRow, ConsentRow, EmailTemplateRow, GrantRow, OrgInvitationRow, OrgRoleRow,
-    ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow, SignInExperienceRow, SigningKeyRow,
-    SocialConnectorRow, SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow,
-    TrustedDeviceRow, VerificationRow, WebhookDeliveryRow, WebhookRow,
+    BrandingRow, ClientRow, ConsentRow, EmailTemplateRow, GrantRow, LoginFailureRow,
+    OrgInvitationRow, OrgRoleRow, ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow,
+    SignInExperienceRow, SignInGuardrailsPatch, SigningKeyRow, SocialConnectorRow,
+    SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow,
+    VerificationRow, WebhookDeliveryRow, WebhookRow,
 };
 
 /// A storage failure.

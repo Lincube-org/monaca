@@ -301,6 +301,10 @@ export const messages = {
     weakPassword: "Use a password that meets the tenant's password policy.",
     invalidCode: "That code is not valid or has expired. Request a new one.",
     tooManyAttempts: "Too many attempts. Wait a moment, then request a new code.",
+    captchaRequired: "Complete the security challenge below, then try again.",
+    captchaFailed: "The security challenge was not accepted. Complete it again and retry.",
+    accountLocked:
+      "Too many failed sign-ins for this account. Wait a few minutes, then try again.",
     consentFailed: "Could not record your decision. Try again.",
     interactionNotFound: "This sign-in request no longer exists. Start again from the application.",
     interactionExpired: "This sign-in request has expired. Start again from the application.",

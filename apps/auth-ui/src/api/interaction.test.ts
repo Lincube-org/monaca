@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
-import { InteractionError, getInteraction, navigateTo, startSignUp } from "./interaction";
+import {
+  InteractionError,
+  getInteraction,
+  navigateTo,
+  requestPasswordReset,
+  requestSignInCode,
+  requestSignInLink,
+  startSignUp,
+} from "./interaction";
 
 /**
  * `navigateTo` is the one place the sign-in page acts on a value it received from the network. The
@@ -91,6 +99,39 @@ describe("startSignUp", () => {
     expect(seen?.url).toBe("/t/demo/interaction/int_01h455vb4pex5vsknk084sn02q/sign-up");
     expect(seen?.init?.method).toBe("POST");
     expect(JSON.parse(String(seen?.init?.body))).toEqual(body);
+
+    globalThis.fetch = original;
+  });
+
+  /**
+   * A CAPTCHA token is single-use and flow-scoped: leaving it out of the request the page builds
+   * turns an enabled challenge into a 400 on a form that visually looked complete.
+   */
+  test("carries the CAPTCHA token into sign-up and the request steps", async () => {
+    const original = globalThis.fetch;
+    const seen: { url: string; body: unknown }[] = [];
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      seen.push({ url, body: JSON.parse(String(init?.body)) });
+      return Promise.resolve(
+        new Response(JSON.stringify({ verification_required: true, expires_in: 600 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }) as unknown as typeof fetch;
+
+    const iid = "int_01h455vb4pex5vsknk084sn02q";
+    await startSignUp("demo", iid, { email: "new@demo.localhost", captcha_token: "token-1" });
+    await requestSignInCode("demo", iid, "new@demo.localhost", "token-2");
+    await requestPasswordReset("demo", iid, "new@demo.localhost", "token-3");
+    await requestSignInLink("demo", iid, "new@demo.localhost", "token-4");
+
+    expect(seen.map((request) => request.body)).toEqual([
+      { email: "new@demo.localhost", captcha_token: "token-1" },
+      { email: "new@demo.localhost", captcha_token: "token-2" },
+      { email: "new@demo.localhost", captcha_token: "token-3" },
+      { email: "new@demo.localhost", captcha_token: "token-4" },
+    ]);
 
     globalThis.fetch = original;
   });

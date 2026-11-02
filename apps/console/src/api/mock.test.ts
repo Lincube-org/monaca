@@ -1164,6 +1164,17 @@ describe("sign-in experience", () => {
       username_min_length: 3,
       username_max_length: 32,
       sign_up_profile_fields: ["name"],
+      captcha: {
+        enabled: false,
+        provider: "turnstile",
+        site_key: null,
+        secret_set: false,
+        on_sign_in: true,
+        on_sign_up: true,
+        on_password_reset: true,
+      },
+      login_lockout_threshold: 0,
+      login_lockout_duration_secs: 900,
       branding: {
         display_name: null,
         logo_url: null,
@@ -1574,6 +1585,119 @@ describe("sign-in experience", () => {
       session_ttl_secs: 2_592_000,
       refresh_token_ttl_secs: 2_592_000,
     });
+  });
+
+  it("enables the CAPTCHA only with a key and a secret and never returns the secret", async () => {
+    const empty = await mockApi
+      .updateSignInExperience({ captcha: {} })
+      .catch((error: unknown) => error);
+    expect(empty).toBeInstanceOf(ApiError);
+    expect((empty as ApiError).status).toBe(400);
+
+    const withoutCredentials = await mockApi
+      .updateSignInExperience({ captcha: { enabled: true } })
+      .catch((error: unknown) => error);
+    expect(withoutCredentials).toBeInstanceOf(ApiError);
+    expect((withoutCredentials as ApiError).status).toBe(400);
+
+    for (const captcha of [
+      { site_key: "k".repeat(201) },
+      { secret: "s".repeat(501) },
+      { provider: "hcaptcha" },
+    ]) {
+      const failure = await mockApi
+        .updateSignInExperience({
+          captcha: captcha as unknown as NonNullable<
+            Parameters<typeof mockApi.updateSignInExperience>[0]["captcha"]
+          >,
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    const enabled = await mockApi.updateSignInExperience({
+      captcha: {
+        enabled: true,
+        provider: "recaptcha",
+        site_key: "  site-key-123  ",
+        secret: "  secret-456  ",
+        on_sign_in: true,
+        on_sign_up: false,
+        on_password_reset: true,
+      },
+    });
+    expect(enabled.captcha).toEqual({
+      enabled: true,
+      provider: "recaptcha",
+      site_key: "site-key-123",
+      secret_set: true,
+      on_sign_in: true,
+      on_sign_up: false,
+      on_password_reset: true,
+    });
+    expect(JSON.stringify(enabled)).not.toContain("secret-456");
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({ captcha: enabled.captcha });
+    expect(JSON.stringify(audit.items[0]?.payload)).not.toContain("secret-456");
+
+    // An omitted secret keeps the stored one; the page never needs to read it.
+    const relabeled = await mockApi.updateSignInExperience({
+      captcha: { provider: "turnstile", site_key: "site-key-789" },
+    });
+    expect(relabeled.captcha.provider).toBe("turnstile");
+    expect(relabeled.captcha.site_key).toBe("site-key-789");
+    expect(relabeled.captcha.secret_set).toBe(true);
+
+    // Clearing the secret while the challenge is on would leave nothing to verify against.
+    const clearedWhileEnabled = await mockApi
+      .updateSignInExperience({ captcha: { secret: "" } })
+      .catch((error: unknown) => error);
+    expect(clearedWhileEnabled).toBeInstanceOf(ApiError);
+    expect((clearedWhileEnabled as ApiError).status).toBe(400);
+
+    const disabled = await mockApi.updateSignInExperience({
+      captcha: { enabled: false, secret: "" },
+    });
+    expect(disabled.captcha.enabled).toBe(false);
+    expect(disabled.captcha.secret_set).toBe(false);
+  });
+
+  it("stores the login-failure lockout threshold and duration within their ranges", async () => {
+    for (const body of [
+      { login_lockout_threshold: -1 },
+      { login_lockout_threshold: 101 },
+      { login_lockout_duration_secs: 29 },
+      { login_lockout_duration_secs: 86_401 },
+    ]) {
+      const failure = await mockApi.updateSignInExperience(body).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+    }
+
+    const tuned = await mockApi.updateSignInExperience({
+      login_lockout_threshold: 5,
+      login_lockout_duration_secs: 900,
+    });
+    expect(tuned.login_lockout_threshold).toBe(5);
+    expect(tuned.login_lockout_duration_secs).toBe(900);
+
+    const audit = await mockApi.listAudit(ORG, {
+      action: "sign_in_experience.updated",
+      limit: 200,
+    });
+    expect(audit.items[0]?.payload).toMatchObject({
+      login_lockout_threshold: 5,
+      login_lockout_duration_secs: 900,
+    });
+
+    const off = await mockApi.updateSignInExperience({ login_lockout_threshold: 0 });
+    expect(off.login_lockout_threshold).toBe(0);
+    expect(off.login_lockout_duration_secs).toBe(900);
   });
 });
 

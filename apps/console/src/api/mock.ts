@@ -67,6 +67,7 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  CaptchaPatch,
   EmailTemplate,
   Grant,
   ListAccountsQuery,
@@ -1298,6 +1299,7 @@ class MockStore {
   getSignInExperience(): SignInExperience {
     return {
       ...this.experience,
+      captcha: { ...this.experience.captcha },
       branding: { ...this.experience.branding },
     };
   }
@@ -1327,6 +1329,9 @@ class MockStore {
       body.username_min_length === undefined &&
       body.username_max_length === undefined &&
       body.sign_up_profile_fields === undefined &&
+      (body.captcha === undefined || captchaPatchIsEmpty(body.captcha)) &&
+      body.login_lockout_threshold === undefined &&
+      body.login_lockout_duration_secs === undefined &&
       (body.branding === undefined || brandingPatchIsEmpty(body.branding))
     ) {
       throw new ApiError("at least one switch must be present", {
@@ -1389,6 +1394,42 @@ class MockStore {
         code: "MONACA_INVALID_REQUEST",
       });
     }
+    if (body.captcha !== undefined) {
+      const captcha = body.captcha;
+      if (
+        captcha.provider !== undefined &&
+        captcha.provider !== "turnstile" &&
+        captcha.provider !== "recaptcha"
+      ) {
+        throw new ApiError("captcha.provider must be turnstile or recaptcha", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      if (captcha.site_key !== undefined && captcha.site_key.trim().length > 200) {
+        throw new ApiError("captcha.site_key must be at most 200 characters", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+      if (captcha.secret !== undefined && captcha.secret.trim().length > 500) {
+        throw new ApiError("captcha.secret must be at most 500 characters", {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
+    for (const [field, value, min, max] of [
+      ["login_lockout_threshold", body.login_lockout_threshold, 0, 100],
+      ["login_lockout_duration_secs", body.login_lockout_duration_secs, 30, 86_400],
+    ] as const) {
+      if (value !== undefined && !(value >= min && value <= max)) {
+        throw new ApiError(`${field} must be between ${min} and ${max}`, {
+          status: 400,
+          code: "MONACA_INVALID_REQUEST",
+        });
+      }
+    }
     const usernameMin = body.username_min_length ?? this.experience.username_min_length;
     const usernameMax = body.username_max_length ?? this.experience.username_max_length;
     if (usernameMin < 3 || usernameMax > 32 || usernameMin > usernameMax) {
@@ -1427,6 +1468,30 @@ class MockStore {
     const mfaPolicy = body.mfa_policy ?? this.experience.mfa_policy;
     if (!mfaEnabled && mfaPolicy === "mandatory") {
       throw new ApiError("mfa_policy cannot be mandatory while MFA is disabled", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    // Enabling a challenge without both halves of the provider configuration would strand every
+    // gated visitor; the resulting state is checked before the write.
+    const captcha: SignInExperience["captcha"] = {
+      ...this.experience.captcha,
+      ...(body.captcha?.enabled === undefined ? {} : { enabled: body.captcha.enabled }),
+      ...(body.captcha?.provider === undefined ? {} : { provider: body.captcha.provider }),
+      ...(body.captcha?.site_key === undefined
+        ? {}
+        : { site_key: body.captcha.site_key.trim() || null }),
+      ...(body.captcha?.secret === undefined
+        ? {}
+        : { secret_set: body.captcha.secret.trim().length > 0 }),
+      ...(body.captcha?.on_sign_in === undefined ? {} : { on_sign_in: body.captcha.on_sign_in }),
+      ...(body.captcha?.on_sign_up === undefined ? {} : { on_sign_up: body.captcha.on_sign_up }),
+      ...(body.captcha?.on_password_reset === undefined
+        ? {}
+        : { on_password_reset: body.captcha.on_password_reset }),
+    };
+    if (captcha.enabled && (captcha.site_key === null || !captcha.secret_set)) {
+      throw new ApiError("captcha.enabled requires a site key and a secret", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
@@ -1478,6 +1543,11 @@ class MockStore {
       username_max_length: usernameMax,
       sign_up_profile_fields:
         body.sign_up_profile_fields ?? this.experience.sign_up_profile_fields,
+      captcha,
+      login_lockout_threshold:
+        body.login_lockout_threshold ?? this.experience.login_lockout_threshold,
+      login_lockout_duration_secs:
+        body.login_lockout_duration_secs ?? this.experience.login_lockout_duration_secs,
       branding: { ...this.branding },
       updated_at: new Date().toISOString(),
     };
@@ -1513,6 +1583,9 @@ class MockStore {
         username_min_length: updated.username_min_length,
         username_max_length: updated.username_max_length,
         sign_up_profile_fields: updated.sign_up_profile_fields,
+        captcha: { ...updated.captcha },
+        login_lockout_threshold: updated.login_lockout_threshold,
+        login_lockout_duration_secs: updated.login_lockout_duration_secs,
         branding: { ...updated.branding },
       },
     });
@@ -2484,6 +2557,10 @@ function normaliseRejectedWords(words: string[]): string[] {
 
 /** An empty branding object says nothing, which the server treats as an empty patch. */
 function brandingPatchIsEmpty(patch: BrandingPatch): boolean {
+  return Object.values(patch).every((value) => value === undefined);
+}
+
+function captchaPatchIsEmpty(patch: CaptchaPatch): boolean {
   return Object.values(patch).every((value) => value === undefined);
 }
 

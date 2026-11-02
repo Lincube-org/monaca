@@ -219,6 +219,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "per-purpose email templates (M1)",
         include_str!("../migrations/tenant_36.sql"),
     ),
+    (
+        37,
+        "CAPTCHA and login-failure lockout (M1)",
+        include_str!("../migrations/tenant_37.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

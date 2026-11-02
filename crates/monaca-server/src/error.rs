@@ -115,6 +115,20 @@ pub mod kinds {
         "Too many attempts",
         429,
     );
+    /// The CAPTCHA token was missing or the provider rejected it.
+    pub const CAPTCHA_FAILED: ProblemKind = ProblemKind::new(
+        "captcha_failed",
+        "MONACA_CAPTCHA_FAILED",
+        "Captcha verification failed",
+        400,
+    );
+    /// The identifier is temporarily refused after too many wrong passwords.
+    pub const ACCOUNT_LOCKED: ProblemKind = ProblemKind::new(
+        "account_locked",
+        "MONACA_ACCOUNT_LOCKED",
+        "Account locked",
+        429,
+    );
     /// The account already has an authenticator app; replacing it is a deliberate removal first.
     pub const MFA_ALREADY_ENABLED: ProblemKind = ProblemKind::new(
         "mfa_already_enabled",
@@ -442,6 +456,8 @@ mod tests {
             kinds::WEAK_PASSWORD,
             kinds::INVALID_VERIFICATION_CODE,
             kinds::TOO_MANY_ATTEMPTS,
+            kinds::CAPTCHA_FAILED,
+            kinds::ACCOUNT_LOCKED,
             kinds::MFA_ALREADY_ENABLED,
             kinds::INTERNAL,
         ] {

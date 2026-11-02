@@ -494,6 +494,18 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "subject and an unknown purpose are 400/400/404; DELETE restores the built-in copy with 204 and a second " +
       "DELETE is 204 too; email_template.updated and email_template.reset are on the tenant audit chain",
   },
+  {
+    step: "52",
+    title: "CAPTCHA and lockout",
+    assertion:
+      "PATCH /v1/sign-in-experience stores a captcha object (200) and returns secret_set=true while never " +
+      "echoing the secret; enabling it without a site key and a secret is 400, and so are an unknown provider, a " +
+      "site key over 200 characters and a secret over 500; with on_sign_in=true a POST …/sign-in without " +
+      "captcha_token is 400 MONACA_CAPTCHA_FAILED (a token the provider rejects is the same), while the verify " +
+      "steps stay reachable; login_lockout_threshold=2 and a 60-second duration then make two wrong passwords lock " +
+      "the identifier, the third attempt is 429 MONACA_ACCOUNT_LOCKED and is audited as interaction.sign_in.failed " +
+      "with reason account_locked, and a successful password sign-in clears the counter",
+  },
 ];
 
 interface StepResult {

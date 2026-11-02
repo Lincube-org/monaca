@@ -21,6 +21,8 @@ export type InteractionErrorCode =
   | "MONACA_WEAK_PASSWORD"
   | "MONACA_INVALID_VERIFICATION_CODE"
   | "MONACA_TOO_MANY_ATTEMPTS"
+  | "MONACA_CAPTCHA_FAILED"
+  | "MONACA_ACCOUNT_LOCKED"
   | "MONACA_INTERACTION_NOT_FOUND"
   | "MONACA_INTERACTION_EXPIRED"
   | "MONACA_INTERACTION_CONSUMED"
@@ -109,6 +111,15 @@ export interface SignInExperience {
   username_max_length: number;
   /** Which optional profile fields the sign-up form collects, in addition to the address. */
   sign_up_profile_fields: ("name" | "avatar")[];
+  /** The tenant's CAPTCHA provider and which entrances demand a token. */
+  captcha: {
+    enabled: boolean;
+    provider: "turnstile" | "recaptcha";
+    site_key: string | null;
+    on_sign_in: boolean;
+    on_sign_up: boolean;
+    on_password_reset: boolean;
+  };
   /** The optional hosted-page look. */
   branding: Branding;
 }
@@ -172,6 +183,8 @@ function codeFor(status: number, monacaCode: string | undefined): InteractionErr
     case "MONACA_WEAK_PASSWORD":
     case "MONACA_INVALID_VERIFICATION_CODE":
     case "MONACA_TOO_MANY_ATTEMPTS":
+    case "MONACA_CAPTCHA_FAILED":
+    case "MONACA_ACCOUNT_LOCKED":
     case "MONACA_INTERACTION_NOT_FOUND":
     case "MONACA_INTERACTION_EXPIRED":
     case "MONACA_INTERACTION_CONSUMED":
@@ -257,7 +270,7 @@ export function getSignInExperience(
 export function submitSignIn(
   tenant: string,
   iid: string,
-  credentials: { identifier: string; password: string },
+  credentials: { identifier: string; password: string; captcha_token?: string },
 ): Promise<SignInResult> {
   return call<SignInResult>(`${base(tenant, iid)}/sign-in`, {
     method: "POST",
@@ -278,6 +291,8 @@ export interface SignUpRequest {
   username?: string;
   display_name?: string;
   avatar_url?: string;
+  /** The CAPTCHA token when the tenant gates sign-up. */
+  captcha_token?: string;
 }
 
 /**
@@ -317,10 +332,15 @@ export function verifySignUp(
 }
 
 /** Request a passwordless sign-in code. */
-export function requestSignInCode(tenant: string, iid: string, email: string): Promise<CodeRequestResult> {
+export function requestSignInCode(
+  tenant: string,
+  iid: string,
+  email: string,
+  captchaToken?: string,
+): Promise<CodeRequestResult> {
   return call<CodeRequestResult>(`${base(tenant, iid)}/sign-in/code`, {
     method: "POST",
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, captcha_token: captchaToken }),
   });
 }
 
@@ -341,10 +361,11 @@ export function requestPasswordReset(
   tenant: string,
   iid: string,
   email: string,
+  captchaToken?: string,
 ): Promise<CodeRequestResult> {
   return call<CodeRequestResult>(`${base(tenant, iid)}/password/forgot`, {
     method: "POST",
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, captcha_token: captchaToken }),
   });
 }
 
@@ -365,10 +386,11 @@ export function requestSignInLink(
   tenant: string,
   iid: string,
   email: string,
+  captchaToken?: string,
 ): Promise<{ verification_required: true; expires_in: number }> {
   return call<{ verification_required: true; expires_in: number }>(
     `${base(tenant, iid)}/sign-in/link`,
-    { method: "POST", body: JSON.stringify({ email }) },
+    { method: "POST", body: JSON.stringify({ email, captcha_token: captchaToken }) },
   );
 }
 

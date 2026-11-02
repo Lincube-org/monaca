@@ -9,6 +9,7 @@
 
 mod account;
 mod bootstrap;
+mod captcha;
 mod cli;
 mod clients;
 mod config;

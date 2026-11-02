@@ -17,7 +17,7 @@ import {
   Textarea,
   toast,
 } from "@monaca/ui";
-import { CircleAlert, RefreshCw, TriangleAlert } from "lucide-vue-next";
+import { CircleAlert, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
@@ -91,6 +91,23 @@ const usernameMinLength = ref(3);
 const usernameMaxLength = ref(32);
 const signUpProfileName = ref(true);
 const signUpProfileAvatar = ref(false);
+/** CAPTCHA settings; the secret is write-only, so "stored" is the only state the page can read. */
+const captchaEnabled = ref(false);
+const captchaProvider = ref<"turnstile" | "recaptcha">("turnstile");
+const captchaSiteKey = ref("");
+const captchaSecret = ref("");
+const clearCaptchaSecret = ref(false);
+const captchaSecretSet = ref(false);
+const captchaOnSignIn = ref(true);
+const captchaOnSignUp = ref(true);
+const captchaOnPasswordReset = ref(true);
+/** The lockout is edited in minutes; stored durations are rounded to the nearest one. */
+const lockoutThreshold = ref(0);
+const lockoutMinutes = ref(15);
+const LOCKOUT_MIN_THRESHOLD = 0;
+const LOCKOUT_MAX_THRESHOLD = 100;
+const LOCKOUT_MIN_MINUTES = 1;
+const LOCKOUT_MAX_MINUTES = 1_440;
 const formError = ref<string | null>(null);
 
 function signUpIdentifiers(): ("email" | "username")[] {
@@ -144,6 +161,11 @@ function storedDays(secs: number, maxDays: number): number {
   return Math.min(maxDays, Math.max(SESSION_MIN_DAYS, Math.round(secs / 86_400)));
 }
 
+/** The minute count the form shows for a stored lockout duration. */
+function storedMinutes(secs: number): number {
+  return Math.min(LOCKOUT_MAX_MINUTES, Math.max(LOCKOUT_MIN_MINUTES, Math.round(secs / 60)));
+}
+
 /** The word list as the server stores it: trimmed, lowercased and de-duplicated. */
 function rejectedWordsValues(): string[] {
   const words = rejectedWordsText.value
@@ -185,6 +207,16 @@ interface SwitchForm {
   usernameMaxLength: number;
   signUpProfileFields: ("name" | "avatar")[];
   branding: Branding;
+  captchaEnabled: boolean;
+  captchaProvider: "turnstile" | "recaptcha";
+  captchaSiteKey: string;
+  captchaSecret: string;
+  clearCaptchaSecret: boolean;
+  captchaOnSignIn: boolean;
+  captchaOnSignUp: boolean;
+  captchaOnPasswordReset: boolean;
+  lockoutThreshold: number;
+  lockoutMinutes: number;
 }
 
 function formValues(): SwitchForm {
@@ -212,6 +244,16 @@ function formValues(): SwitchForm {
     usernameMaxLength: usernameMaxLength.value,
     signUpProfileFields: signUpProfileFields(),
     branding: brandingValues(),
+    captchaEnabled: captchaEnabled.value,
+    captchaProvider: captchaProvider.value,
+    captchaSiteKey: captchaSiteKey.value.trim(),
+    captchaSecret: captchaSecret.value.trim(),
+    clearCaptchaSecret: clearCaptchaSecret.value,
+    captchaOnSignIn: captchaOnSignIn.value,
+    captchaOnSignUp: captchaOnSignUp.value,
+    captchaOnPasswordReset: captchaOnPasswordReset.value,
+    lockoutThreshold: lockoutThreshold.value,
+    lockoutMinutes: lockoutMinutes.value,
   };
 }
 
@@ -239,7 +281,17 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.username_min_length === form.usernameMinLength &&
     value.username_max_length === form.usernameMaxLength &&
     sameWords(value.sign_up_profile_fields, form.signUpProfileFields) &&
-    sameBranding(value.branding, form.branding)
+    sameBranding(value.branding, form.branding) &&
+    value.captcha.enabled === form.captchaEnabled &&
+    value.captcha.provider === form.captchaProvider &&
+    (value.captcha.site_key ?? "") === form.captchaSiteKey &&
+    form.captchaSecret === "" &&
+    !form.clearCaptchaSecret &&
+    value.captcha.on_sign_in === form.captchaOnSignIn &&
+    value.captcha.on_sign_up === form.captchaOnSignUp &&
+    value.captcha.on_password_reset === form.captchaOnPasswordReset &&
+    value.login_lockout_threshold === form.lockoutThreshold &&
+    storedMinutes(value.login_lockout_duration_secs) === form.lockoutMinutes
   );
 }
 
@@ -278,6 +330,17 @@ function adopt(value: SignInExperience): void {
   supportEmail.value = value.branding.support_email ?? "";
   websiteUrl.value = value.branding.website_url ?? "";
   customCss.value = value.branding.custom_css ?? "";
+  captchaEnabled.value = value.captcha.enabled;
+  captchaProvider.value = value.captcha.provider;
+  captchaSiteKey.value = value.captcha.site_key ?? "";
+  captchaSecret.value = "";
+  clearCaptchaSecret.value = false;
+  captchaSecretSet.value = value.captcha.secret_set;
+  captchaOnSignIn.value = value.captcha.on_sign_in;
+  captchaOnSignUp.value = value.captcha.on_sign_up;
+  captchaOnPasswordReset.value = value.captcha.on_password_reset;
+  lockoutThreshold.value = value.login_lockout_threshold;
+  lockoutMinutes.value = storedMinutes(value.login_lockout_duration_secs);
 }
 
 /**
@@ -325,6 +388,16 @@ watch(
     usernameMaxLength,
     signUpProfileName,
     signUpProfileAvatar,
+    captchaEnabled,
+    captchaProvider,
+    captchaSiteKey,
+    captchaSecret,
+    clearCaptchaSecret,
+    captchaOnSignIn,
+    captchaOnSignUp,
+    captchaOnPasswordReset,
+    lockoutThreshold,
+    lockoutMinutes,
   ],
   () => (formError.value = null),
 );
@@ -337,6 +410,35 @@ const rejectedWordsIssue = computed<"count" | "length" | null>(() => {
 });
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
+
+/**
+ * The CAPTCHA state the server would refuse: an enabled challenge with nothing to verify against, or
+ * a key longer than the endpoint accepts. A stored secret satisfies the requirement without the page
+ * ever reading it.
+ */
+const captchaIssue = computed<"siteKey" | "siteKeyLength" | "secret" | null>(() => {
+  if ([...captchaSiteKey.value.trim()].length > 200) return "siteKeyLength";
+  if ([...captchaSecret.value.trim()].length > 500) return "secret";
+  if (captchaEnabled.value) {
+    if (captchaSiteKey.value.trim() === "") return "siteKey";
+    const usesStoredSecret = captchaSecretSet.value && !clearCaptchaSecret.value;
+    if (captchaSecret.value.trim() === "" && !usesStoredSecret) return "secret";
+  }
+  return null;
+});
+
+const lockoutIssue = computed<"threshold" | "minutes" | null>(() => {
+  if (
+    lockoutThreshold.value < LOCKOUT_MIN_THRESHOLD ||
+    lockoutThreshold.value > LOCKOUT_MAX_THRESHOLD
+  ) {
+    return "threshold";
+  }
+  if (lockoutMinutes.value < LOCKOUT_MIN_MINUTES || lockoutMinutes.value > LOCKOUT_MAX_MINUTES) {
+    return "minutes";
+  }
+  return null;
+});
 
 const saveDisabled = computed(
   () => !dirty.value || noFirstFactor.value || update.isPending.value || baseline.value === null,
@@ -414,6 +516,14 @@ function setDays(field: "session" | "refresh", value: string | number): void {
   formError.value = null;
 }
 
+function setLockout(field: "threshold" | "minutes", value: string | number): void {
+  const parsed = Number.parseInt(String(value), 10);
+  const next = Number.isNaN(parsed) ? 0 : parsed;
+  if (field === "threshold") lockoutThreshold.value = next;
+  else lockoutMinutes.value = next;
+  formError.value = null;
+}
+
 function discard(): void {
   const current = experience.data.value;
   if (current) adopt(current);
@@ -486,6 +596,22 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidBrandingCss");
     return;
   }
+  if (captchaIssue.value !== null) {
+    formError.value =
+      captchaIssue.value === "siteKeyLength"
+        ? t("signInExperience.invalidCaptchaSiteKey")
+        : captchaIssue.value === "secret"
+          ? t("signInExperience.invalidCaptchaSecret")
+          : t("signInExperience.invalidCaptcha");
+    return;
+  }
+  if (lockoutIssue.value !== null) {
+    formError.value =
+      lockoutIssue.value === "threshold"
+        ? t("signInExperience.invalidLockoutThreshold")
+        : t("signInExperience.invalidLockoutMinutes");
+    return;
+  }
 
   const body: UpdateSignInExperienceRequest = {};
   if (signUp.value !== base.sign_up_enabled) body.sign_up_enabled = signUp.value;
@@ -551,6 +677,34 @@ async function save(): Promise<void> {
       website_url: websiteUrl.value.trim(),
       custom_css: customCss.value.trim(),
     };
+  }
+  const captchaChanged =
+    captchaEnabled.value !== base.captcha.enabled ||
+    captchaProvider.value !== base.captcha.provider ||
+    captchaSiteKey.value.trim() !== (base.captcha.site_key ?? "") ||
+    captchaSecret.value.trim() !== "" ||
+    clearCaptchaSecret.value ||
+    captchaOnSignIn.value !== base.captcha.on_sign_in ||
+    captchaOnSignUp.value !== base.captcha.on_sign_up ||
+    captchaOnPasswordReset.value !== base.captcha.on_password_reset;
+  if (captchaChanged) {
+    body.captcha = {
+      enabled: captchaEnabled.value,
+      provider: captchaProvider.value,
+      site_key: captchaSiteKey.value.trim(),
+      on_sign_in: captchaOnSignIn.value,
+      on_sign_up: captchaOnSignUp.value,
+      on_password_reset: captchaOnPasswordReset.value,
+    };
+    // The secret is write-only: omitted keeps it, an empty string clears it.
+    if (clearCaptchaSecret.value) body.captcha.secret = "";
+    else if (captchaSecret.value.trim() !== "") body.captcha.secret = captchaSecret.value.trim();
+  }
+  if (lockoutThreshold.value !== base.login_lockout_threshold) {
+    body.login_lockout_threshold = lockoutThreshold.value;
+  }
+  if (storedMinutes(base.login_lockout_duration_secs) !== lockoutMinutes.value) {
+    body.login_lockout_duration_secs = lockoutMinutes.value * 60;
   }
   if (Object.keys(body).length === 0) return;
 
@@ -1162,6 +1316,182 @@ function formatStamp(at: string): string {
 
           <Card>
             <CardHeader>
+              <CardTitle>{{ t('signInExperience.security') }}</CardTitle>
+              <CardDescription>{{ t('signInExperience.securityHint') }}</CardDescription>
+            </CardHeader>
+            <CardContent class="flex flex-col gap-3">
+              <div class="flex items-start gap-2.5">
+                <Checkbox
+                  id="captcha-enabled"
+                  :model-value="captchaEnabled"
+                  :disabled="update.isPending.value"
+                  @update:model-value="(value: boolean | 'indeterminate') => (captchaEnabled = value === true)"
+                />
+                <div class="min-w-0 -mt-0.5">
+                  <Label for="captcha-enabled">{{ t('signInExperience.captchaField') }}</Label>
+                  <p class="mt-0.5 text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.captchaFieldHint') }}
+                  </p>
+                </div>
+              </div>
+
+              <div
+                v-if="captchaEnabled || captchaSecretSet"
+                class="flex flex-col gap-3 border-t border-rule pt-4"
+              >
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="flex flex-col gap-1.5">
+                    <Label for="captcha-provider">{{ t('signInExperience.captchaProvider') }}</Label>
+                    <NativeSelect
+                      id="captcha-provider"
+                      :model-value="captchaProvider"
+                      :disabled="update.isPending.value"
+                      @update:model-value="(value: string) => (captchaProvider = value === 'recaptcha' ? 'recaptcha' : 'turnstile')"
+                    >
+                      <option value="turnstile">{{ t('signInExperience.captchaProviderTurnstile') }}</option>
+                      <option value="recaptcha">{{ t('signInExperience.captchaProviderRecaptcha') }}</option>
+                    </NativeSelect>
+                  </div>
+                  <div class="flex flex-col gap-1.5">
+                    <Label for="captcha-site-key">{{ t('signInExperience.captchaSiteKey') }}</Label>
+                    <Input
+                      id="captcha-site-key"
+                      v-model="captchaSiteKey"
+                      :invalid="captchaIssue === 'siteKey' || captchaIssue === 'siteKeyLength'"
+                      :disabled="update.isPending.value"
+                      autocomplete="off"
+                      spellcheck="false"
+                      class="mono-data text-[12.5px]"
+                    />
+                  </div>
+                </div>
+
+                <div class="flex flex-col gap-1.5">
+                  <Label for="captcha-secret">{{ t('signInExperience.captchaSecret') }}</Label>
+                  <Input
+                    id="captcha-secret"
+                    v-model="captchaSecret"
+                    type="password"
+                    :invalid="captchaIssue === 'secret'"
+                    :disabled="update.isPending.value || clearCaptchaSecret"
+                    :placeholder="captchaSecretSet ? t('signInExperience.captchaSecretStored') : t('signInExperience.captchaSecretEmpty')"
+                    autocomplete="new-password"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.captchaSecretHint') }}
+                  </p>
+                  <label v-if="captchaSecretSet" class="flex items-center gap-2">
+                    <Checkbox
+                      id="captcha-clear-secret"
+                      :model-value="clearCaptchaSecret"
+                      :disabled="update.isPending.value"
+                      @update:model-value="(value: boolean | 'indeterminate') => (clearCaptchaSecret = value === true)"
+                    />
+                    <span class="text-[12px]">{{ t('signInExperience.captchaClearSecret') }}</span>
+                  </label>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                  <Label>{{ t('signInExperience.captchaFlows') }}</Label>
+                  <div class="flex flex-wrap items-center gap-4">
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="captcha-on-sign-in"
+                        :model-value="captchaOnSignIn"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (captchaOnSignIn = value === true)"
+                      />
+                      <span class="text-[12px]">{{ t('signInExperience.captchaFlowSignIn') }}</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="captcha-on-sign-up"
+                        :model-value="captchaOnSignUp"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (captchaOnSignUp = value === true)"
+                      />
+                      <span class="text-[12px]">{{ t('signInExperience.captchaFlowSignUp') }}</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="captcha-on-password-reset"
+                        :model-value="captchaOnPasswordReset"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (captchaOnPasswordReset = value === true)"
+                      />
+                      <span class="text-[12px]">{{ t('signInExperience.captchaFlowPasswordReset') }}</span>
+                    </label>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.captchaFlowsHint') }}
+                  </p>
+                </div>
+
+                <p v-if="captchaIssue !== null" class="text-[11.5px] leading-snug text-deny">
+                  {{
+                    captchaIssue === 'siteKeyLength'
+                      ? t('signInExperience.invalidCaptchaSiteKey')
+                      : captchaIssue === 'secret'
+                        ? t('signInExperience.invalidCaptchaSecret')
+                        : t('signInExperience.invalidCaptcha')
+                  }}
+                </p>
+              </div>
+
+              <Separator />
+
+              <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <Label for="lockout-threshold">{{ t('signInExperience.lockoutThreshold') }}</Label>
+                  <Input
+                    id="lockout-threshold"
+                    type="number"
+                    :min="LOCKOUT_MIN_THRESHOLD"
+                    :max="LOCKOUT_MAX_THRESHOLD"
+                    :model-value="lockoutThreshold"
+                    :invalid="lockoutIssue === 'threshold'"
+                    :disabled="update.isPending.value"
+                    class="w-[120px]"
+                    @update:model-value="(value: string | number) => setLockout('threshold', value)"
+                  />
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.lockoutThresholdHint') }}
+                  </p>
+                  <p v-if="lockoutIssue === 'threshold'" class="text-[11.5px] leading-snug text-deny">
+                    {{ t('signInExperience.invalidLockoutThreshold') }}
+                  </p>
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <Label for="lockout-minutes">{{ t('signInExperience.lockoutMinutes') }}</Label>
+                  <Input
+                    id="lockout-minutes"
+                    type="number"
+                    :min="LOCKOUT_MIN_MINUTES"
+                    :max="LOCKOUT_MAX_MINUTES"
+                    :model-value="lockoutMinutes"
+                    :invalid="lockoutIssue === 'minutes'"
+                    :disabled="lockoutThreshold === 0 || update.isPending.value"
+                    class="w-[120px]"
+                    @update:model-value="(value: string | number) => setLockout('minutes', value)"
+                  />
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.lockoutMinutesHint') }}
+                  </p>
+                  <p v-if="lockoutIssue === 'minutes'" class="text-[11.5px] leading-snug text-deny">
+                    {{ t('signInExperience.invalidLockoutMinutes') }}
+                  </p>
+                </div>
+              </div>
+              <p class="text-[11.5px] leading-snug text-ink-faint">
+                {{ t('signInExperience.lockoutHint') }}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle>{{ t('signInExperience.mfa') }}</CardTitle>
               <CardDescription>{{ t('signInExperience.mfaHint') }}</CardDescription>
             </CardHeader>
@@ -1253,6 +1583,16 @@ function formatStamp(at: string): string {
               <p class="text-[13.5px] font-semibold tracking-[-0.01em] text-ink">
                 {{ t('signInExperience.previewHeading', { tenant: ui.tenant }) }}
               </p>
+
+              <div
+                v-if="captchaEnabled"
+                class="mt-3 flex items-center gap-2 rounded-md border border-rule bg-paper px-2.5 py-2"
+              >
+                <ShieldCheck class="size-3.5 shrink-0 text-ink-faint" />
+                <span class="text-[11px] leading-snug text-ink-faint">
+                  {{ t('signInExperience.previewCaptcha') }}
+                </span>
+              </div>
 
               <div v-if="password" class="mt-3.5 flex flex-col gap-2">
                 <Input

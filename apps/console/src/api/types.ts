@@ -299,8 +299,34 @@ export interface SignInExperience {
   username_max_length: number;
   /** The optional profile fields the sign-up form collects. */
   sign_up_profile_fields: ("name" | "avatar")[];
+  /** The tenant's CAPTCHA provider and the entrances it gates. */
+  captcha: CaptchaSettings;
+  /** Consecutive wrong passwords before the identifier is refused; zero disables lockout. */
+  login_lockout_threshold: number;
+  /** How long a lock lasts, in seconds. */
+  login_lockout_duration_secs: number;
   branding: Branding;
   updated_at: string;
+}
+
+/**
+ * The tenant's CAPTCHA configuration (§6.2).
+ *
+ * The management read reports `secret_set` instead of the secret: the provider's secret is
+ * write-only, sealed in the tenant database, and never leaves the server.
+ */
+export interface CaptchaSettings {
+  enabled: boolean;
+  provider: "turnstile" | "recaptcha";
+  site_key: string | null;
+  /** Whether a secret is stored; the value itself is never returned. */
+  secret_set: boolean;
+  /** Whether password sign-in demands a token. */
+  on_sign_in: boolean;
+  /** Whether sign-up demands a token. */
+  on_sign_up: boolean;
+  /** Whether password-reset code requests demand a token. */
+  on_password_reset: boolean;
 }
 
 /**
@@ -564,7 +590,24 @@ export interface UpdateSignInExperienceRequest {
   username_min_length?: number;
   username_max_length?: number;
   sign_up_profile_fields?: ("name" | "avatar")[];
+  /** The CAPTCHA provider and the entrances it gates. */
+  captcha?: CaptchaPatch;
+  /** Wrong passwords before a lock; zero disables it. */
+  login_lockout_threshold?: number;
+  /** How long a lock lasts, 30–86400 seconds. */
+  login_lockout_duration_secs?: number;
   branding?: BrandingPatch;
+}
+
+/** The write-only half of the CAPTCHA settings: an empty key or secret clears it. */
+export interface CaptchaPatch {
+  enabled?: boolean;
+  provider?: "turnstile" | "recaptcha";
+  site_key?: string;
+  secret?: string;
+  on_sign_in?: boolean;
+  on_sign_up?: boolean;
+  on_password_reset?: boolean;
 }
 
 /** An absolute http(s) endpoint and a non-empty set of subscribable actions. */

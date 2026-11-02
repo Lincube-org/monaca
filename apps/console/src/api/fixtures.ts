@@ -472,6 +472,17 @@ export function seedSignInExperience(): SignInExperience {
     username_min_length: 3,
     username_max_length: 32,
     sign_up_profile_fields: ["name"],
+    captcha: {
+      enabled: false,
+      provider: "turnstile",
+      site_key: null,
+      secret_set: false,
+      on_sign_in: true,
+      on_sign_up: true,
+      on_password_reset: true,
+    },
+    login_lockout_threshold: 0,
+    login_lockout_duration_secs: 900,
     branding: {
       display_name: null,
       logo_url: null,

@@ -91,8 +91,77 @@ pub struct SignInExperienceRow {
     pub username_max_length: i32,
     /// The profile fields the sign-up form collects (`name`, `avatar`).
     pub sign_up_profile_fields: Vec<String>,
+    /// Whether a CAPTCHA challenge gates the entrances named below.
+    pub captcha_enabled: bool,
+    /// `turnstile` | `recaptcha`.
+    pub captcha_provider: String,
+    /// The provider's public site key; `null` until one is saved.
+    pub captcha_site_key: Option<String>,
+    /// The provider's secret, sealed with the tenant DEK — never returned by any endpoint.
+    pub captcha_secret_enc: Option<Vec<u8>>,
+    /// Whether password sign-in demands a token.
+    pub captcha_on_sign_in: bool,
+    /// Whether sign-up demands a token.
+    pub captcha_on_sign_up: bool,
+    /// Whether password-reset code requests demand a token.
+    pub captcha_on_password_reset: bool,
+    /// Consecutive wrong passwords before the identifier is refused; zero disables the check.
+    pub login_lockout_threshold: i32,
+    /// How long a locked identifier stays refused, in seconds.
+    pub login_lockout_duration_secs: i32,
     /// When the switches last changed.
     pub updated_at: OffsetDateTime,
+}
+
+/// The failure counter for one normalised sign-in identifier (§6.1 lockout).
+#[derive(Debug, Clone, FromRow)]
+pub struct LoginFailureRow {
+    /// Wrong passwords recorded since the last success or expiry.
+    pub failures: i32,
+    /// When the identifier may try again; `null` while it is still counting.
+    pub locked_until: Option<OffsetDateTime>,
+}
+
+/// The CAPTCHA and lockout switches a `PATCH /v1/sign-in-experience` may change.
+///
+/// The nullable columns are double options: `None` keeps the column, `Some(None)` clears it and
+/// `Some(Some(value))` writes it. That is how a write-only secret can be removed without an
+/// empty-string sentinel reaching the cipher.
+#[derive(Debug, Clone, Default)]
+pub struct SignInGuardrailsPatch {
+    /// Whether CAPTCHA is enforced.
+    pub captcha_enabled: Option<bool>,
+    /// `turnstile` | `recaptcha`.
+    pub captcha_provider: Option<String>,
+    /// The public site key.
+    pub captcha_site_key: Option<Option<String>>,
+    /// The sealed provider secret.
+    pub captcha_secret_enc: Option<Option<Vec<u8>>>,
+    /// Whether password sign-in demands a token.
+    pub captcha_on_sign_in: Option<bool>,
+    /// Whether sign-up demands a token.
+    pub captcha_on_sign_up: Option<bool>,
+    /// Whether password-reset code requests demand a token.
+    pub captcha_on_password_reset: Option<bool>,
+    /// Wrong passwords before a lock; zero disables the lockout.
+    pub login_lockout_threshold: Option<i32>,
+    /// How long a lock lasts, in seconds.
+    pub login_lockout_duration_secs: Option<i32>,
+}
+
+impl SignInGuardrailsPatch {
+    /// Whether the patch names any field.
+    pub fn is_empty(&self) -> bool {
+        self.captcha_enabled.is_none()
+            && self.captcha_provider.is_none()
+            && self.captcha_site_key.is_none()
+            && self.captcha_secret_enc.is_none()
+            && self.captcha_on_sign_in.is_none()
+            && self.captcha_on_sign_up.is_none()
+            && self.captcha_on_password_reset.is_none()
+            && self.login_lockout_threshold.is_none()
+            && self.login_lockout_duration_secs.is_none()
+    }
 }
 
 /// A tenant's optional hosted-page branding (§6.1, §6.2).
@@ -896,7 +965,10 @@ impl Store {
                     password_reject_repetition_and_sequence, password_rejected_words,
                     session_ttl_secs, refresh_token_ttl_secs, sign_up_identifiers,
                     sign_up_email_verification_required, username_case_sensitive,
-                    username_min_length, username_max_length, sign_up_profile_fields, updated_at
+                    username_min_length, username_max_length, sign_up_profile_fields,
+                    captcha_enabled, captcha_provider, captcha_site_key, captcha_secret_enc,
+                    captcha_on_sign_in, captcha_on_sign_up, captcha_on_password_reset,
+                    login_lockout_threshold, login_lockout_duration_secs, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
         .fetch_one(&pool)
@@ -968,7 +1040,10 @@ impl Store {
                        password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
                        sign_up_identifiers, sign_up_email_verification_required,
                        username_case_sensitive, username_min_length, username_max_length,
-                       sign_up_profile_fields, updated_at",
+                       sign_up_profile_fields, captcha_enabled, captcha_provider,
+                       captcha_site_key, captcha_secret_enc, captcha_on_sign_in,
+                       captcha_on_sign_up, captcha_on_password_reset, login_lockout_threshold,
+                       login_lockout_duration_secs, updated_at",
         )
         .bind(sign_up_enabled)
         .bind(password_sign_in_enabled)
@@ -994,6 +1069,114 @@ impl Store {
         .bind(sign_up_profile_fields)
         .fetch_one(&pool)
         .await?)
+    }
+
+    /// Change only the CAPTCHA and lockout settings the caller named; the others keep their value.
+    pub async fn update_sign_in_guardrails(
+        &self,
+        tenant: &TenantRow,
+        patch: &SignInGuardrailsPatch,
+    ) -> Result<SignInExperienceRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SignInExperienceRow>(
+            "UPDATE tenant.sign_in_experience
+             SET captcha_enabled = COALESCE($1, captcha_enabled),
+                 captcha_provider = COALESCE($2, captcha_provider),
+                 captcha_site_key = CASE WHEN $3 THEN $4 ELSE captcha_site_key END,
+                 captcha_secret_enc = CASE WHEN $5 THEN $6 ELSE captcha_secret_enc END,
+                 captcha_on_sign_in = COALESCE($7, captcha_on_sign_in),
+                 captcha_on_sign_up = COALESCE($8, captcha_on_sign_up),
+                 captcha_on_password_reset = COALESCE($9, captcha_on_password_reset),
+                 login_lockout_threshold = COALESCE($10, login_lockout_threshold),
+                 login_lockout_duration_secs = COALESCE($11, login_lockout_duration_secs),
+                 updated_at = now()
+             WHERE singleton
+             RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
+                       passkey_sign_in_enabled, single_sign_on_enabled, mfa_enabled, mfa_policy,
+                       mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,
+                       password_min_length, password_min_character_types,
+                       password_reject_user_info, password_reject_repetition_and_sequence,
+                       password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
+                       sign_up_identifiers, sign_up_email_verification_required,
+                       username_case_sensitive, username_min_length, username_max_length,
+                       sign_up_profile_fields, captcha_enabled, captcha_provider,
+                       captcha_site_key, captcha_secret_enc, captcha_on_sign_in,
+                       captcha_on_sign_up, captcha_on_password_reset, login_lockout_threshold,
+                       login_lockout_duration_secs, updated_at",
+        )
+        .bind(patch.captcha_enabled)
+        .bind(patch.captcha_provider.as_deref())
+        .bind(patch.captcha_site_key.is_some())
+        .bind(patch.captcha_site_key.clone().flatten())
+        .bind(patch.captcha_secret_enc.is_some())
+        .bind(patch.captcha_secret_enc.clone().flatten())
+        .bind(patch.captcha_on_sign_in)
+        .bind(patch.captcha_on_sign_up)
+        .bind(patch.captcha_on_password_reset)
+        .bind(patch.login_lockout_threshold)
+        .bind(patch.login_lockout_duration_secs)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// The failure counter for one normalised sign-in identifier, when one exists.
+    pub async fn login_failure(
+        &self,
+        tenant: &TenantRow,
+        identifier_key: &str,
+    ) -> Result<Option<LoginFailureRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, LoginFailureRow>(
+            "SELECT failures, locked_until FROM tenant.login_failures
+             WHERE identifier_key = $1",
+        )
+        .bind(identifier_key)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Count one wrong password and lock the identifier when it reaches the threshold.
+    pub async fn record_login_failure(
+        &self,
+        tenant: &TenantRow,
+        identifier_key: &str,
+        threshold: i32,
+        duration_secs: i32,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.login_failures (identifier_key, failures, locked_until)
+             VALUES ($1, 1,
+                     CASE WHEN $2 <= 1
+                          THEN now() + make_interval(secs => $3::double precision) END)
+             ON CONFLICT (identifier_key) DO UPDATE
+             SET failures = tenant.login_failures.failures + 1,
+                 locked_until =
+                   CASE WHEN tenant.login_failures.failures + 1 >= $2
+                        THEN now() + make_interval(secs => $3::double precision)
+                        ELSE tenant.login_failures.locked_until END,
+                 updated_at = now()",
+        )
+        .bind(identifier_key)
+        .bind(threshold)
+        .bind(duration_secs)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Forget an identifier's failures — after a success, or once a lock has expired.
+    pub async fn clear_login_failures(
+        &self,
+        tenant: &TenantRow,
+        identifier_key: &str,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query("DELETE FROM tenant.login_failures WHERE identifier_key = $1")
+            .bind(identifier_key)
+            .execute(&pool)
+            .await?;
+        Ok(())
     }
 
     // ------------------------------------------------------------- branding
@@ -3608,11 +3791,12 @@ impl Store {
         client_row_id: Uuid,
     ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        let result = sqlx::query("DELETE FROM tenant.consents WHERE account_id = $1 AND client_id = $2")
-            .bind(account_id.uuid())
-            .bind(client_row_id)
-            .execute(&pool)
-            .await?;
+        let result =
+            sqlx::query("DELETE FROM tenant.consents WHERE account_id = $1 AND client_id = $2")
+                .bind(account_id.uuid())
+                .bind(client_row_id)
+                .execute(&pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
