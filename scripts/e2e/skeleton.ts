@@ -455,6 +455,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "provider authorize and callback are 403 MONACA_SSO_DISABLED; switching it back on restores the lookup and a " +
       "302 provider redirect",
   },
+  {
+    step: "48",
+    title: "branding extras",
+    assertion:
+      "PATCH /v1/sign-in-experience with dark_logo_url, favicon_url, support_email and website_url is 200 and the " +
+      "public read echoes them; a relative logo URL and a malformed support email are 400; an empty string clears " +
+      "only the named field, and clearing every branding field restores the built-in look",
+  },
 ];
 
 interface StepResult {
@@ -7667,6 +7675,114 @@ async function brandingFlow(base: string, adminToken: string): Promise<StepResul
   };
 }
 
+/** Step 48: a tenant can carry a dark-mode logo, favicon and contact links. */
+async function brandingExtrasFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const branding = {
+    display_name: "Acme Identity",
+    logo_url: "https://cdn.example/logo.png",
+    dark_logo_url: "https://cdn.example/logo-dark.png",
+    favicon_url: "https://cdn.example/favicon.ico",
+    primary_color: "#0f6cbd",
+    terms_url: "https://acme.example/terms",
+    privacy_url: "https://acme.example/privacy",
+    support_email: "help@acme.example",
+    website_url: "https://acme.example",
+  };
+  const cleared = Object.fromEntries(Object.keys(branding).map((key) => [key, ""]));
+
+  const current = (body: unknown): Record<string, unknown> =>
+    (body as { branding?: Record<string, unknown> } | undefined)?.branding ?? {};
+
+  try {
+    const relativeDark = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { dark_logo_url: "logo-dark.png" } }),
+    });
+    checks.push(["a relative dark-logo URL is 400", relativeDark.status === 400]);
+
+    const relativeFavicon = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { favicon_url: "favicon.ico" } }),
+    });
+    checks.push(["a relative favicon URL is 400", relativeFavicon.status === 400]);
+
+    const badEmail = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { support_email: "not-an-address" } }),
+    });
+    checks.push(["a malformed support email is 400", badEmail.status === 400]);
+
+    const written = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding }),
+    });
+    checks.push([
+      "PATCH writes the four extra branding fields",
+      written.status === 200 &&
+        Object.entries(branding).every(([key, value]) => current(written.body)[key] === value),
+    ]);
+
+    const publicRead = await call(`${base}/t/${TENANT}/sign-in-experience`);
+    checks.push([
+      "the public read echoes them",
+      publicRead.status === 200 &&
+        Object.entries(branding).every(([key, value]) => current(publicRead.body)[key] === value),
+    ]);
+
+    const clearedOne = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: { support_email: "" } }),
+    });
+    checks.push([
+      "an empty string clears only the named field",
+      clearedOne.status === 200 &&
+        current(clearedOne.body).support_email === null &&
+        current(clearedOne.body).website_url === branding.website_url &&
+        current(clearedOne.body).dark_logo_url === branding.dark_logo_url,
+    ]);
+
+    const reset = await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: cleared }),
+    });
+    checks.push([
+      "clearing every field restores the built-in look",
+      reset.status === 200 && Object.values(current(reset.body)).every((value) => value === null),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ branding: cleared }),
+    }).catch(() => undefined);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "48",
+    title: "branding extras",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: URL/email 400s → write nine fields → public echo → clear one → clear all`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 /**
  * Step 37: an administrator can edit an account's profile, and the edit is audited.
  *
@@ -9772,6 +9888,7 @@ async function main(): Promise<number> {
   push(await webhookFlow(base, adminToken));
   push(await passwordPolicyFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await brandingFlow(base, adminToken));
+  push(await brandingExtrasFlow(base, adminToken));
   push(await accountProfileFlow(base, adminToken));
   push(await sessionSettingsFlow(base, adminToken, parsed.consoleSecret));
   push(await passwordComplexityFlow(base, adminToken, parsed.internalSecret));

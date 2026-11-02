@@ -51,7 +51,7 @@ import {
 import { findSsoConnector, ssoSignInUrl, type SsoConnector } from "@/api/sso";
 import { t } from "@/i18n";
 import type { MessageKey } from "@/i18n";
-import { brandStyle } from "@/lib/branding";
+import { brandStyle, supportMailto, usableUrl } from "@/lib/branding";
 import { passwordMeetsPolicy } from "@/lib/password-policy";
 
 /**
@@ -238,9 +238,35 @@ const brandName = computed(
     t("brand.fallbackTenant"),
 );
 /** The tenant's logo, or `null` so the built-in mark shows. */
-const brandLogo = computed(() => experience.value?.branding.logo_url ?? null);
+const brandLogo = computed(() => usableUrl(experience.value?.branding.logo_url));
+/** The dark-mode logo; a tenant that sets only this one gets it in both schemes. */
+const brandDarkLogo = computed(() => usableUrl(experience.value?.branding.dark_logo_url));
+const brandLogoDefault = computed(() => brandLogo.value ?? brandDarkLogo.value);
 /** The brand variables the tenant colour implies; empty when unset. */
 const brandStyleVars = computed(() => brandStyle(experience.value?.branding.primary_color));
+
+/**
+ * Point the document's icon at the tenant's favicon.
+ *
+ * The link is created once and updated in place, so a settings refetch does not accumulate
+ * duplicate `<link rel="icon">` elements. Removing the setting restores the built-in icon by
+ * dropping the href.
+ */
+const faviconElementId = "monaca-tenant-favicon";
+watch(
+  () => usableUrl(experience.value?.branding.favicon_url),
+  (href) => {
+    let element = document.getElementById(faviconElementId) as HTMLLinkElement | null;
+    if (element === null && href !== null) {
+      element = document.createElement("link");
+      element.id = faviconElementId;
+      element.rel = "icon";
+      document.head.appendChild(element);
+    }
+    if (element !== null) element.href = href ?? "";
+  },
+  { immediate: true },
+);
 
 /**
  * Append the tenant's CSS after the built-in sheet.
@@ -262,12 +288,18 @@ watch(
   },
   { immediate: true },
 );
-/** Legal links, shown under the card only when the tenant configured one. */
-const brandLinks = computed<{ href: string; label: MessageKey }[]>(() => {
+/** Legal and contact links, shown under the card only when the tenant configured one. */
+const brandLinks = computed<{ href: string; label: MessageKey; external: boolean }[]>(() => {
   const branding = experience.value?.branding;
-  const links: { href: string; label: MessageKey }[] = [];
-  if (branding?.terms_url) links.push({ href: branding.terms_url, label: "brand.terms" });
-  if (branding?.privacy_url) links.push({ href: branding.privacy_url, label: "brand.privacy" });
+  const links: { href: string; label: MessageKey; external: boolean }[] = [];
+  if (branding?.terms_url) links.push({ href: branding.terms_url, label: "brand.terms", external: true });
+  if (branding?.privacy_url) {
+    links.push({ href: branding.privacy_url, label: "brand.privacy", external: true });
+  }
+  const website = usableUrl(branding?.website_url);
+  if (website) links.push({ href: website, label: "brand.website", external: true });
+  const support = supportMailto(branding?.support_email);
+  if (support) links.push({ href: support, label: "brand.support", external: false });
   return links;
 });
 const organization = computed(() => details.value?.organization ?? null);
@@ -1013,12 +1045,19 @@ async function cancel(): Promise<void> {
     <div class="w-full max-w-[400px]">
       <!-- Brand: tenant name when the interaction resolved, the product name otherwise. -->
       <div class="mb-5 flex items-center justify-center gap-2">
-        <img
-          v-if="brandLogo"
-          :src="brandLogo"
-          alt=""
-          class="size-7 rounded-[6px] object-contain"
-        />
+        <picture v-if="brandLogoDefault">
+          <!-- A tenant with only a dark logo gets it in both schemes. -->
+          <source
+            v-if="brandLogo && brandDarkLogo"
+            media="(prefers-color-scheme: dark)"
+            :srcset="brandDarkLogo"
+          />
+          <img
+            :src="brandLogoDefault"
+            alt=""
+            class="size-7 rounded-[6px] object-contain"
+          />
+        </picture>
         <span
           v-else
           class="grid size-7 place-items-center rounded-[6px] bg-brand text-[13px] font-semibold text-brand-on"
@@ -1658,8 +1697,8 @@ async function cancel(): Promise<void> {
           v-for="link in brandLinks"
           :key="link.href"
           :href="link.href"
-          target="_blank"
-          rel="noopener noreferrer"
+          :target="link.external ? '_blank' : undefined"
+          :rel="link.external ? 'noopener noreferrer' : undefined"
           class="text-ink-faint underline-offset-2 hover:text-ink-muted hover:underline"
         >
           {{ t(link.label) }}

@@ -76,9 +76,13 @@ const REFRESH_MAX_DAYS = 365;
 /** Branding is edited as six strings; empty means "use the built-in look". */
 const brandName = ref("");
 const logoUrl = ref("");
+const darkLogoUrl = ref("");
+const faviconUrl = ref("");
 const primaryColor = ref("");
 const termsUrl = ref("");
 const privacyUrl = ref("");
+const supportEmail = ref("");
+const websiteUrl = ref("");
 const customCss = ref("");
 const formError = ref<string | null>(null);
 
@@ -89,9 +93,13 @@ function sameBranding(a: Branding, b: Branding): boolean {
   return (
     a.display_name === b.display_name &&
     a.logo_url === b.logo_url &&
+    a.dark_logo_url === b.dark_logo_url &&
+    a.favicon_url === b.favicon_url &&
     a.primary_color === b.primary_color &&
     a.terms_url === b.terms_url &&
     a.privacy_url === b.privacy_url &&
+    a.support_email === b.support_email &&
+    a.website_url === b.website_url &&
     a.custom_css === b.custom_css
   );
 }
@@ -102,9 +110,13 @@ function brandingValues(): Branding {
   return {
     display_name: value(brandName.value),
     logo_url: value(logoUrl.value),
+    dark_logo_url: value(darkLogoUrl.value),
+    favicon_url: value(faviconUrl.value),
     primary_color: value(primaryColor.value),
     terms_url: value(termsUrl.value),
     privacy_url: value(privacyUrl.value),
+    support_email: value(supportEmail.value),
+    website_url: value(websiteUrl.value),
     custom_css: value(customCss.value),
   };
 }
@@ -215,9 +227,13 @@ function adopt(value: SignInExperience): void {
   refreshDays.value = storedDays(value.refresh_token_ttl_secs, REFRESH_MAX_DAYS);
   brandName.value = value.branding.display_name ?? "";
   logoUrl.value = value.branding.logo_url ?? "";
+  darkLogoUrl.value = value.branding.dark_logo_url ?? "";
+  faviconUrl.value = value.branding.favicon_url ?? "";
   primaryColor.value = value.branding.primary_color ?? "";
   termsUrl.value = value.branding.terms_url ?? "";
   privacyUrl.value = value.branding.privacy_url ?? "";
+  supportEmail.value = value.branding.support_email ?? "";
+  websiteUrl.value = value.branding.website_url ?? "";
   customCss.value = value.branding.custom_css ?? "";
 }
 
@@ -246,7 +262,22 @@ const dirty = computed(() => {
   return !sameSwitches(base, formValues());
 });
 
-watch([brandName, logoUrl, primaryColor, termsUrl, privacyUrl, customCss, rejectedWordsText], () => (formError.value = null));
+watch(
+  [
+    brandName,
+    logoUrl,
+    darkLogoUrl,
+    faviconUrl,
+    primaryColor,
+    termsUrl,
+    privacyUrl,
+    supportEmail,
+    websiteUrl,
+    customCss,
+    rejectedWordsText,
+  ],
+  () => (formError.value = null),
+);
 
 const rejectedWordsIssue = computed<"count" | "length" | null>(() => {
   const words = rejectedWordsValues();
@@ -378,11 +409,15 @@ async function save(): Promise<void> {
     return;
   }
   if (
-    [logoUrl.value, termsUrl.value, privacyUrl.value].some(
+    [logoUrl.value, darkLogoUrl.value, faviconUrl.value, termsUrl.value, privacyUrl.value, websiteUrl.value].some(
       (url) => url.trim() !== "" && !/^https?:\/\/[^\s]+$/.test(url.trim()),
     )
   ) {
     formError.value = t("signInExperience.invalidBrandingUrl");
+    return;
+  }
+  if (supportEmail.value.trim() !== "" && !/^[^\s@]+@[^\s@]+$/.test(supportEmail.value.trim())) {
+    formError.value = t("signInExperience.invalidBrandingEmail");
     return;
   }
   if (primaryColor.value.trim() !== "" && !/^#[0-9a-fA-F]{6}$/.test(primaryColor.value.trim())) {
@@ -431,9 +466,13 @@ async function save(): Promise<void> {
     body.branding = {
       display_name: brandName.value.trim(),
       logo_url: logoUrl.value.trim(),
+      dark_logo_url: darkLogoUrl.value.trim(),
+      favicon_url: faviconUrl.value.trim(),
       primary_color: primaryColor.value.trim(),
       terms_url: termsUrl.value.trim(),
       privacy_url: privacyUrl.value.trim(),
+      support_email: supportEmail.value.trim(),
+      website_url: websiteUrl.value.trim(),
       custom_css: customCss.value.trim(),
     };
   }
@@ -564,19 +603,80 @@ function formatStamp(at: string): string {
                 </div>
               </div>
 
+              <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-logo">{{ t('signInExperience.brandLogo') }}</Label>
+                  <Input
+                    id="brand-logo"
+                    v-model="logoUrl"
+                    :invalid="logoUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(logoUrl.trim())"
+                    :disabled="update.isPending.value"
+                    placeholder="https://cdn.example/logo.png"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-dark-logo">{{ t('signInExperience.brandDarkLogo') }}</Label>
+                  <Input
+                    id="brand-dark-logo"
+                    v-model="darkLogoUrl"
+                    :invalid="darkLogoUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(darkLogoUrl.trim())"
+                    :disabled="update.isPending.value"
+                    placeholder="https://cdn.example/logo-dark.png"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                </div>
+              </div>
+
               <div class="flex flex-col gap-1.5">
-                <Label for="brand-logo">{{ t('signInExperience.brandLogo') }}</Label>
+                <Label for="brand-favicon">{{ t('signInExperience.brandFavicon') }}</Label>
                 <Input
-                  id="brand-logo"
-                  v-model="logoUrl"
-                  :invalid="logoUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(logoUrl.trim())"
+                  id="brand-favicon"
+                  v-model="faviconUrl"
+                  :invalid="faviconUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(faviconUrl.trim())"
                   :disabled="update.isPending.value"
-                  placeholder="https://cdn.example/logo.png"
+                  placeholder="https://cdn.example/favicon.ico"
                   autocomplete="off"
                   spellcheck="false"
                   class="mono-data text-[12.5px]"
                 />
               </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-support-email">{{ t('signInExperience.brandSupportEmail') }}</Label>
+                  <Input
+                    id="brand-support-email"
+                    v-model="supportEmail"
+                    :invalid="supportEmail.trim() !== '' && !/^[^\s@]+@[^\s@]+$/.test(supportEmail.trim())"
+                    :disabled="update.isPending.value"
+                    placeholder="help@example.com"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <Label for="brand-website">{{ t('signInExperience.brandWebsite') }}</Label>
+                  <Input
+                    id="brand-website"
+                    v-model="websiteUrl"
+                    :invalid="websiteUrl.trim() !== '' && !/^https?:\/\/[^\s]+$/.test(websiteUrl.trim())"
+                    :disabled="update.isPending.value"
+                    placeholder="https://example.com"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono-data text-[12.5px]"
+                  />
+                </div>
+              </div>
+              <p v-if="supportEmail.trim() !== '' && !/^[^\s@]+@[^\s@]+$/.test(supportEmail.trim())" class="text-[11.5px] leading-snug text-deny">
+                {{ t('signInExperience.invalidBrandingEmail') }}
+              </p>
 
               <div class="grid grid-cols-2 gap-3">
                 <div class="flex flex-col gap-1.5">

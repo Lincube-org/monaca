@@ -1109,9 +1109,13 @@ describe("sign-in experience", () => {
     expect(experience.branding).toEqual({
       display_name: null,
       logo_url: null,
+      dark_logo_url: null,
+      favicon_url: null,
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+      support_email: null,
+      website_url: null,
       custom_css: null,
     });
     expect(Number.isNaN(Date.parse(experience.updated_at))).toBe(false);
@@ -1149,9 +1153,13 @@ describe("sign-in experience", () => {
       branding: {
         display_name: null,
         logo_url: null,
+        dark_logo_url: null,
+        favicon_url: null,
         primary_color: null,
         terms_url: null,
         privacy_url: null,
+        support_email: null,
+        website_url: null,
         custom_css: null,
       },
     });
@@ -1377,6 +1385,11 @@ describe("sign-in experience", () => {
     for (const branding of [
       { display_name: "x".repeat(65) },
       { logo_url: "logo.png" },
+      { dark_logo_url: "logo-dark.png" },
+      { favicon_url: "favicon.ico" },
+      { website_url: "acme.example" },
+      { support_email: "not-an-address" },
+      { support_email: "two addresses@example.com" },
       { primary_color: "blue" },
     ]) {
       const failure = await mockApi
@@ -1389,9 +1402,13 @@ describe("sign-in experience", () => {
     const branding = {
       display_name: "Acme Identity",
       logo_url: "https://cdn.example/logo.png",
+      dark_logo_url: "https://cdn.example/logo-dark.png",
+      favicon_url: "https://cdn.example/favicon.ico",
       primary_color: "#0f6cbd",
       terms_url: "https://acme.example/terms",
       privacy_url: "https://acme.example/privacy",
+      support_email: "help@acme.example",
+      website_url: "https://acme.example",
     };
     const written = await mockApi.updateSignInExperience({ branding });
     expect(written.branding).toEqual({ ...branding, custom_css: null });
@@ -1412,9 +1429,13 @@ describe("sign-in experience", () => {
       branding: {
         display_name: "",
         logo_url: "",
+        dark_logo_url: "",
+        favicon_url: "",
         primary_color: "",
         terms_url: "",
         privacy_url: "",
+        support_email: "",
+        website_url: "",
         custom_css: "",
       },
     });
@@ -1422,9 +1443,13 @@ describe("sign-in experience", () => {
     expect(reset.branding).toEqual({
       display_name: null,
       logo_url: null,
+      dark_logo_url: null,
+      favicon_url: null,
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+      support_email: null,
+      website_url: null,
       custom_css: null,
     });
   });

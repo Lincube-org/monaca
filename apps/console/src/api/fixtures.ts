@@ -468,9 +468,13 @@ export function seedSignInExperience(): SignInExperience {
     branding: {
       display_name: null,
       logo_url: null,
+      dark_logo_url: null,
+      favicon_url: null,
       primary_color: null,
       terms_url: null,
       privacy_url: null,
+      support_email: null,
+      website_url: null,
       custom_css: null,
     },
     updated_at: at(900 * 60),

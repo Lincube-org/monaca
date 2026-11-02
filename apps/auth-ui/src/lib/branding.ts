@@ -8,6 +8,26 @@
  * them.
  */
 
+/**
+ * A tenant-supplied icon URL, or `null` when it cannot be used.
+ *
+ * The server validates branding writes, but the page must not put an unusable value into `src` or a
+ * `mailto:` link: a stored value from an older build, or a hand-edited row, would otherwise become
+ * a broken image or worse.
+ */
+export function usableUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return /^https?:\/\/[^\s]+$/.test(trimmed) ? trimmed : null;
+}
+
+/** The `mailto:` link for a support address, or `null` when it is not address-shaped. */
+export function supportMailto(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return /^[^\s@]+@[^\s@]+$/.test(trimmed) ? `mailto:${trimmed}` : null;
+}
+
 /** `#rrggbb` (either case) → its three channels, or `null` for anything else. */
 export function parseHexColor(value: string | null | undefined): [number, number, number] | null {
   if (!value) return null;

@@ -90,12 +90,20 @@ pub struct BrandingRow {
     pub display_name: Option<String>,
     /// An absolute http(s) logo URL.
     pub logo_url: Option<String>,
+    /// An absolute http(s) logo URL used when the page is in dark mode.
+    pub dark_logo_url: Option<String>,
+    /// An absolute http(s) favicon URL.
+    pub favicon_url: Option<String>,
     /// A `#rrggbb` primary colour.
     pub primary_color: Option<String>,
     /// Terms-of-service link.
     pub terms_url: Option<String>,
     /// Privacy-policy link.
     pub privacy_url: Option<String>,
+    /// An address visitors can write to for help.
+    pub support_email: Option<String>,
+    /// The tenant's own website, linked from the hosted page.
+    pub website_url: Option<String>,
     /// Tenant CSS appended after the built-in stylesheet.
     pub custom_css: Option<String>,
     /// When a branding field last changed.
@@ -916,8 +924,8 @@ impl Store {
     pub async fn branding(&self, tenant: &TenantRow) -> Result<BrandingRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, BrandingRow>(
-            "SELECT display_name, logo_url, primary_color, terms_url, privacy_url, custom_css,
-                    updated_at
+            "SELECT display_name, logo_url, dark_logo_url, favicon_url, primary_color, terms_url,
+                    privacy_url, support_email, website_url, custom_css, updated_at
              FROM tenant.branding WHERE singleton",
         )
         .fetch_one(&pool)
@@ -932,9 +940,13 @@ impl Store {
         tenant: &TenantRow,
         display_name: Option<&str>,
         logo_url: Option<&str>,
+        dark_logo_url: Option<&str>,
+        favicon_url: Option<&str>,
         primary_color: Option<&str>,
         terms_url: Option<&str>,
         privacy_url: Option<&str>,
+        support_email: Option<&str>,
+        website_url: Option<&str>,
         custom_css: Option<&str>,
     ) -> Result<BrandingRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
@@ -944,24 +956,36 @@ impl Store {
                                      WHEN $1 = '' THEN NULL ELSE $1 END,
                  logo_url = CASE WHEN $2 IS NULL THEN logo_url
                                  WHEN $2 = '' THEN NULL ELSE $2 END,
-                 primary_color = CASE WHEN $3 IS NULL THEN primary_color
+                 dark_logo_url = CASE WHEN $3 IS NULL THEN dark_logo_url
                                       WHEN $3 = '' THEN NULL ELSE $3 END,
-                 terms_url = CASE WHEN $4 IS NULL THEN terms_url
-                                  WHEN $4 = '' THEN NULL ELSE $4 END,
-                 privacy_url = CASE WHEN $5 IS NULL THEN privacy_url
-                                    WHEN $5 = '' THEN NULL ELSE $5 END,
-                 custom_css = CASE WHEN $6 IS NULL THEN custom_css
-                                   WHEN $6 = '' THEN NULL ELSE $6 END,
+                 favicon_url = CASE WHEN $4 IS NULL THEN favicon_url
+                                    WHEN $4 = '' THEN NULL ELSE $4 END,
+                 primary_color = CASE WHEN $5 IS NULL THEN primary_color
+                                      WHEN $5 = '' THEN NULL ELSE $5 END,
+                 terms_url = CASE WHEN $6 IS NULL THEN terms_url
+                                  WHEN $6 = '' THEN NULL ELSE $6 END,
+                 privacy_url = CASE WHEN $7 IS NULL THEN privacy_url
+                                    WHEN $7 = '' THEN NULL ELSE $7 END,
+                 support_email = CASE WHEN $8 IS NULL THEN support_email
+                                      WHEN $8 = '' THEN NULL ELSE $8 END,
+                 website_url = CASE WHEN $9 IS NULL THEN website_url
+                                    WHEN $9 = '' THEN NULL ELSE $9 END,
+                 custom_css = CASE WHEN $10 IS NULL THEN custom_css
+                                   WHEN $10 = '' THEN NULL ELSE $10 END,
                  updated_at = now()
              WHERE singleton
-             RETURNING display_name, logo_url, primary_color, terms_url, privacy_url, custom_css,
-                       updated_at",
+             RETURNING display_name, logo_url, dark_logo_url, favicon_url, primary_color,
+                       terms_url, privacy_url, support_email, website_url, custom_css, updated_at",
         )
         .bind(display_name)
         .bind(logo_url)
+        .bind(dark_logo_url)
+        .bind(favicon_url)
         .bind(primary_color)
         .bind(terms_url)
         .bind(privacy_url)
+        .bind(support_email)
+        .bind(website_url)
         .bind(custom_css)
         .fetch_one(&pool)
         .await?)

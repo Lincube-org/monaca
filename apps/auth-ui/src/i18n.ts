@@ -12,6 +12,8 @@ export const messages = {
     poweredBy: "Monaca",
     terms: "Terms of service",
     privacy: "Privacy policy",
+    website: "Website",
+    support: "Contact support",
   },
   signIn: {
     title: "Sign in to continue",

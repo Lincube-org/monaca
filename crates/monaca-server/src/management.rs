@@ -549,12 +549,20 @@ pub struct BrandingPatch {
     pub display_name: Option<String>,
     /// An absolute http(s) logo URL.
     pub logo_url: Option<String>,
+    /// An absolute http(s) logo URL used in dark mode.
+    pub dark_logo_url: Option<String>,
+    /// An absolute http(s) favicon URL.
+    pub favicon_url: Option<String>,
     /// A `#rrggbb` primary colour.
     pub primary_color: Option<String>,
     /// Terms-of-service link.
     pub terms_url: Option<String>,
     /// Privacy-policy link.
     pub privacy_url: Option<String>,
+    /// An address visitors can write to for help.
+    pub support_email: Option<String>,
+    /// The tenant's own website.
+    pub website_url: Option<String>,
     /// CSS appended after the built-in stylesheet, at most 20 000 characters.
     pub custom_css: Option<String>,
 }
@@ -563,9 +571,13 @@ impl BrandingPatch {
     fn is_empty(&self) -> bool {
         self.display_name.is_none()
             && self.logo_url.is_none()
+            && self.dark_logo_url.is_none()
+            && self.favicon_url.is_none()
             && self.primary_color.is_none()
             && self.terms_url.is_none()
             && self.privacy_url.is_none()
+            && self.support_email.is_none()
+            && self.website_url.is_none()
             && self.custom_css.is_none()
     }
 }
@@ -763,9 +775,13 @@ pub async fn update_sign_in_experience(
             };
             let display_name = trimmed(&patch.display_name);
             let logo_url = trimmed(&patch.logo_url);
+            let dark_logo_url = trimmed(&patch.dark_logo_url);
+            let favicon_url = trimmed(&patch.favicon_url);
             let primary_color = trimmed(&patch.primary_color);
             let terms_url = trimmed(&patch.terms_url);
             let privacy_url = trimmed(&patch.privacy_url);
+            let support_email = trimmed(&patch.support_email);
+            let website_url = trimmed(&patch.website_url);
             let custom_css = patch.custom_css.as_deref().map(str::trim).map(str::to_owned);
             state
                 .store
@@ -773,9 +789,13 @@ pub async fn update_sign_in_experience(
                     &tenant,
                     display_name.as_deref(),
                     logo_url.as_deref(),
+                    dark_logo_url.as_deref(),
+                    favicon_url.as_deref(),
                     primary_color.as_deref(),
                     terms_url.as_deref(),
                     privacy_url.as_deref(),
+                    support_email.as_deref(),
+                    website_url.as_deref(),
                     custom_css.as_deref(),
                 )
                 .await?
@@ -852,9 +872,13 @@ pub(crate) fn branding_json(branding: &BrandingRow) -> Value {
     json!({
         "display_name": branding.display_name,
         "logo_url": branding.logo_url,
+        "dark_logo_url": branding.dark_logo_url,
+        "favicon_url": branding.favicon_url,
         "primary_color": branding.primary_color,
         "terms_url": branding.terms_url,
         "privacy_url": branding.privacy_url,
+        "support_email": branding.support_email,
+        "website_url": branding.website_url,
         "custom_css": branding.custom_css,
     })
 }
@@ -915,8 +939,11 @@ fn check_branding(branding: &BrandingPatch) -> Result<(), ApiError> {
     }
     for (label, value) in [
         ("logo_url", branding.logo_url.as_deref()),
+        ("dark_logo_url", branding.dark_logo_url.as_deref()),
+        ("favicon_url", branding.favicon_url.as_deref()),
         ("terms_url", branding.terms_url.as_deref()),
         ("privacy_url", branding.privacy_url.as_deref()),
+        ("website_url", branding.website_url.as_deref()),
     ] {
         if let Some(url) = value
             && !url.trim().is_empty()
@@ -925,6 +952,20 @@ fn check_branding(branding: &BrandingPatch) -> Result<(), ApiError> {
             return Err(ApiError::problem(
                 kinds::INVALID_REQUEST,
                 format!("{label} must be an absolute http(s) URL or empty"),
+            ));
+        }
+    }
+    if let Some(email) = branding.support_email.as_deref() {
+        let email = email.trim();
+        let one_address = email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+        });
+        if !email.is_empty()
+            && (email.chars().count() > 254 || email.contains(char::is_whitespace) || !one_address)
+        {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "support_email must be an address or empty",
             ));
         }
     }

@@ -52,9 +52,17 @@ export interface InteractionDetails {
 export interface Branding {
   display_name: string | null;
   logo_url: string | null;
+  /** The logo used when the visitor's system is in dark mode; falls back to `logo_url`. */
+  dark_logo_url: string | null;
+  /** The favicon written into the document head; `null` keeps the built-in icon. */
+  favicon_url: string | null;
   primary_color: string | null;
   terms_url: string | null;
   privacy_url: string | null;
+  /** An address visitors can write to for help. */
+  support_email: string | null;
+  /** The tenant's own website, linked from the page footer. */
+  website_url: string | null;
   /** CSS appended after the built-in stylesheet; `null` keeps the built-in look. */
   custom_css: string | null;
 }

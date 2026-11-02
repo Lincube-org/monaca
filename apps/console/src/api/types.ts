@@ -236,9 +236,17 @@ export interface Connector {
 export interface Branding {
   display_name: string | null;
   logo_url: string | null;
+  /** The logo the hosted page uses in dark mode; `null` falls back to `logo_url`. */
+  dark_logo_url: string | null;
+  /** The favicon the hosted page writes into the document head. */
+  favicon_url: string | null;
   primary_color: string | null;
   terms_url: string | null;
   privacy_url: string | null;
+  /** An address visitors can write to for help. */
+  support_email: string | null;
+  /** The tenant's own website, linked from the hosted page. */
+  website_url: string | null;
   /** CSS appended after the built-in stylesheet; `null` keeps the built-in look. */
   custom_css: string | null;
 }
@@ -484,9 +492,13 @@ export interface UpdateApiResourceRequest {
 export interface BrandingPatch {
   display_name?: string;
   logo_url?: string;
+  dark_logo_url?: string;
+  favicon_url?: string;
   primary_color?: string;
   terms_url?: string;
   privacy_url?: string;
+  support_email?: string;
+  website_url?: string;
   custom_css?: string;
 }
 

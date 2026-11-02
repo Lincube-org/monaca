@@ -127,9 +127,13 @@ class MockStore {
   private branding: Branding = {
     display_name: null,
     logo_url: null,
+    dark_logo_url: null,
+    favicon_url: null,
     primary_color: null,
     terms_url: null,
     privacy_url: null,
+    support_email: null,
+    website_url: null,
     custom_css: null,
   };
   /**
@@ -2353,8 +2357,11 @@ function checkBrandingPatch(patch: BrandingPatch): void {
   }
   for (const [field, value] of [
     ["logo_url", patch.logo_url],
+    ["dark_logo_url", patch.dark_logo_url],
+    ["favicon_url", patch.favicon_url],
     ["terms_url", patch.terms_url],
     ["privacy_url", patch.privacy_url],
+    ["website_url", patch.website_url],
   ] as const) {
     if (value !== undefined && value.trim() !== "" && !/^https?:\/\/[^\s]+$/.test(value.trim())) {
       throw new ApiError(`${field} must be an absolute http(s) URL or empty`, {
@@ -2362,6 +2369,16 @@ function checkBrandingPatch(patch: BrandingPatch): void {
         code: "MONACA_INVALID_REQUEST",
       });
     }
+  }
+  if (
+    patch.support_email !== undefined &&
+    patch.support_email.trim() !== "" &&
+    (!patch.support_email.includes("@") || /\s/.test(patch.support_email.trim()))
+  ) {
+    throw new ApiError("support_email must be an address or empty", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
   }
   if (
     patch.primary_color !== undefined &&
@@ -2387,9 +2404,13 @@ function normaliseBrandingPatch(patch: BrandingPatch): Partial<Branding> {
   for (const key of [
     "display_name",
     "logo_url",
+    "dark_logo_url",
+    "favicon_url",
     "primary_color",
     "terms_url",
     "privacy_url",
+    "support_email",
+    "website_url",
     "custom_css",
   ] as const) {
     const value = patch[key];

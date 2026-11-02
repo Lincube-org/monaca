@@ -199,6 +199,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "enterprise SSO switch (M1)",
         include_str!("../migrations/tenant_32.sql"),
     ),
+    (
+        33,
+        "branding: dark logo, favicon and contact links (M1)",
+        include_str!("../migrations/tenant_33.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every
