@@ -492,6 +492,8 @@ pub struct ClientRow {
     pub jwks: Option<Value>,
     /// Application-specific CSS for the hosted page; falls back to the tenant's.
     pub custom_css: Option<String>,
+    /// Browser origins allowed to read this application's protocol responses.
+    pub cors_allowed_origins: Vec<String>,
     /// Scopes this client may ask for.
     pub scopes: Vec<String>,
     /// A third-party application must show a consent screen.
@@ -3461,7 +3463,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
             "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
-                    scopes, is_third_party, created_at
+                    cors_allowed_origins, scopes, is_third_party, created_at
              FROM tenant.clients WHERE client_id = $1",
         )
         .bind(client_id)
@@ -3478,7 +3480,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
             "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
-                    scopes, is_third_party, created_at
+                    cors_allowed_origins, scopes, is_third_party, created_at
              FROM tenant.clients WHERE id = $1",
         )
         .bind(id)
@@ -3574,7 +3576,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ClientRow>(
             "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
-                    scopes, is_third_party, created_at
+                    cors_allowed_origins, scopes, is_third_party, created_at
              FROM tenant.clients ORDER BY client_id",
         )
         .fetch_all(&pool)
@@ -3598,6 +3600,7 @@ impl Store {
         scopes: &[String],
         redirect_uris: &[String],
         post_logout_redirect_uris: &[String],
+        cors_allowed_origins: &[String],
         is_third_party: bool,
     ) -> Result<ClientRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
@@ -3605,10 +3608,10 @@ impl Store {
         let row = sqlx::query_as::<_, ClientRow>(
             "INSERT INTO tenant.clients
                (id, client_id, name, kind, secret_hash, token_auth_method, jwks, scopes,
-                post_logout_redirect_uris, is_third_party)
-             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9)
+                post_logout_redirect_uris, cors_allowed_origins, is_third_party)
+             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,$10)
              RETURNING id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,
-                       scopes, is_third_party, created_at",
+                       cors_allowed_origins, scopes, is_third_party, created_at",
         )
         .bind(Uuid::now_v7())
         .bind(client_id)
@@ -3618,6 +3621,7 @@ impl Store {
         .bind(token_auth_method)
         .bind(scopes)
         .bind(post_logout_redirect_uris)
+        .bind(cors_allowed_origins)
         .bind(is_third_party)
         .fetch_one(&mut *tx)
         .await
@@ -3650,6 +3654,7 @@ impl Store {
         scopes: Option<&[String]>,
         redirect_uris: Option<&[String]>,
         post_logout_redirect_uris: Option<&[String]>,
+        cors_allowed_origins: Option<&[String]>,
         custom_css: Option<&str>,
     ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
@@ -3659,14 +3664,16 @@ impl Store {
              SET name = COALESCE($2, name),
                  scopes = COALESCE($3, scopes),
                  post_logout_redirect_uris = COALESCE($4, post_logout_redirect_uris),
-                 custom_css = CASE WHEN $5 IS NULL THEN custom_css
-                                   WHEN $5 = '' THEN NULL ELSE $5 END
+                 cors_allowed_origins = COALESCE($5, cors_allowed_origins),
+                 custom_css = CASE WHEN $6 IS NULL THEN custom_css
+                                   WHEN $6 = '' THEN NULL ELSE $6 END
              WHERE id = $1",
         )
         .bind(id)
         .bind(name)
         .bind(scopes)
         .bind(post_logout_redirect_uris)
+        .bind(cors_allowed_origins)
         .bind(custom_css)
         .execute(&mut *tx)
         .await?;
@@ -3719,6 +3726,23 @@ impl Store {
             .execute(&pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Every origin any application of the tenant registered for CORS, de-duplicated.
+    ///
+    /// A preflight request carries no `client_id`, so the browser's gate has to be decided from
+    /// the tenant's whole application set; the union is that set.
+    pub async fn tenant_cors_origins(&self, tenant: &TenantRow) -> Result<Vec<String>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT origin
+             FROM tenant.clients
+             CROSS JOIN LATERAL unnest(cors_allowed_origins) AS o(origin)
+             ORDER BY origin",
+        )
+        .fetch_all(&pool)
+        .await?;
+        Ok(rows.into_iter().map(|(origin,)| origin).collect())
     }
 
     // ---------------------------------------------------------------- consent grants

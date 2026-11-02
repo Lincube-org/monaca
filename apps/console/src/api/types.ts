@@ -193,6 +193,8 @@ export interface Client {
   scopes: string[];
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
+  /** Browser origins allowed to call the tenant's protocol endpoints for this application. */
+  cors_allowed_origins: string[];
   /** Application CSS for the hosted page; `null` falls back to the tenant's. */
   custom_css: string | null;
   is_third_party: boolean;
@@ -661,6 +663,7 @@ export interface CreateClientRequest {
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   scopes: string[];
+  cors_allowed_origins?: string[];
   is_third_party: boolean;
 }
 
@@ -670,6 +673,7 @@ export interface UpdateClientRequest {
   redirect_uris?: string[];
   post_logout_redirect_uris?: string[];
   scopes?: string[];
+  cors_allowed_origins?: string[];
   /** Application CSS; an empty string clears it. */
   custom_css?: string;
 }

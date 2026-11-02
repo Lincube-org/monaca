@@ -13,6 +13,7 @@ mod captcha;
 mod cli;
 mod clients;
 mod config;
+mod cors;
 mod email_templates;
 mod error;
 mod internal;

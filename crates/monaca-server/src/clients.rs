@@ -41,6 +41,9 @@ pub struct CreateClientBody {
     /// Scopes this application may ask for.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Browser origins that may call the tenant's protocol endpoints from this application.
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
     /// A third-party application must show the consent screen.
     #[serde(default)]
     pub is_third_party: bool,
@@ -57,6 +60,8 @@ pub struct UpdateClientBody {
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Replacement scope set.
     pub scopes: Option<Vec<String>>,
+    /// Replacement CORS origins (an empty array clears them).
+    pub cors_allowed_origins: Option<Vec<String>>,
     /// Application CSS for the hosted page; an empty string clears it.
     pub custom_css: Option<String>,
 }
@@ -104,6 +109,7 @@ pub async fn create_client(
     let redirect_uris = normalise_uris(&body.redirect_uris, "redirect_uris")?;
     let post_logout_redirect_uris =
         normalise_uris(&body.post_logout_redirect_uris, "post_logout_redirect_uris")?;
+    let cors_allowed_origins = normalise_origins(&body.cors_allowed_origins)?;
 
     let row = state
         .store
@@ -117,6 +123,7 @@ pub async fn create_client(
             &scopes,
             &redirect_uris,
             &post_logout_redirect_uris,
+            &cors_allowed_origins,
             body.is_third_party,
         )
         .await?;
@@ -209,6 +216,11 @@ pub async fn update_client(
         .as_deref()
         .map(|uris| normalise_uris(uris, "post_logout_redirect_uris"))
         .transpose()?;
+    let cors_allowed_origins = body
+        .cors_allowed_origins
+        .as_deref()
+        .map(normalise_origins)
+        .transpose()?;
     let custom_css = match body.custom_css.as_deref() {
         Some(css) => {
             let css = css.trim();
@@ -227,6 +239,7 @@ pub async fn update_client(
             scopes.as_deref(),
             redirect_uris.as_deref(),
             post_logout.as_deref(),
+            cors_allowed_origins.as_deref(),
             custom_css.as_deref(),
         )
         .await?
@@ -377,6 +390,7 @@ fn client_json(row: &ClientRow, redirect_uris: &[String], post_logout: &[String]
         "scopes": row.scopes,
         "redirect_uris": redirect_uris,
         "post_logout_redirect_uris": post_logout,
+        "cors_allowed_origins": row.cors_allowed_origins,
         "custom_css": row.custom_css,
         "is_third_party": row.is_third_party,
         "created_at": ts(row.created_at),
@@ -410,6 +424,89 @@ fn normalise_uris(raw: &[String], field: &str) -> Result<Vec<String>, ApiError> 
         }
     }
     Ok(uris)
+}
+
+/// Validate and de-duplicate CORS origins — §6.2.
+fn normalise_origins(raw: &[String]) -> Result<Vec<String>, ApiError> {
+    if raw.len() > MAX_CORS_ORIGINS {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("cors_allowed_origins accepts at most {MAX_CORS_ORIGINS} origins"),
+        ));
+    }
+    let mut origins: Vec<String> = Vec::new();
+    for raw_origin in raw {
+        let Some(origin) = normalise_origin(raw_origin) else {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "cors_allowed_origins must be origins of the form https://app.example.com — no path, query, fragment, userinfo or wildcard",
+            ));
+        };
+        if origin.len() > 255 {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "a CORS origin must be at most 255 characters",
+            ));
+        }
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    Ok(origins)
+}
+
+/// The ceiling on one application's origin list — §6.2 and the schema-38 check.
+pub(crate) const MAX_CORS_ORIGINS: usize = 32;
+
+/// Canonicalize one origin to `scheme://host[:port]`, or `None` when it is not an origin.
+///
+/// The serialization is the one a browser sends: lowercased scheme and host, the default port
+/// omitted. A trailing slash is tolerated because that is how people write an origin; anything
+/// after it is a path and is refused, so an entry can never admit URLs by prefix.
+pub(crate) fn normalise_origin(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    let (scheme, rest, default_port) = if let Some(rest) = value.strip_prefix("https://") {
+        ("https", rest, 443)
+    } else if let Some(rest) = value.strip_prefix("http://") {
+        ("http", rest, 80)
+    } else {
+        return None;
+    };
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', '\\'])
+        || authority.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    let bracketed = authority.starts_with('[');
+    let (host, port) = if let Some(after) = authority.strip_prefix('[') {
+        let (host, tail) = after.split_once(']')?;
+        let port = match tail {
+            "" => None,
+            tail => Some(parse_port(tail.strip_prefix(':')?)?),
+        };
+        (format!("[{host}]"), port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (host.to_owned(), Some(parse_port(port)?))
+    } else {
+        (authority.to_owned(), None)
+    };
+    if host.is_empty() || host == "[]" || !host.is_ascii() || (!bracketed && host.contains(':')) {
+        return None;
+    }
+    let authority = match port.filter(|port| *port != default_port) {
+        Some(port) => format!("{}:{port}", host.to_ascii_lowercase()),
+        None => host.to_ascii_lowercase(),
+    };
+    Some(format!("{scheme}://{authority}"))
+}
+
+fn parse_port(value: &str) -> Option<u16> {
+    if value.is_empty() {
+        return None;
+    }
+    value.parse().ok()
 }
 
 /// Validate and de-duplicate the requested scopes against the scope grammar.
@@ -477,5 +574,49 @@ mod tests {
             .expect("valid");
         assert_eq!(scopes, vec!["openid".to_string(), "tools:read".to_string()]);
         assert!(normalise_scopes(&["bad scope".into()]).is_err());
+    }
+
+    #[test]
+    fn cors_origins_are_canonicalized_and_deduplicated() {
+        let origins = normalise_origins(&[
+            " https://App.Example.com:443/ ".into(),
+            "https://app.example.com".into(),
+            "http://localhost:5173".into(),
+            "http://localhost:80".into(),
+            "http://[::1]:5174".into(),
+        ])
+        .expect("valid");
+        assert_eq!(
+            origins,
+            vec![
+                "https://app.example.com".to_string(),
+                "http://localhost:5173".to_string(),
+                "http://localhost".to_string(),
+                "http://[::1]:5174".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cors_origins_refuse_paths_wildcards_and_junk() {
+        for bad in [
+            "*",
+            "https://app.example.com/callback",
+            "https://app.example.com?x=1",
+            "https://app.example.com#frag",
+            "https://user@app.example.com",
+            "ftp://app.example.com",
+            "https://",
+            "https://app.example.com:99999",
+            "https://app.example.com:port",
+            "http://[::1",
+            "https://::1",
+            "https://app example.com",
+        ] {
+            assert!(normalise_origins(&[bad.into()]).is_err(), "accepted {bad}");
+        }
+        assert!(
+            normalise_origins(&vec!["https://a.example".into(); MAX_CORS_ORIGINS + 1]).is_err()
+        );
     }
 }

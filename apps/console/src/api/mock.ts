@@ -374,6 +374,7 @@ class MockStore {
     const scopes = normaliseScopes(body.scopes);
     const redirectUris = normaliseUris(body.redirect_uris, "redirect_uris");
     const postLogout = normaliseUris(body.post_logout_redirect_uris, "post_logout_redirect_uris");
+    const corsAllowedOrigins = normaliseOrigins(body.cors_allowed_origins ?? []);
 
     const client: Client = {
       id: newId("cli"),
@@ -384,6 +385,7 @@ class MockStore {
       scopes,
       redirect_uris: redirectUris,
       post_logout_redirect_uris: postLogout,
+      cors_allowed_origins: corsAllowedOrigins,
       custom_css: null,
       is_third_party: body.is_third_party,
       created_at: new Date().toISOString(),
@@ -442,6 +444,10 @@ class MockStore {
       body.post_logout_redirect_uris === undefined
         ? client.post_logout_redirect_uris
         : normaliseUris(body.post_logout_redirect_uris, "post_logout_redirect_uris");
+    const corsAllowedOrigins =
+      body.cors_allowed_origins === undefined
+        ? client.cors_allowed_origins
+        : normaliseOrigins(body.cors_allowed_origins);
 
     // §6.2: an empty string clears the application's style; an absent field leaves it alone.
     let customCss = client.custom_css;
@@ -462,6 +468,7 @@ class MockStore {
       scopes,
       redirect_uris: redirectUris,
       post_logout_redirect_uris: postLogout,
+      cors_allowed_origins: corsAllowedOrigins,
       custom_css: customCss,
     };
     this.clients = [...this.clients.slice(0, index), updated, ...this.clients.slice(index + 1)];
@@ -2459,6 +2466,7 @@ function cloneClient(client: Client): Client {
     scopes: [...client.scopes],
     redirect_uris: [...client.redirect_uris],
     post_logout_redirect_uris: [...client.post_logout_redirect_uris],
+    cors_allowed_origins: [...client.cors_allowed_origins],
   };
 }
 
@@ -2710,6 +2718,57 @@ function normaliseUris(raw: readonly string[], field: string): string[] {
     if (!uris.includes(trimmed)) uris.push(trimmed);
   }
   return uris;
+}
+
+/** One application's origin cap — the server's `MAX_CORS_ORIGINS`, mirrored by schema 38. */
+const MAX_CORS_ORIGINS = 32;
+
+/**
+ * Canonicalize one CORS origin to `scheme://host[:port]`, or `null` when it is not an origin —
+ * the server's `normalise_origin`. `new URL` does the serialization (lowercased host, default
+ * port omitted); the checks refuse what an origin is not: a path, query, fragment, userinfo or
+ * wildcard.
+ */
+function normaliseOrigin(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!/^https?:\/\//.test(trimmed)) return null;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+  return url.origin;
+}
+
+function normaliseOrigins(raw: readonly string[]): string[] {
+  if (raw.length > MAX_CORS_ORIGINS) {
+    throw new ApiError(`cors_allowed_origins accepts at most ${MAX_CORS_ORIGINS} origins`, {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+  const origins: string[] = [];
+  for (const origin of raw) {
+    const normalized = normaliseOrigin(origin);
+    if (normalized === null || normalized.length > 255) {
+      throw new ApiError(
+        "cors_allowed_origins must be origins of the form https://app.example.com — no path, query, fragment, userinfo or wildcard",
+        { status: 400, code: "MONACA_INVALID_REQUEST" },
+      );
+    }
+    if (!origins.includes(normalized)) origins.push(normalized);
+  }
+  return origins;
 }
 
 /** The server's `normalise_domain`: trim, lowercase, and accept only a plain DNS name. */

@@ -224,6 +224,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "CAPTCHA and login-failure lockout (M1)",
         include_str!("../migrations/tenant_37.sql"),
     ),
+    (
+        38,
+        "per-application CORS allowed origins (M1)",
+        include_str!("../migrations/tenant_38.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

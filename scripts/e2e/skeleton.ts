@@ -506,6 +506,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "the identifier, the third attempt is 429 MONACA_ACCOUNT_LOCKED and is audited as interaction.sign_in.failed " +
       "with reason account_locked, and a successful password sign-in clears the counter",
   },
+  {
+    step: "53",
+    title: "application CORS",
+    assertion:
+      "POST/PATCH /v1/clients stores cors_allowed_origins (200) and canonicalizes https://App.Example.com:443/ " +
+      "to https://app.example.com, while *, a path, a query, userinfo, an origin over 255 characters and a list " +
+      "over 32 entries are 400; an OPTIONS /t/demo/oauth2/token preflight with Origin: https://app.example.com " +
+      "answers 204 with that Access-Control-Allow-Origin, Access-Control-Allow-Credentials: true and " +
+      "Access-Control-Allow-Methods, a GET …/jwks.json from the registered origin carries the allow-origin " +
+      "header, an unregistered origin gets neither, and clearing the array removes the header",
+  },
 ];
 
 interface StepResult {

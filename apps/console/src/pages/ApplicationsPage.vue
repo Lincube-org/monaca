@@ -67,6 +67,7 @@ const clientId = ref("");
 const kind = ref<ClientKind>("public");
 const redirectUrisText = ref("");
 const postLogoutText = ref("");
+const corsOriginsText = ref("");
 const scopesText = ref("");
 const thirdParty = ref(false);
 const customCss = ref("");
@@ -79,6 +80,11 @@ const urisLookValid = computed(
   () =>
     splitLines(redirectUrisText.value).every((uri) => /^https?:\/\/[^\s]+$/.test(uri)) &&
     splitLines(postLogoutText.value).every((uri) => /^https?:\/\/[^\s]+$/.test(uri)),
+);
+
+/** §6.2: an origin is `scheme://host[:port]` — a path, query or wildcard is not an origin. */
+const corsOriginsLookValid = computed(() =>
+  splitLines(corsOriginsText.value).every((origin) => /^https?:\/\/[^\s/?#@]+\/?$/.test(origin)),
 );
 
 /** §6.2: the same 20,000-character ceiling the server enforces. */
@@ -98,7 +104,7 @@ function splitScopes(text: string): string[] {
     .filter((scope) => scope.length > 0);
 }
 
-watch([name, clientId, redirectUrisText, postLogoutText, customCss], () => (formError.value = null));
+watch([name, clientId, redirectUrisText, postLogoutText, corsOriginsText, customCss], () => (formError.value = null));
 
 function openCreate(): void {
   editing.value = null;
@@ -107,6 +113,7 @@ function openCreate(): void {
   kind.value = "public";
   redirectUrisText.value = "";
   postLogoutText.value = "";
+  corsOriginsText.value = "";
   scopesText.value = "openid profile email";
   thirdParty.value = false;
   customCss.value = "";
@@ -121,6 +128,7 @@ function openEdit(client: Client): void {
   kind.value = client.kind;
   redirectUrisText.value = client.redirect_uris.join("\n");
   postLogoutText.value = client.post_logout_redirect_uris.join("\n");
+  corsOriginsText.value = client.cors_allowed_origins.join("\n");
   scopesText.value = client.scopes.join(" ");
   thirdParty.value = client.is_third_party;
   customCss.value = client.custom_css ?? "";
@@ -141,6 +149,10 @@ async function submit(): Promise<void> {
     formError.value = t("applications.invalidUris");
     return;
   }
+  if (!corsOriginsLookValid.value) {
+    formError.value = t("applications.invalidCorsOrigins");
+    return;
+  }
   if (!cssLooksValid.value) {
     formError.value = t("applications.invalidCustomCss");
     return;
@@ -151,6 +163,7 @@ async function submit(): Promise<void> {
     name: name.value.trim(),
     redirect_uris: splitLines(redirectUrisText.value),
     post_logout_redirect_uris: splitLines(postLogoutText.value),
+    cors_allowed_origins: splitLines(corsOriginsText.value),
     scopes: splitScopes(scopesText.value),
   };
 
@@ -460,6 +473,19 @@ function formatDate(at: string): string {
               class="mono-data min-h-[56px] text-[12px]"
             />
             <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('applications.postLogoutUrisHint') }}</p>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <Label for="app-cors-origins">{{ t('applications.corsOriginsField') }}</Label>
+            <Textarea
+              id="app-cors-origins"
+              v-model="corsOriginsText"
+              :invalid="!corsOriginsLookValid"
+              placeholder="https://app.example.com"
+              spellcheck="false"
+              class="mono-data min-h-[56px] text-[12px]"
+            />
+            <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('applications.corsOriginsHint') }}</p>
           </div>
 
           <div class="flex flex-col gap-1.5">

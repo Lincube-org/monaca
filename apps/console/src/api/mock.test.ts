@@ -308,6 +308,56 @@ describe("applications", () => {
     await expect(mockApi.updateClient(created.id, { custom_css: tooLong })).rejects.toThrow(/20000/);
   });
 
+  it("stores canonical CORS origins and refuses a path, wildcard or junk", async () => {
+    const clientId = await freshClientId("cors");
+    const created = await mockApi.createClient({
+      client_id: clientId,
+      name: "Browser app",
+      kind: "public",
+      redirect_uris: ["https://browser.example/cb"],
+      post_logout_redirect_uris: [],
+      scopes: ["openid"],
+      cors_allowed_origins: [
+        " https://App.Example.com:443/ ",
+        "http://localhost:5173",
+        "http://localhost:80",
+      ],
+      is_third_party: false,
+    });
+    expect(created.cors_allowed_origins).toEqual([
+      "https://app.example.com",
+      "http://localhost:5173",
+      "http://localhost",
+    ]);
+
+    for (const bad of [
+      "*",
+      "https://app.example.com/cb",
+      "https://app.example.com?x=1",
+      "https://user@app.example.com",
+      "ftp://app.example.com",
+    ]) {
+      await expect(
+        mockApi.updateClient(created.id, { cors_allowed_origins: [bad] }),
+      ).rejects.toThrow(/origins/);
+    }
+    await expect(
+      mockApi.updateClient(created.id, {
+        cors_allowed_origins: Array.from({ length: 33 }, (_, index) => `https://o${index}.example`),
+      }),
+    ).rejects.toThrow(/32 origins/);
+
+    const replaced = await mockApi.updateClient(created.id, {
+      cors_allowed_origins: ["https://other.example"],
+    });
+    expect(replaced.cors_allowed_origins).toEqual(["https://other.example"]);
+    const listed = (await mockApi.listClients()).items.find((client) => client.id === created.id);
+    expect(listed?.cors_allowed_origins).toEqual(["https://other.example"]);
+
+    const cleared = await mockApi.updateClient(created.id, { cors_allowed_origins: [] });
+    expect(cleared.cors_allowed_origins).toEqual([]);
+  });
+
   it("deletes an application and refuses the second delete", async () => {
     const clientId = await freshClientId("delete");
     const created = await mockApi.createClient({

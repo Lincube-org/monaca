@@ -37,7 +37,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(account_routes())
         .merge(management_routes())
         .merge(internal_routes())
-        .with_state(state)
+        .with_state(state.clone())
+        // Only the protocol paths it recognizes are touched; see `cors` for the tenant gate.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::cors::tenant_cors,
+        ))
 }
 
 /// The generated OpenAPI document.

@@ -180,6 +180,11 @@ export const messages = {
     redirectUrisHint: "One absolute http(s) URL per line. Authorization codes are bound to these.",
     postLogoutUrisField: "Post-logout redirect URIs",
     postLogoutUrisHint: "One per line. Where RP-initiated logout may return the user. Optional.",
+    corsOriginsField: "CORS allowed origins",
+    corsOriginsHint:
+      "One origin per line, such as https://app.example.com. Browsers on these origins may read the tenant's protocol responses. No paths or wildcards. Optional.",
+    invalidCorsOrigins:
+      "Every CORS origin must look like https://app.example.com — no path, query, fragment or wildcard.",
     scopesField: "Scopes",
     scopesHint: "Space- or comma-separated, such as openid profile tools:read. Optional.",
     customCssField: "Custom CSS",
