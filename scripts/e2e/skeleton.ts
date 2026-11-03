@@ -7898,7 +7898,7 @@ async function registrationPolicyFlow(
     expected.every((item, index) => value[index] === item);
 
   const begin = async (tag: string): Promise<{ interaction: string; verifier: string } | undefined> => {
-    const verifier = `r-${runId}-${tag}-${"z".repeat(24)}`;
+    const verifier = `r-${runId}-${tag}-${"z".repeat(32)}`;
     const challenge = base64Url(
       new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
     );
@@ -8620,12 +8620,12 @@ async function emailTemplatesFlow(
     checks.push(["a second reset is still 204", secondReset.status === 204]);
 
     const updatedAudit = await call(
-      `${base}/v1/orgs/${ORG}/audit?action=email_template.updated&limit=20`,
-      { headers },
+      `${base}/internal/audit?tenant=${TENANT}&action=email_template.updated&limit=20`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
     );
     const resetAudit = await call(
-      `${base}/v1/orgs/${ORG}/audit?action=email_template.reset&limit=20`,
-      { headers },
+      `${base}/internal/audit?tenant=${TENANT}&action=email_template.reset&limit=20`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
     );
     const updatedEvents =
       (
