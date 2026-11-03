@@ -297,6 +297,7 @@ pub async fn authorize(
                     // this interaction's authentication, and let the page render its consent step.
                     let interaction =
                         build_interaction(&state, &tenant, &client, &request, &org, true);
+                    state.put_interaction(interaction.clone()).await;
                     state
                         .mark_interaction_signed_in(
                             &interaction.interaction_id.to_string(),
@@ -344,7 +345,8 @@ pub async fn authorize(
         ));
     }
 
-    let interaction = build_interaction(&state, &tenant, &client, &request, &org, false);
+    let consent_required = request.requires_consent(client.is_third_party);
+    let interaction = build_interaction(&state, &tenant, &client, &request, &org, consent_required);
     let location = sign_in_location(&state, &tenant, &interaction);
     state.put_interaction(interaction).await;
     Ok(found(&location))
