@@ -768,11 +768,23 @@ function changeEmail(): void {
   void nextTick(() => emailInput.value?.$el?.focus?.());
 }
 
+/** Re-read the interaction after authentication; the scope list now reflects the account. */
+async function refreshInteraction(): Promise<void> {
+  if (!tenantFromUrl.value || !interactionId.value) return;
+  try {
+    details.value = await getInteraction(tenantFromUrl.value, interactionId.value);
+  } catch {
+    // The consent screen can still render the list it already has.
+  }
+}
+
 /** A code was accepted: the flow is done, or it pauses for consent or the second factor. */
-function handleResult(result: SignInResult): void {
+async function handleResult(result: SignInResult): Promise<void> {
   if ("consent_required" in result) {
-    // The code is withheld until the scopes are approved; the second factor is already satisfied.
+    // The page loaded before an account was known, so `consent_scopes` was the whole request.
+    // Re-read it now that the server can subtract the account's remembered approval.
     mfaRequired.value = false;
+    await refreshInteraction();
     consentRequired.value = true;
     return;
   }
@@ -829,7 +841,7 @@ async function submitEnrollment(): Promise<void> {
 
   enrollmentSubmitting.value = true;
   try {
-    handleResult(
+    await handleResult(
       await verifyMfaEnrollment(tenantFromUrl.value, interactionId.value, submitted),
     );
   } catch (error) {
@@ -874,7 +886,7 @@ async function verifySecondFactor(): Promise<void> {
 
   mfaSubmitting.value = true;
   try {
-    handleResult(
+    await handleResult(
       await verifyMfa(
         tenantFromUrl.value,
         interactionId.value,
@@ -923,7 +935,9 @@ async function signInWithPasskey(): Promise<void> {
   try {
     const options = await getPasskeySignInOptions(tenantFromUrl.value, interactionId.value);
     const credential = await getPasskeyAssertion(options);
-    handleResult(await verifyPasskeySignIn(tenantFromUrl.value, interactionId.value, credential));
+    await handleResult(
+      await verifyPasskeySignIn(tenantFromUrl.value, interactionId.value, credential),
+    );
   } catch (error) {
     if (error instanceof PasskeyError) passkeyError.value = error;
     else if (error instanceof InteractionError) submitError.value = error;
@@ -943,7 +957,9 @@ async function verifyWithMfaPasskey(): Promise<void> {
   try {
     const options = await getMfaPasskeyOptions(tenantFromUrl.value, interactionId.value);
     const credential = await getPasskeyAssertion(options);
-    handleResult(await verifyMfaPasskey(tenantFromUrl.value, interactionId.value, credential));
+    await handleResult(
+      await verifyMfaPasskey(tenantFromUrl.value, interactionId.value, credential),
+    );
   } catch (error) {
     if (error instanceof PasskeyError || error instanceof InteractionError) {
       mfaPasskeyError.value = error;
@@ -977,7 +993,7 @@ async function signIn(): Promise<void> {
       password: password.value,
       captcha_token: captchaToken.value ?? undefined,
     });
-    handleResult(result);
+    await handleResult(result);
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
     // Clear the password but keep the email: the user is about to try again.
@@ -1057,7 +1073,7 @@ async function requestCode(): Promise<void> {
           : { email: address, captcha_token: captchaToken.value ?? undefined },
       );
       if (!("verification_required" in result)) {
-        handleResult(result);
+        await handleResult(result);
         return;
       }
     } else if (mode.value === "code") {
@@ -1180,7 +1196,7 @@ async function verifyCode(): Promise<void> {
         password: newPassword.value,
       });
     }
-    handleResult(result);
+    await handleResult(result);
   } catch (error) {
     submitError.value = error instanceof InteractionError ? error : null;
     if (!(error instanceof InteractionError)) {

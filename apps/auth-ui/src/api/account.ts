@@ -57,6 +57,8 @@ export interface AuthorizedApp {
   scopes: string[];
   /** False for a one-shot approval; true when it covers future requests. */
   remember?: boolean;
+  /** Every approval the account holds for this client: `remember`, `one_shot`, or both. */
+  kinds?: string[];
   granted_at: string;
   updated_at: string;
 }
