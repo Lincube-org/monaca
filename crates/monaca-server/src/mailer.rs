@@ -1,0 +1,232 @@
+//! Outbound mail delivery through the tenant's HTTP connector — docs/contracts/m0.md §6.3.
+//!
+//! The outbox is the queue and `tenant.email_connector` is the route. This loop claims unpublished
+//! `mail.verification` rows, posts the rendered copy to the tenant's endpoint, and marks a row
+//! published only after a 2xx. A tenant with no connector keeps its rows untouched, so `/internal/mail`
+//! and the acceptance walk-through still read exactly what the server would have mailed.
+//!
+//! Templates are not this module's business: `email_templates` already rendered subject and body
+//! into the payload. Delivery is also not a mail transfer agent — a provider owns queuing, SPF and
+//! bounces; the server only owns the HTTP call and the attempt counter.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use monaca_crypto::{KeyProvider, open};
+use monaca_store::{EmailConnectorRow, OutboxMailRow, TenantRow};
+use serde_json::{Value, json};
+use tokio::time::MissedTickBehavior;
+use uuid::Uuid;
+
+use crate::state::AppState;
+
+/// How often a worker looks for new mail.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Rows claimed per tenant per tick. Bounded so one backlog cannot starve other tenants.
+const BATCH: i64 = 20;
+
+/// Attempts before a row is abandoned. The payload stays in the outbox for inspection.
+const MAX_ATTEMPTS: i32 = 5;
+
+/// Start the single delivery loop for this process.
+///
+/// One worker is deliberate: the server is one process in M0, and `SKIP LOCKED` keeps a second
+/// process from claiming the same row if that changes. The task ends with the runtime, so a
+/// graceful shutdown does not leave a detached sender behind.
+pub fn spawn(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(POLL_INTERVAL);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            deliver_pending(&state).await;
+        }
+    });
+}
+
+/// One pass over every active tenant.
+async fn deliver_pending(state: &Arc<AppState>) {
+    let tenants = match state.store.active_tenants().await {
+        Ok(tenants) => tenants,
+        Err(err) => {
+            tracing::warn!(%err, "mailer could not list tenants");
+            return;
+        }
+    };
+
+    for tenant in tenants {
+        if let Err(err) = deliver_tenant(state, &tenant).await {
+            tracing::warn!(%err, tenant = %tenant.slug, "mailer skipped a tenant");
+        }
+    }
+}
+
+/// Deliver the tenant's claimable rows, one request at a time.
+async fn deliver_tenant(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+) -> Result<(), monaca_store::StoreError> {
+    let Some(connector) = state.store.email_connector(tenant).await? else {
+        return Ok(());
+    };
+    if !connector.enabled {
+        return Ok(());
+    }
+    let secret = match open_secret(state, tenant, &connector) {
+        Ok(secret) => secret,
+        Err(err) => {
+            tracing::warn!(%err, tenant = %tenant.slug, "mailer cannot open the connector secret");
+            return Ok(());
+        }
+    };
+
+    let rows = state
+        .store
+        .outbox_claim_mail(tenant, BATCH, MAX_ATTEMPTS)
+        .await?;
+    for row in rows {
+        match deliver_one(state, tenant, &connector, secret.as_deref(), &row).await {
+            Ok(status) => match state.store.outbox_mark_published(tenant, row.id).await {
+                Ok(()) => tracing::info!(
+                    tenant = %tenant.slug,
+                    outbox_id = %row.id,
+                    attempts = row.attempts,
+                    %status,
+                    "mail delivered"
+                ),
+                Err(err) => {
+                    // The provider already accepted it. Leaving the row unpublished can duplicate
+                    // the mail on the next tick; the payload carries its id so a receiver can drop it.
+                    tracing::warn!(
+                        %err,
+                        tenant = %tenant.slug,
+                        outbox_id = %row.id,
+                        "mail delivered but the outbox row could not be marked published"
+                    );
+                }
+            },
+            Err(err) => tracing::warn!(
+                tenant = %tenant.slug,
+                outbox_id = %row.id,
+                attempts = row.attempts,
+                max_attempts = MAX_ATTEMPTS,
+                "mail delivery failed: {err}"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// The connector's bearer token, when one is stored.
+fn open_secret(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    connector: &EmailConnectorRow,
+) -> Result<Option<String>, String> {
+    let Some(sealed) = connector.secret_enc.as_deref() else {
+        return Ok(None);
+    };
+    let dek = state
+        .keys
+        .tenant_dek(&tenant.tenant_id())
+        .ok_or_else(|| "tenant DEK missing".to_owned())?;
+    let opened = open(&dek, sealed).map_err(|err| err.to_string())?;
+    let secret = String::from_utf8(opened).map_err(|_| "the stored secret is not UTF-8".to_owned())?;
+    Ok(Some(secret))
+}
+
+/// Post one row; a 2xx is success, anything else is a retryable failure.
+async fn deliver_one(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    connector: &EmailConnectorRow,
+    secret: Option<&str>,
+    row: &OutboxMailRow,
+) -> Result<reqwest::StatusCode, String> {
+    let body = mail_body(tenant, connector, row.id, &row.payload);
+    let mut request = state.http.post(&connector.endpoint).json(&body);
+    if let Some(secret) = secret {
+        request = request.bearer_auth(secret);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("request failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("provider answered {status}"));
+    }
+    Ok(status)
+}
+
+/// The JSON body a provider receives. `text` is the already-rendered plain-text copy; `id` is the
+/// outbox row so a retry after a lost 2xx can be de-duplicated by the receiver.
+fn mail_body(
+    tenant: &TenantRow,
+    connector: &EmailConnectorRow,
+    id: Uuid,
+    payload: &Value,
+) -> Value {
+    json!({
+        "id": id.to_string(),
+        "tenant": tenant.slug,
+        "purpose": payload.get("purpose"),
+        "to": payload.get("to"),
+        "subject": payload.get("subject"),
+        "text": payload.get("body"),
+        "from": connector.from_address,
+        "from_name": connector.from_name,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monaca_store::{EmailConnectorRow, TenantRow};
+    use time::OffsetDateTime;
+
+    fn tenant() -> TenantRow {
+        TenantRow {
+            id: Uuid::now_v7(),
+            slug: "demo".into(),
+            short: "demo".into(),
+            db_name: "mt_demo".into(),
+            issuer: "https://sso.example/t/demo".into(),
+            state: "active".into(),
+        }
+    }
+
+    fn connector() -> EmailConnectorRow {
+        EmailConnectorRow {
+            provider: "http".into(),
+            endpoint: "https://mail.example/send".into(),
+            from_address: "no-reply@example.com".into(),
+            from_name: Some("Demo".into()),
+            secret_enc: None,
+            enabled: true,
+            updated_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn the_provider_body_carries_the_rendered_copy_and_route() {
+        let id = Uuid::now_v7();
+        let payload = json!({
+            "to": "person@example.com",
+            "purpose": "sign_up",
+            "subject": "Your demo code",
+            "body": "Enter 123456.",
+        });
+        let body = mail_body(&tenant(), &connector(), id, &payload);
+        assert_eq!(body["id"], id.to_string());
+        assert_eq!(body["tenant"], "demo");
+        assert_eq!(body["purpose"], "sign_up");
+        assert_eq!(body["to"], "person@example.com");
+        assert_eq!(body["subject"], "Your demo code");
+        assert_eq!(body["text"], "Enter 123456.");
+        assert_eq!(body["from"], "no-reply@example.com");
+        assert_eq!(body["from_name"], "Demo");
+    }
+
+}

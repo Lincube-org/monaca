@@ -234,6 +234,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "tenant language and custom sign-in copy (M1)",
         include_str!("../migrations/tenant_39.sql"),
     ),
+    (
+        40,
+        "HTTP email connector and outbox delivery (M1)",
+        include_str!("../migrations/tenant_40.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

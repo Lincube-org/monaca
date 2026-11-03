@@ -15,9 +15,11 @@ mod clients;
 mod config;
 mod copy;
 mod cors;
+mod email_connector;
 mod email_templates;
 mod error;
 mod internal;
+mod mailer;
 mod management;
 mod oauth;
 mod openapi;
@@ -80,6 +82,7 @@ async fn build_state() -> anyhow::Result<Arc<AppState>> {
 async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
     let addr = resolve_addr(args.addr.as_deref())?;
     let state = build_state().await?;
+    mailer::spawn(Arc::clone(&state));
     let app = routes::router(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

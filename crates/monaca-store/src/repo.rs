@@ -486,6 +486,36 @@ pub struct EmailTemplateRow {
     pub updated_at: OffsetDateTime,
 }
 
+/// The tenant's outbound mail route in `tenant.email_connector` (§6.3).
+#[derive(Debug, Clone, FromRow)]
+pub struct EmailConnectorRow {
+    /// The delivery mechanism. `http` is the only provider; SMTP is a later increment.
+    pub provider: String,
+    /// The absolute http(s) endpoint each mail is posted to.
+    pub endpoint: String,
+    /// The envelope sender, e.g. `no-reply@example.com`.
+    pub from_address: String,
+    /// An optional display name for the sender.
+    pub from_name: Option<String>,
+    /// The bearer token, sealed by the caller — the store never sees plaintext.
+    pub secret_enc: Option<Vec<u8>>,
+    /// Whether delivery is attempted at all.
+    pub enabled: bool,
+    /// When the route last changed.
+    pub updated_at: OffsetDateTime,
+}
+
+/// One claimable outbox mail row (§6.3).
+#[derive(Debug, Clone, FromRow)]
+pub struct OutboxMailRow {
+    /// `outbox.id`, also sent to the provider so a retry can be de-duplicated.
+    pub id: Uuid,
+    /// The rendered mail payload.
+    pub payload: Value,
+    /// How many delivery attempts this row has now seen, including this claim.
+    pub attempts: i32,
+}
+
 /// A client in `tenant.clients`.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClientRow {
@@ -1389,6 +1419,72 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let result = sqlx::query("DELETE FROM tenant.email_templates WHERE purpose = $1")
             .bind(purpose)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ------------------------------------------------------------ email connector
+
+    /// The tenant's outbound mail route, or `None` while nothing is configured.
+    pub async fn email_connector(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Option<EmailConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, EmailConnectorRow>(
+            "SELECT provider, endpoint, from_address, from_name, secret_enc, enabled, updated_at
+             FROM tenant.email_connector WHERE singleton",
+        )
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Create or replace the route. When `set_secret` is false the stored secret is preserved, so
+    /// an endpoint change cannot silently drop authentication; `enabled=None` also preserves it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_email_connector(
+        &self,
+        tenant: &TenantRow,
+        provider: &str,
+        endpoint: &str,
+        from_address: &str,
+        from_name: Option<&str>,
+        secret_enc: Option<&[u8]>,
+        set_secret: bool,
+        enabled: Option<bool>,
+    ) -> Result<EmailConnectorRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, EmailConnectorRow>(
+            "INSERT INTO tenant.email_connector
+               (singleton, provider, endpoint, from_address, from_name, secret_enc, enabled)
+             VALUES (true, $1, $2, $3, $4, $5, COALESCE($6, true))
+             ON CONFLICT (singleton) DO UPDATE
+             SET provider = EXCLUDED.provider,
+                 endpoint = EXCLUDED.endpoint,
+                 from_address = EXCLUDED.from_address,
+                 from_name = EXCLUDED.from_name,
+                 secret_enc = CASE WHEN $7 THEN EXCLUDED.secret_enc
+                                   ELSE tenant.email_connector.secret_enc END,
+                 enabled = COALESCE($6, tenant.email_connector.enabled),
+                 updated_at = now()
+             RETURNING provider, endpoint, from_address, from_name, secret_enc, enabled, updated_at",
+        )
+        .bind(provider)
+        .bind(endpoint)
+        .bind(from_address)
+        .bind(from_name)
+        .bind(secret_enc.map(<[u8]>::to_vec))
+        .bind(enabled)
+        .bind(set_secret)
+        .fetch_one(&pool)
+        .await?)
+    }
+
+    /// Remove the route; `false` when there was none. Mail stays in the outbox either way.
+    pub async fn delete_email_connector(&self, tenant: &TenantRow) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.email_connector WHERE singleton")
             .execute(&pool)
             .await?;
         Ok(result.rows_affected() > 0)
@@ -4932,6 +5028,57 @@ impl Store {
             .bind(payload)
             .execute(&mut *conn)
             .await?;
+        Ok(())
+    }
+
+    /// Claim up to `limit` unpublished mail rows for delivery, counting this attempt.
+    ///
+    /// `SKIP LOCKED` keeps two server processes from sending the same row at once; a row that
+    /// reaches `max_attempts` is excluded from later claims, which is how a permanently failing
+    /// endpoint stops costing requests while the row stays visible to `/internal/mail`.
+    pub async fn outbox_claim_mail(
+        &self,
+        tenant: &TenantRow,
+        limit: i64,
+        max_attempts: i32,
+    ) -> Result<Vec<OutboxMailRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, OutboxMailRow>(
+            "WITH claimed AS (
+               SELECT id FROM tenant.outbox
+               WHERE topic = 'mail.verification'
+                 AND published_at IS NULL
+                 AND attempts < $2
+               ORDER BY created_at
+               LIMIT $1
+               FOR UPDATE SKIP LOCKED
+             )
+             UPDATE tenant.outbox AS o
+             SET attempts = o.attempts + 1
+             FROM claimed
+             WHERE o.id = claimed.id
+             RETURNING o.id, o.payload, o.attempts",
+        )
+        .bind(limit)
+        .bind(max_attempts)
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Mark a claimed row published once the provider answered 2xx.
+    pub async fn outbox_mark_published(
+        &self,
+        tenant: &TenantRow,
+        id: Uuid,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "UPDATE tenant.outbox SET published_at = now()
+             WHERE id = $1 AND published_at IS NULL",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await?;
         Ok(())
     }
 }

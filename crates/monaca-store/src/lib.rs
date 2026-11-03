@@ -34,8 +34,9 @@ pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
-    BrandingRow, ClientRow, ConsentRow, EmailTemplateRow, GrantRow, LoginFailureRow,
-    OrgInvitationRow, OrgRoleRow, ParRow, PasskeyRow, RefreshRow, RoleRow, SessionRow,
+    BrandingRow, ClientRow, ConsentRow, EmailConnectorRow, EmailTemplateRow, GrantRow,
+    LoginFailureRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow, RefreshRow,
+    RoleRow, SessionRow,
     SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow, SocialConnectorRow,
     SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow,
     VerificationRow, WebhookDeliveryRow, WebhookRow,
@@ -408,6 +409,16 @@ impl Store {
     pub async fn tenants(&self) -> Result<Vec<TenantRow>, StoreError> {
         Ok(sqlx::query_as::<_, TenantRow>(
             "SELECT id, slug, short, db_name, issuer, state FROM tenants ORDER BY slug",
+        )
+        .fetch_all(&self.control)
+        .await?)
+    }
+
+    /// Every tenant that may serve traffic, ordered by slug — the mailer's work list.
+    pub async fn active_tenants(&self) -> Result<Vec<TenantRow>, StoreError> {
+        Ok(sqlx::query_as::<_, TenantRow>(
+            "SELECT id, slug, short, db_name, issuer, state
+             FROM tenants WHERE state = 'active' ORDER BY slug",
         )
         .fetch_all(&self.control)
         .await?)

@@ -529,6 +529,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "unconfigured ?lang=fr falls back to the default, and the hosted page renders the overridden phrase with " +
       "lang=de on the document",
   },
+  {
+    step: "55",
+    title: "email delivery connector",
+    assertion:
+      "GET /v1/email-connector is configured:false before any route; PATCH stores an http endpoint, sender and " +
+      "sealed secret, returns secret_set without echoing the secret, and rejects smtp, non-http endpoints, " +
+      "embedded credentials and a malformed sender with 400; a real sign-up then arrives at a local mock " +
+      "provider as one JSON message carrying the rendered copy, outbox id and bearer token; an empty secret " +
+      "clears it, DELETE is 204 and the route reads unconfigured, and email_connector.updated/deleted are on " +
+      "the tenant audit chain without the secret",
+  },
 ];
 
 interface StepResult {
@@ -8661,6 +8672,251 @@ async function emailTemplatesFlow(
 }
 
 /**
+ * Step 55: an HTTP mail connector delivers rendered outbox mail to the tenant's endpoint.
+ *
+ * The receiver is a local `Bun.serve` with a random port, so the assertion is about what a provider
+ * actually receives — JSON body, bearer token — rather than an internal function. A tenant with no
+ * connector still keeps its mail only in the outbox; configuring one does not move templates, it
+ * only moves transport.
+ */
+async function emailConnectorFlow(
+  base: string,
+  adminToken: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const secret = `mail-secret-${runId}`;
+  const fromAddress = "no-reply@demo.localhost";
+  const fromName = "Monaca Demo";
+  const email = `mail-connector-${runId}@demo.localhost`;
+  const received: { authorization: string | null; body: Record<string, unknown> }[] = [];
+
+  const receiver = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (request.method !== "POST" || url.pathname !== "/mail") {
+        return new Response("not found", { status: 404 });
+      }
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await request.json()) as Record<string, unknown>;
+      } catch {
+        // A non-JSON request is still recorded, so the failing assertion shows what arrived.
+      }
+      received.push({ authorization: request.headers.get("authorization"), body });
+      return new Response("ok");
+    },
+  });
+  const endpoint = `http://127.0.0.1:${receiver.port}/mail`;
+
+  try {
+    const before = await call(`${base}/v1/email-connector`, { headers });
+    checks.push([
+      "an unconfigured tenant reads configured:false",
+      before.status === 200 && (before.body as { configured?: unknown })?.configured === false,
+    ]);
+
+    const configured = await call(`${base}/v1/email-connector`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        provider: "http",
+        endpoint,
+        from_address: fromAddress,
+        from_name: fromName,
+        secret,
+        enabled: true,
+      }),
+    });
+    const configuredJson = configured.body as Record<string, unknown> | undefined;
+    checks.push([
+      "PATCH stores the route, reports secret_set and never echoes the secret",
+      configured.status === 200 &&
+        configuredJson?.configured === true &&
+        configuredJson?.provider === "http" &&
+        configuredJson?.endpoint === endpoint &&
+        configuredJson?.from_address === fromAddress &&
+        configuredJson?.from_name === fromName &&
+        configuredJson?.secret_set === true &&
+        !Object.hasOwn(configuredJson ?? {}, "secret") &&
+        !JSON.stringify(configuredJson).includes(secret),
+    ]);
+
+    const [smtp, ftp, userinfo, badFrom] = await Promise.all([
+      call(`${base}/v1/email-connector`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ provider: "smtp", endpoint, from_address: fromAddress }),
+      }),
+      call(`${base}/v1/email-connector`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ provider: "http", endpoint: "ftp://mail.example/send", from_address: fromAddress }),
+      }),
+      call(`${base}/v1/email-connector`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ provider: "http", endpoint: "https://user:pass@mail.example/send", from_address: fromAddress }),
+      }),
+      call(`${base}/v1/email-connector`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ provider: "http", endpoint, from_address: "not-an-address" }),
+      }),
+    ]);
+    checks.push([
+      "smtp, a non-http endpoint, embedded credentials and a malformed sender are 400",
+      smtp.status === 400 && ftp.status === 400 && userinfo.status === 400 && badFrom.status === 400,
+    ]);
+
+    // A real sign-up asks the server to queue mail; the connector is the only reason it leaves.
+    const verifier = `ec-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: "http://localhost:5173/bff/callback",
+        scope: "openid profile email",
+        state: `st-mail-connector-${runId}`,
+        nonce: `n-mail-connector-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(authorize.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    const requested =
+      interaction === null
+        ? undefined
+        : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-up`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ email }),
+          });
+    checks.push([
+      "a sign-up interaction queues a verification code",
+      authorize.status === 302 &&
+        typeof interaction === "string" &&
+        requested?.status === 200 &&
+        (requested.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    const deadline = performance.now() + 20_000;
+    while (
+      received.filter((entry) => entry.body.to === email).length === 0 &&
+      performance.now() < deadline
+    ) {
+      await Bun.sleep(250);
+    }
+    const delivered = received.filter((entry) => entry.body.to === email);
+
+    const mail = await call(
+      `${base}/internal/mail?${new URLSearchParams({ tenant: TENANT, to: email, purpose: "sign_up" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const code = (mail.body as { payload?: { code?: unknown } } | undefined)?.payload?.code;
+    const first = delivered[0];
+    const firstBody = first?.body as
+      | { id?: unknown; tenant?: unknown; purpose?: unknown; subject?: unknown; text?: unknown; from?: unknown; from_name?: unknown }
+      | undefined;
+    checks.push([
+      "the provider receives one JSON message with the rendered copy and bearer token",
+      delivered.length === 1 &&
+        first?.authorization === `Bearer ${secret}` &&
+        typeof firstBody?.id === "string" &&
+        firstBody?.tenant === TENANT &&
+        firstBody?.purpose === "sign_up" &&
+        typeof firstBody?.subject === "string" &&
+        typeof firstBody?.text === "string" &&
+        typeof code === "string" &&
+        firstBody.text.includes(code) &&
+        firstBody?.from === fromAddress &&
+        firstBody?.from_name === fromName,
+    ]);
+
+    const updatedAudit = await call(
+      `${base}/internal/audit?tenant=${TENANT}&action=email_connector.updated&limit=20`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const updatedEvents =
+      (
+        updatedAudit.body as
+          | { items?: { payload?: { endpoint?: unknown; secret_set?: unknown } }[] }
+          | undefined
+      )?.items ?? [];
+    checks.push([
+      "the write is on the tenant audit chain without the secret",
+      updatedAudit.status === 200 &&
+        updatedEvents[0]?.payload?.endpoint === endpoint &&
+        updatedEvents[0]?.payload?.secret_set === true,
+    ]);
+
+    const cleared = await call(`${base}/v1/email-connector`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        provider: "http",
+        endpoint,
+        from_address: fromAddress,
+        from_name: fromName,
+        secret: "",
+      }),
+    });
+    checks.push([
+      "an empty secret clears it",
+      cleared.status === 200 && (cleared.body as { secret_set?: unknown })?.secret_set === false,
+    ]);
+
+    const removed = await call(`${base}/v1/email-connector`, { method: "DELETE", headers });
+    const after = await call(`${base}/v1/email-connector`, { headers });
+    checks.push([
+      "DELETE is 204 and the route reads unconfigured",
+      removed.status === 204 && (after.body as { configured?: unknown })?.configured === false,
+    ]);
+
+    const deletedAudit = await call(
+      `${base}/internal/audit?tenant=${TENANT}&action=email_connector.deleted&limit=20`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    checks.push([
+      "the delete is on the tenant audit chain",
+      deletedAudit.status === 200 &&
+        ((deletedAudit.body as { items?: unknown[] } | undefined)?.items?.length ?? 0) > 0,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await call(`${base}/v1/email-connector`, { method: "DELETE", headers });
+    receiver.stop(true);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "55",
+    title: "email delivery connector",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: unconfigured → route + secret_set → refusals → provider JSON + bearer → clear → delete → audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
  * Step 37: an administrator can edit an account's profile, and the edit is audited.
  *
  * The username is a sign-in identifier, so its uniqueness and grammar are the same rules the
@@ -10780,6 +11036,7 @@ async function main(): Promise<number> {
   push(await registrationPolicyFlow(base, adminToken, parsed.consoleSecret));
   push(await consentFlow(base, adminToken));
   push(await emailTemplatesFlow(base, adminToken, parsed.internalSecret));
+  push(await emailConnectorFlow(base, adminToken, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

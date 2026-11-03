@@ -442,6 +442,12 @@ pub fn management_routes() -> Router<Arc<AppState>> {
                 .delete(crate::email_templates::reset_email_template),
         )
         .route(
+            "/v1/email-connector",
+            get(crate::email_connector::get_email_connector)
+                .patch(crate::email_connector::update_email_connector)
+                .delete(crate::email_connector::delete_email_connector),
+        )
+        .route(
             "/v1/resources",
             get(crate::resources::list_resources).post(crate::resources::create_resource),
         )
