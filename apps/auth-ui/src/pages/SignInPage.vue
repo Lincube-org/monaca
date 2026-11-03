@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Alert, AlertDescription, AlertTitle, Badge, Button, Input, Label, ScopeBadge, Skeleton } from "@monaca/ui";
+import { Alert, AlertDescription, AlertTitle, Badge, Button, Checkbox, Input, Label, ScopeBadge, Skeleton } from "@monaca/ui";
 import {
   AlertCircle,
   ArrowLeft,
@@ -89,6 +89,7 @@ const submitError = ref<InteractionError | null>(null);
 
 /** Set once sign-in succeeds for a flow that still needs approval. */
 const consentRequired = ref(false);
+const consentRemember = ref(true);
 const consentSubmitting = ref(false);
 const consentError = ref<Error | null>(null);
 
@@ -307,7 +308,11 @@ const brandLinks = computed<{ href: string; label: MessageKey; external: boolean
   return links;
 });
 const organization = computed(() => details.value?.organization ?? null);
-const scopes = computed(() => details.value?.scopes ?? []);
+const scopes = computed(() =>
+  consentRequired.value
+    ? (details.value?.consent_scopes ?? details.value?.scopes ?? [])
+    : (details.value?.scopes ?? []),
+);
 
 /** True while the page collects a code rather than an address. */
 const awaitingCode = computed(() => mode.value !== "password" && stage.value === "verify");
@@ -1197,7 +1202,12 @@ async function decideConsent(decision: "allow" | "deny"): Promise<void> {
   consentError.value = null;
   consentSubmitting.value = true;
   try {
-    const { redirect_to } = await submitConsent(tenantFromUrl.value, interactionId.value, decision);
+    const { redirect_to } = await submitConsent(
+      tenantFromUrl.value,
+      interactionId.value,
+      decision,
+      consentRemember.value,
+    );
     navigateTo(redirect_to);
   } catch (error) {
     consentError.value = error instanceof Error ? error : new Error(String(error));
@@ -1316,6 +1326,20 @@ async function cancel(): Promise<void> {
           <!-- Consent: signed in, but the code is withheld until the scopes are approved. -->
           <div v-if="consentRequired" class="flex flex-col gap-2">
             <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("consent.note") }}</p>
+            <label class="flex items-start gap-2.5">
+              <Checkbox
+                id="consent-remember"
+                :model-value="consentRemember"
+                :disabled="consentSubmitting"
+                @update:model-value="(value: boolean | 'indeterminate') => (consentRemember = value === true)"
+              />
+              <span class="min-w-0 -mt-0.5">
+                <Label for="consent-remember">{{ t("consent.remember") }}</Label>
+                <span class="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+                  {{ t("consent.rememberHint") }}
+                </span>
+              </span>
+            </label>
             <Button
               type="button"
               variant="primary"

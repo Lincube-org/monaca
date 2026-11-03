@@ -114,6 +114,7 @@ export const M0_ACTIONS = [
   "session.revoked",
   "session.revoked_all",
   "consent.revoked",
+  "consent.granted",
   "sign_in_experience.updated",
   "sign_in_copy.updated",
   "email_template.updated",

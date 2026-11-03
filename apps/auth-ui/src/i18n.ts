@@ -49,6 +49,9 @@ export const messages = {
     title: "Approve access",
     request: "{client} is asking to access your account",
     note: "You are signed in. Review what this application will be allowed to do.",
+    remember: "Remember this decision",
+    rememberHint:
+      "When on, this application skips this screen next time it asks for the same scopes. Turn it off to approve just this request.",
     allow: "Allow access",
     allowSubmitting: "Approving",
     deny: "Deny",

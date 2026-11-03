@@ -39,6 +39,8 @@ export interface InteractionDetails {
   login_hint: string | null;
   /** Whether the flow must show the consent screen before a code is issued. */
   consent_required: boolean;
+  /** The scopes this screen adds beyond a remembered approval; absent for a first approval. */
+  consent_scopes?: string[];
   /** Whether a cross-application session already authenticated this interaction. */
   signed_in: boolean;
   /** Whether the primary factor passed and the account still owes an authenticator code. */
@@ -521,10 +523,11 @@ export function submitConsent(
   tenant: string,
   iid: string,
   decision: "allow" | "deny",
+  remember = true,
 ): Promise<{ redirect_to: string }> {
   return call<{ redirect_to: string }>(`${base(tenant, iid)}/consent`, {
     method: "POST",
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify({ decision, remember }),
   });
 }
 
