@@ -114,7 +114,7 @@ export interface SignInExperience {
   /** The tenant's CAPTCHA provider and which entrances demand a token. */
   captcha: {
     enabled: boolean;
-    provider: "turnstile" | "recaptcha";
+    provider: "turnstile" | "recaptcha" | "hcaptcha";
     site_key: string | null;
     on_sign_in: boolean;
     on_sign_up: boolean;

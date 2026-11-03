@@ -1411,9 +1411,10 @@ class MockStore {
       if (
         captcha.provider !== undefined &&
         captcha.provider !== "turnstile" &&
-        captcha.provider !== "recaptcha"
+        captcha.provider !== "recaptcha" &&
+        captcha.provider !== "hcaptcha"
       ) {
-        throw new ApiError("captcha.provider must be turnstile or recaptcha", {
+        throw new ApiError("captcha.provider must be turnstile, recaptcha or hcaptcha", {
           status: 400,
           code: "MONACA_INVALID_REQUEST",
         });

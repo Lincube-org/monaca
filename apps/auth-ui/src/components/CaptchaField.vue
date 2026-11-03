@@ -9,7 +9,7 @@
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
 const props = defineProps<{
-  provider: "turnstile" | "recaptcha";
+  provider: "turnstile" | "recaptcha" | "hcaptcha";
   siteKey: string;
 }>();
 
@@ -25,14 +25,21 @@ interface Recaptcha {
   reset: (id: number) => void;
 }
 
+interface Hcaptcha {
+  render: (element: HTMLElement, options: Record<string, unknown>) => string;
+  reset: (id: string) => void;
+}
+
 interface CaptchaWindow {
   turnstile?: Turnstile;
   grecaptcha?: Recaptcha;
+  hcaptcha?: Hcaptcha;
 }
 
-const SCRIPT_SOURCES: Record<"turnstile" | "recaptcha", string> = {
+const SCRIPT_SOURCES: Record<"turnstile" | "recaptcha" | "hcaptcha", string> = {
   turnstile: "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit",
   recaptcha: "https://www.google.com/recaptcha/api.js?render=explicit",
+  hcaptcha: "https://js.hcaptcha.com/1/api.js?render=explicit",
 };
 
 const container = ref<HTMLDivElement | null>(null);
@@ -89,6 +96,8 @@ onMounted(async () => {
       widgetId = api.turnstile.render(container.value, options);
     } else if (props.provider === "recaptcha" && api.grecaptcha) {
       widgetId = api.grecaptcha.render(container.value, options);
+    } else if (props.provider === "hcaptcha" && api.hcaptcha) {
+      widgetId = api.hcaptcha.render(container.value, options);
     } else {
       emit("update:token", null);
     }
@@ -106,6 +115,8 @@ function reset(): void {
   if (widgetId === null) return;
   if (props.provider === "turnstile") {
     installed().turnstile?.reset(String(widgetId));
+  } else if (props.provider === "hcaptcha") {
+    installed().hcaptcha?.reset(String(widgetId));
   } else {
     installed().grecaptcha?.reset(Number(widgetId));
   }

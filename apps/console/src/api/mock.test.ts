@@ -1653,7 +1653,7 @@ describe("sign-in experience", () => {
     for (const captcha of [
       { site_key: "k".repeat(201) },
       { secret: "s".repeat(501) },
-      { provider: "hcaptcha" },
+      { provider: "HCAPTCHA" },
     ]) {
       const failure = await mockApi
         .updateSignInExperience({

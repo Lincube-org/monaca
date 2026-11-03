@@ -106,7 +106,7 @@ const signUpProfileName = ref(true);
 const signUpProfileAvatar = ref(false);
 /** CAPTCHA settings; the secret is write-only, so "stored" is the only state the page can read. */
 const captchaEnabled = ref(false);
-const captchaProvider = ref<"turnstile" | "recaptcha">("turnstile");
+const captchaProvider = ref<"turnstile" | "recaptcha" | "hcaptcha">("turnstile");
 const captchaSiteKey = ref("");
 const captchaSecret = ref("");
 const clearCaptchaSecret = ref(false);
@@ -221,7 +221,7 @@ interface SwitchForm {
   signUpProfileFields: ("name" | "avatar")[];
   branding: Branding;
   captchaEnabled: boolean;
-  captchaProvider: "turnstile" | "recaptcha";
+  captchaProvider: "turnstile" | "recaptcha" | "hcaptcha";
   captchaSiteKey: string;
   captchaSecret: string;
   clearCaptchaSecret: boolean;
@@ -1560,10 +1560,11 @@ function formatStamp(at: string): string {
                       id="captcha-provider"
                       :model-value="captchaProvider"
                       :disabled="update.isPending.value"
-                      @update:model-value="(value: string) => (captchaProvider = value === 'recaptcha' ? 'recaptcha' : 'turnstile')"
+                      @update:model-value="(value: string) => (captchaProvider = value === 'recaptcha' ? 'recaptcha' : value === 'hcaptcha' ? 'hcaptcha' : 'turnstile')"
                     >
                       <option value="turnstile">{{ t('signInExperience.captchaProviderTurnstile') }}</option>
                       <option value="recaptcha">{{ t('signInExperience.captchaProviderRecaptcha') }}</option>
+                      <option value="hcaptcha">{{ t('signInExperience.captchaProviderHcaptcha') }}</option>
                     </NativeSelect>
                   </div>
                   <div class="flex flex-col gap-1.5">

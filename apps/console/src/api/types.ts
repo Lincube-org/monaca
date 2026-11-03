@@ -319,7 +319,7 @@ export interface SignInExperience {
  */
 export interface CaptchaSettings {
   enabled: boolean;
-  provider: "turnstile" | "recaptcha";
+  provider: "turnstile" | "recaptcha" | "hcaptcha";
   site_key: string | null;
   /** Whether a secret is stored; the value itself is never returned. */
   secret_set: boolean;
@@ -635,7 +635,7 @@ export interface UpdateSignInExperienceRequest {
 /** The write-only half of the CAPTCHA settings: an empty key or secret clears it. */
 export interface CaptchaPatch {
   enabled?: boolean;
-  provider?: "turnstile" | "recaptcha";
+  provider?: "turnstile" | "recaptcha" | "hcaptcha";
   site_key?: string;
   secret?: string;
   on_sign_in?: boolean;

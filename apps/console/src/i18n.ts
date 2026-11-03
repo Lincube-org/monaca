@@ -633,6 +633,7 @@ export const messages = {
     captchaProvider: "Provider",
     captchaProviderTurnstile: "Cloudflare Turnstile",
     captchaProviderRecaptcha: "Google reCAPTCHA",
+    captchaProviderHcaptcha: "hCaptcha",
     captchaSiteKey: "Site key",
     captchaSiteKeyHint: "The public key the widget renders with.",
     captchaSecret: "Secret key",
