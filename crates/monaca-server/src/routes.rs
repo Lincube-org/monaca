@@ -481,7 +481,10 @@ pub fn management_routes() -> Router<Arc<AppState>> {
 /// `/internal/*` — §6.3. The gateway must never proxy this group.
 pub fn internal_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/internal/audit", post(crate::internal::append_audit))
+        .route(
+            "/internal/audit",
+            post(crate::internal::append_audit).get(crate::internal::tenant_audit),
+        )
         .route(
             "/internal/tenants/{slug}/jwks",
             get(crate::internal::tenant_jwks),

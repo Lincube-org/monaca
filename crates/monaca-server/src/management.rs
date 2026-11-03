@@ -2361,7 +2361,7 @@ fn grant_json(org: &monaca_store::OrgRow, grant: &GrantRow) -> Value {
     })
 }
 
-fn audit_json(row: &monaca_store::AuditRow) -> Value {
+pub(crate) fn audit_json(row: &monaca_store::AuditRow) -> Value {
     // `subject_ref` is the exact string that was hashed; the uuid column exists for indexing and
     // for a future filter, not as the source of truth.
     let subject_id = row.subject_ref.clone();
