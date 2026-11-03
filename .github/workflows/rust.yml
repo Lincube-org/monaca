@@ -376,6 +376,9 @@ jobs:
       MONACA_MCP_DEMO_RESOURCE: http://localhost:8080/mcp/demo
       MONACA_LOG_LEVEL: info
       MONACA_E2E_BASE_URL: http://127.0.0.1:8081
+      # Acceptance step 52 starts a local siteverify mock on this port. The server accepts the
+      # override only in dev/CI; a production process always calls the provider's real endpoint.
+      MONACA_CAPTCHA_SITEVERIFY_URL: http://127.0.0.1:38100/siteverify
     steps:
       - uses: actions/checkout@v4
 
