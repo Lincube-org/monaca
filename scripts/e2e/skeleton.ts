@@ -541,6 +541,19 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "clears it, DELETE is 204 and the route reads unconfigured, and email_connector.updated/deleted are on " +
       "the tenant audit chain without the secret",
   },
+  {
+    step: "56",
+    title: "username policy",
+    assertion:
+      "PATCH /v1/sign-in-experience validates username_allowed_punctuation (a unique subset of _, - and .), " +
+      "username_reserved_words (3–64 characters, at most 100) and rejects username_preserve_case while " +
+      "username_case_sensitive, all with 400; a username using a legacy hyphen is created, then the hyphen is " +
+      "removed and that existing name still signs in while a new hyphenated name is 400; under the strict policy " +
+      "a valid dotted name passes, an illegal character, an over-long name and the reserved word Admin are 400; " +
+      "the email-local-part switch refuses the match and then allows it; and with display preservation on, the " +
+      "typed case is returned while a lowercased name signs in and an upper-cased duplicate is 409 " +
+      "MONACA_USERNAME_TAKEN",
+  },
 ];
 
 interface StepResult {
@@ -8970,6 +8983,472 @@ async function emailTemplatesFlow(
 }
 
 /**
+ * Step 53: a registered application's CORS origins gate browser preflights.
+ *
+ * The client is created with one foreign origin in a non-canonical form, so the check covers both
+ * normalization and the runtime header. The same client then exercises the refusal cases, a
+ * preflight, a JWKS read from the registered origin, an unregistered origin, and clearing the list.
+ */
+async function corsFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const sameStringList = (value: unknown, expected: string[]): boolean =>
+    Array.isArray(value) &&
+    value.length === expected.length &&
+    expected.every((item, index) => value[index] === item);
+
+  const origin = "https://app.example.com";
+  const clientId = `cors-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  let rowId: string | undefined;
+  const fail = (why: string): StepResult => ({
+    step: "53",
+    title: "application CORS",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+
+  const preflight = (requestOrigin: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/oauth2/token`, {
+      method: "OPTIONS",
+      headers: {
+        origin: requestOrigin,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
+    });
+
+  try {
+    const created = await call(`${base}/v1/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        client_id: clientId,
+        name: "E2E CORS",
+        kind: "public",
+        redirect_uris: [redirectUri],
+        scopes: ["openid"],
+        cors_allowed_origins: ["https://App.Example.com:443/"],
+      }),
+    });
+    const createdBody = created.body as { id?: unknown; cors_allowed_origins?: unknown } | undefined;
+    rowId = typeof createdBody?.id === "string" ? createdBody.id : undefined;
+    checks.push([
+      "POST /v1/clients canonicalizes https://App.Example.com:443/ to the bare origin",
+      created.status === 201 &&
+        typeof rowId === "string" &&
+        sameStringList(createdBody?.cors_allowed_origins, [origin]),
+    ]);
+    if (rowId === undefined) return fail(`POST /v1/clients → ${created.status} ${text(created.body)}`);
+
+    const patch = (origins: unknown): Promise<HttpResult> =>
+      call(`${base}/v1/clients/${rowId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ cors_allowed_origins: origins }),
+      });
+    const [wildcard, path, query, userinfo, longOrigin, many] = await Promise.all([
+      patch(["*"]),
+      patch([`${origin}/path`]),
+      patch([`${origin}?x=1`]),
+      patch(["https://user:pass@app.example.com"]),
+      patch([`https://${"a".repeat(260)}.example`]),
+      patch(Array.from({ length: 33 }, (_, index) => `https://app${index}.example.com`)),
+    ]);
+    checks.push([
+      "a wildcard, a path, a query, userinfo, an origin over 255 characters and 33 entries are 400",
+      wildcard.status === 400 &&
+        path.status === 400 &&
+        query.status === 400 &&
+        userinfo.status === 400 &&
+        longOrigin.status === 400 &&
+        many.status === 400,
+    ]);
+
+    const allowed = await preflight(origin);
+    checks.push([
+      "a preflight from the registered origin is 204 with the allow-origin, credentials and methods",
+      allowed.status === 204 &&
+        allowed.headers.get("access-control-allow-origin") === origin &&
+        allowed.headers.get("access-control-allow-credentials") === "true" &&
+        (allowed.headers.get("access-control-allow-methods") ?? "").includes("POST"),
+    ]);
+
+    const jwks = await call(`${base}/t/${TENANT}/.well-known/jwks.json`, {
+      headers: { origin },
+    });
+    checks.push([
+      "a JWKS read from the registered origin carries the allow-origin header",
+      jwks.status === 200 && jwks.headers.get("access-control-allow-origin") === origin,
+    ]);
+
+    const stranger = await preflight("https://stranger.example");
+    checks.push([
+      "an unregistered origin gets no allow-origin header",
+      stranger.headers.get("access-control-allow-origin") === null,
+    ]);
+
+    const cleared = await patch([]);
+    const afterClear = await preflight(origin);
+    checks.push([
+      "clearing the list removes the header",
+      cleared.status === 200 && afterClear.headers.get("access-control-allow-origin") === null,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (rowId !== undefined) {
+      await call(`${base}/v1/clients/${rowId}`, { method: "DELETE", headers });
+    }
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "53",
+    title: "application CORS",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: canonical origin → refusals → preflight → JWKS → stranger → clear`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 56: a tenant's username policy governs new claims without invalidating old ones.
+ *
+ * The walk-through first creates a legacy username under the old grammar, then tightens the
+ * punctuation set so that name would now be refused, and signs in with it anyway: validation
+ * runs on creation and on a username change, never on sign-in. The remaining checks use the
+ * resulting policy: punctuation, length, reserved words, the email-local-part switch, and the
+ * display form kept for a case-insensitive tenant.
+ */
+async function usernamePolicyFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const fail = (why: string): StepResult => ({
+    step: "56",
+    title: "username policy",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+  const sameStringList = (value: unknown, expected: string[]): boolean =>
+    Array.isArray(value) &&
+    value.length === expected.length &&
+    expected.every((item, index) => value[index] === item);
+
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const patch = (body: Record<string, unknown>): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+  const begin = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `un-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-username-${tag}-${runId}`,
+        nonce: `n-username-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) return undefined;
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  const signUp = (
+    target: { interaction: string },
+    body: Record<string, unknown>,
+  ): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/interaction/${target.interaction}/sign-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const signIn = async (identifier: string, password: string): Promise<HttpResult> => {
+    const target = await begin("signin");
+    if (target === undefined) return { status: 0, body: undefined, headers: new Headers() };
+    return call(`${base}/t/${TENANT}/interaction/${target.interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier, password }),
+    });
+  };
+
+  const directoryUsername = async (email: string): Promise<unknown> => {
+    const found = await call(
+      `${base}/v1/accounts?${new URLSearchParams({ query: email, limit: "5" })}`,
+      { headers },
+    );
+    const id = (found.body as { items?: { id?: unknown }[] } | undefined)?.items?.[0]?.id;
+    if (typeof id !== "string") return undefined;
+    const account = await call(`${base}/v1/accounts/${id}`, { headers });
+    return (account.body as { username?: unknown } | undefined)?.username;
+  };
+
+  const legacy = {
+    sign_up_identifiers: ["email", "username"],
+    sign_up_email_verification_required: false,
+    username_case_sensitive: false,
+    username_min_length: 3,
+    username_max_length: 16,
+    username_allowed_punctuation: ["_", "-"],
+    username_allow_email_local_part: true,
+    username_preserve_case: false,
+    username_reserved_words: [],
+    sign_up_profile_fields: ["name"],
+  };
+  const policy = {
+    ...legacy,
+    username_min_length: 4,
+    username_allowed_punctuation: ["_", "-", "."],
+    username_allow_email_local_part: false,
+    username_preserve_case: true,
+    username_reserved_words: ["admin", "support"],
+  };
+  const defaults = {
+    sign_up_identifiers: ["email"],
+    sign_up_email_verification_required: true,
+    username_case_sensitive: false,
+    username_min_length: 3,
+    username_max_length: 32,
+    username_allowed_punctuation: ["_", "-"],
+    username_allow_email_local_part: true,
+    username_preserve_case: false,
+    username_reserved_words: [],
+    sign_up_profile_fields: ["name"],
+  };
+
+  const legacyEmail = `legacy-${runId}@demo.localhost`;
+  const legacyPassword = `pw-${runId}-legacy-username`;
+  const legacyUsername = `old-${runId}`;
+  const validEmail = `good-${runId}@demo.localhost`;
+  const validPassword = `pw-${runId}-good-username`;
+
+  try {
+    const [badPunctuation, duplicatePunctuation, shortReserved, contradiction] = await Promise.all([
+      patch({ username_allowed_punctuation: ["*"] }),
+      patch({ username_allowed_punctuation: ["_", "_"] }),
+      patch({ username_reserved_words: ["ab"] }),
+      patch({ username_case_sensitive: true, username_preserve_case: true }),
+    ]);
+    checks.push([
+      "an unknown or duplicate punctuation character, a short reserved word and case-sensitive display preservation are 400",
+      badPunctuation.status === 400 &&
+        duplicatePunctuation.status === 400 &&
+        shortReserved.status === 400 &&
+        contradiction.status === 400,
+    ]);
+
+    const legacyPolicy = await patch(legacy);
+    checks.push([
+      "the legacy policy is accepted",
+      legacyPolicy.status === 200 &&
+        (legacyPolicy.body as { username_allowed_punctuation?: unknown } | undefined)
+          ?.username_allowed_punctuation !== undefined,
+    ]);
+
+    const legacyTarget = await begin("legacy");
+    if (legacyTarget === undefined) return fail(detail);
+    const legacySignUp = await signUp(legacyTarget, {
+      email: legacyEmail,
+      password: legacyPassword,
+      username: legacyUsername,
+      display_name: "Legacy username",
+    });
+    checks.push([
+      "a legacy username with a hyphen is created under the old grammar",
+      legacySignUp.status === 200 && (await directoryUsername(legacyEmail)) === legacyUsername,
+    ]);
+
+    const tightened = await patch({
+      username_allowed_punctuation: [],
+      username_preserve_case: false,
+    });
+    checks.push([
+      "removing the hyphen from the grammar is accepted",
+      tightened.status === 200 &&
+        sameStringList(
+          (tightened.body as { username_allowed_punctuation?: unknown } | undefined)
+            ?.username_allowed_punctuation,
+          [],
+        ),
+    ]);
+
+    const legacySignIn = await signIn(legacyUsername, legacyPassword);
+    checks.push([
+      "an existing username that no longer satisfies the grammar still signs in",
+      legacySignIn.status === 200,
+    ]);
+
+    const hyphenTarget = await begin("hyphen");
+    const hyphenSignUp = await signUp(hyphenTarget ?? { interaction: "" }, {
+      email: `hyphen-${runId}@demo.localhost`,
+      password: `pw-${runId}-hyphen`,
+      username: `new-${runId}`,
+    });
+    checks.push([
+      "a new username using the now-disallowed hyphen is 400",
+      hyphenSignUp.status === 400 &&
+        (hyphenSignUp.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_INVALID_REQUEST",
+    ]);
+
+    const written = await patch(policy);
+    checks.push([
+      "the strict policy is stored and echoed",
+      written.status === 200 &&
+        sameStringList(
+          (written.body as { username_allowed_punctuation?: unknown } | undefined)
+            ?.username_allowed_punctuation,
+          policy.username_allowed_punctuation,
+        ) &&
+        (written.body as { username_preserve_case?: unknown } | undefined)?.username_preserve_case ===
+          true &&
+        (written.body as { username_allow_email_local_part?: unknown } | undefined)
+          ?.username_allow_email_local_part === false,
+    ]);
+
+    const validTarget = await begin("valid");
+    const validSignUp = validTarget === undefined
+      ? undefined
+      : await signUp(validTarget, {
+          email: validEmail,
+          password: validPassword,
+          username: `good.${runId}`,
+          display_name: "Good username",
+        });
+    checks.push([
+      "a valid username with the configured punctuation passes",
+      validSignUp?.status === 200,
+    ]);
+
+    const [badCharacter, tooLong, reserved] = await Promise.all([
+      signUp((await begin("bad-char")) ?? { interaction: "" }, {
+        email: `bad-char-${runId}@demo.localhost`,
+        password: `pw-${runId}-bad-char`,
+        username: `bad*${runId}`,
+      }),
+      signUp((await begin("long")) ?? { interaction: "" }, {
+        email: `long-${runId}@demo.localhost`,
+        password: `pw-${runId}-long`,
+        username: "a".repeat(17),
+      }),
+      signUp((await begin("reserved")) ?? { interaction: "" }, {
+        email: `reserved-${runId}@demo.localhost`,
+        password: `pw-${runId}-reserved`,
+        username: "Admin",
+      }),
+    ]);
+    checks.push([
+      "an illegal character, an over-long name and a reserved word are 400",
+      badCharacter.status === 400 && tooLong.status === 400 && reserved.status === 400 &&
+        (reserved.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_INVALID_REQUEST",
+    ]);
+
+    const localEmail = `local.${runId}@demo.localhost`;
+    const localUsername = `local.${runId}`;
+    const localTarget = await begin("local");
+    const localRefused = localTarget === undefined
+      ? undefined
+      : await signUp(localTarget, {
+          email: localEmail,
+          password: `pw-${runId}-local`,
+          username: localUsername,
+        });
+    const allowLocal = await patch({ username_allow_email_local_part: true });
+    const localAllowed = localTarget === undefined
+      ? undefined
+      : await signUp(localTarget, {
+          email: localEmail,
+          password: `pw-${runId}-local`,
+          username: localUsername,
+        });
+    checks.push([
+      "the email-local-part switch refuses the match and then allows it",
+      localRefused?.status === 400 &&
+        allowLocal.status === 200 &&
+        localAllowed?.status === 200,
+    ]);
+    await patch({ username_allow_email_local_part: false });
+
+    const caseEmail = `case-${runId}@demo.localhost`;
+    const caseUsername = `Case.${runId}`;
+    const caseTarget = await begin("case");
+    const caseSignUp = caseTarget === undefined
+      ? undefined
+      : await signUp(caseTarget, {
+          email: caseEmail,
+          password: `pw-${runId}-case`,
+          username: caseUsername,
+        });
+    const stored = await directoryUsername(caseEmail);
+    const caseSignIn = await signIn(caseUsername.toLowerCase(), `pw-${runId}-case`);
+    const duplicateTarget = await begin("duplicate");
+    const duplicate = duplicateTarget === undefined
+      ? undefined
+      : await signUp(duplicateTarget, {
+          email: `case-dup-${runId}@demo.localhost`,
+          password: `pw-${runId}-case-dup`,
+          username: caseUsername.toUpperCase(),
+        });
+    checks.push([
+      "case is preserved for display, matched case-insensitively and unique after folding",
+      caseSignUp?.status === 200 &&
+        stored === caseUsername &&
+        caseSignIn.status === 200 &&
+        duplicate?.status === 409 &&
+        (duplicate.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_USERNAME_TAKEN",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await patch(defaults);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "56",
+    title: "username policy",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: validation → legacy exemption → punctuation/length/reserved → email local part → display case`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
  * Step 55: an HTTP mail connector delivers rendered outbox mail to the tenant's endpoint.
  *
  * The receiver is a local `Bun.serve` with a random port, so the assertion is about what a provider
@@ -11335,7 +11814,9 @@ async function main(): Promise<number> {
   push(await consentFlow(base, adminToken));
   push(await emailTemplatesFlow(base, adminToken, parsed.internalSecret));
   push(await captchaFlow(base, adminToken));
+  push(await corsFlow(base, adminToken));
   push(await emailConnectorFlow(base, adminToken, parsed.internalSecret));
+  push(await usernamePolicyFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
