@@ -997,6 +997,7 @@ async fn complete_sign_in(
         false,
         true,
         Some("silent"),
+        None,
     )
     .await?;
     Ok(with_session_cookie(
@@ -2890,6 +2891,10 @@ pub struct ConsentBody {
     /// pre-existing behaviour.
     #[serde(default)]
     pub remember: Option<bool>,
+    /// The subset of the requested scopes this decision approves, in request order. Absent means
+    /// the whole request, the pre-existing behaviour.
+    #[serde(default)]
+    pub allowed_scopes: Option<Vec<String>>,
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/consent` — the second half of the login/consent challenge.
@@ -2898,13 +2903,55 @@ pub async fn consent(
     Path((_tenant, iid)): Path<(String, String)>,
     Json(body): Json<ConsentBody>,
 ) -> Result<Response, ApiError> {
-    if body.decision != "allow" {
-        if body.decision != "deny" {
-            return Err(ApiError::problem(
-                kinds::INVALID_REQUEST,
-                "decision must be `allow` or `deny`",
-            ));
+    if body.decision != "allow" && body.decision != "deny" {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "decision must be `allow` or `deny`",
+        ));
+    }
+    if body.decision == "deny" {
+        let interaction = state
+            .consume_interaction(&iid)
+            .await
+            .map_err(ApiError::Interaction)?;
+        return Ok(Json(json!({
+            "redirect_to": append_query(
+                &interaction.redirect_uri,
+                &[("error", "access_denied"), ("state", interaction.state.as_str())],
+            )
+        }))
+        .into_response());
+    }
+
+    // Peek first: a scope list outside the request, or every scope refused, must not leave the
+    // interaction half-answerable. Only an actual approval consumes it.
+    let (interaction, _) = state
+        .peek_interaction_state(&iid)
+        .await
+        .map_err(ApiError::Interaction)?;
+    let approved: Vec<String> = match body.allowed_scopes.as_deref() {
+        None => interaction.scopes.clone(),
+        Some(allowed) => {
+            if let Some(unknown) = allowed
+                .iter()
+                .find(|scope| !interaction.scopes.contains(*scope))
+            {
+                return Err(ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    &format!("allowed_scopes contains a scope that was not requested: {unknown}"),
+                ));
+            }
+            interaction
+                .scopes
+                .iter()
+                .filter(|scope| allowed.iter().any(|candidate| candidate == *scope))
+                .cloned()
+                .collect()
         }
+    };
+    if approved.is_empty() {
+        // Refusing every scope is the same decision as `deny`: the client gets `access_denied`
+        // and no code is minted, so a refusal can never leave a partial grant behind.
         let interaction = state
             .consume_interaction(&iid)
             .await
@@ -2938,6 +2985,7 @@ pub async fn consent(
         true,
         body.remember.unwrap_or(true),
         Some("interactive"),
+        Some(&approved),
     )
     .await
 }
@@ -2945,7 +2993,10 @@ pub async fn consent(
 /// Mint the authorization code for an approved interaction and return the client redirect.
 ///
 /// `record_consent` is true only when the user actually answered the consent screen, so the
-/// silent and stored-grant paths do not rewrite a grant that already exists.
+/// silent and stored-grant paths do not rewrite a grant that already exists. `approved_scopes`
+/// narrows the code (and the recorded approval) to the scopes the account actually allowed;
+/// `None` means the whole request.
+#[allow(clippy::too_many_arguments)]
 async fn approve_interaction(
     state: Arc<AppState>,
     tenant: TenantRow,
@@ -2955,7 +3006,9 @@ async fn approve_interaction(
     record_consent: bool,
     remember: bool,
     audit_mode: Option<&str>,
+    approved_scopes: Option<&[String]>,
 ) -> Result<Response, ApiError> {
+    let scopes = approved_scopes.unwrap_or(&interaction.scopes);
     let org_slug = interaction.organization.clone();
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
     let existing = remember_consent(
@@ -2965,7 +3018,7 @@ async fn approve_interaction(
         interaction.client_row_id,
     )
     .await?;
-    let new_scopes = consent_new_scopes(existing.as_ref(), &interaction.scopes);
+    let new_scopes = consent_new_scopes(existing.as_ref(), scopes);
     let client = state
         .store
         .client_by_id(&tenant, interaction.client_row_id)
@@ -2981,10 +3034,10 @@ async fn approve_interaction(
         && let Some(client) = client.as_ref()
     {
         let kind = if remember { "remember" } else { "one_shot" };
-        let scopes = if remember {
-            merged_scopes(existing.as_ref(), &interaction.scopes)
+        let stored_scopes = if remember {
+            merged_scopes(existing.as_ref(), scopes)
         } else {
-            interaction.scopes.clone()
+            scopes.to_vec()
         };
         if let Err(err) = state
             .store
@@ -2992,7 +3045,7 @@ async fn approve_interaction(
                 &tenant,
                 account.account_id(),
                 interaction.client_row_id,
-                &scopes,
+                &stored_scopes,
                 kind,
                 Some(&interaction.interaction_id.to_string()),
             )
@@ -3026,7 +3079,7 @@ async fn approve_interaction(
             account.account_id(),
             &client.client_id,
             &client.name,
-            &interaction.scopes,
+            scopes,
             true,
             "silent",
             Some(&interaction.interaction_id.to_string()),
@@ -3051,7 +3104,7 @@ async fn approve_interaction(
         account.id,
         org.id,
         &interaction.redirect_uri,
-        &interaction.scopes,
+        scopes,
         &interaction.code_challenge,
         interaction.nonce.as_deref(),
         interaction.resource.as_deref(),
