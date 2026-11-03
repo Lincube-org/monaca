@@ -1213,6 +1213,10 @@ describe("sign-in experience", () => {
       username_case_sensitive: false,
       username_min_length: 3,
       username_max_length: 32,
+      username_allowed_punctuation: ["_", "-"],
+      username_allow_email_local_part: true,
+      username_preserve_case: false,
+      username_reserved_words: [],
       sign_up_profile_fields: ["name"],
       captcha: {
         enabled: false,
@@ -1258,6 +1262,10 @@ describe("sign-in experience", () => {
     await rejects({ username_min_length: 2 });
     await rejects({ username_max_length: 33 });
     await rejects({ username_min_length: 10, username_max_length: 9 });
+    await rejects({ username_allowed_punctuation: ["*"] });
+    await rejects({ username_allowed_punctuation: ["_", "_"] });
+    await rejects({ username_reserved_words: ["ab"] });
+    await rejects({ username_case_sensitive: true, username_preserve_case: true });
     expect((await mockApi.getSignInExperience()).sign_up_identifiers).toEqual(["email"]);
 
     const updated = await mockApi.updateSignInExperience({
@@ -1266,6 +1274,9 @@ describe("sign-in experience", () => {
       username_case_sensitive: true,
       username_min_length: 4,
       username_max_length: 16,
+      username_allowed_punctuation: ["_", "-", "."],
+      username_allow_email_local_part: false,
+      username_reserved_words: ["Admin"],
       sign_up_profile_fields: ["name", "avatar"],
     });
     expect(updated.sign_up_identifiers).toEqual(["email", "username"]);
@@ -1273,6 +1284,9 @@ describe("sign-in experience", () => {
     expect(updated.username_case_sensitive).toBe(true);
     expect(updated.username_min_length).toBe(4);
     expect(updated.username_max_length).toBe(16);
+    expect(updated.username_allowed_punctuation).toEqual(["_", "-", "."]);
+    expect(updated.username_allow_email_local_part).toBe(false);
+    expect(updated.username_reserved_words).toEqual(["admin"]);
     expect(updated.sign_up_profile_fields).toEqual(["name", "avatar"]);
 
     const audit = await mockApi.listAudit(ORG, { action: "sign_in_experience.updated", limit: 200 });
@@ -1282,6 +1296,9 @@ describe("sign-in experience", () => {
       username_case_sensitive: true,
       username_min_length: 4,
       username_max_length: 16,
+      username_allowed_punctuation: ["_", "-", "."],
+      username_allow_email_local_part: false,
+      username_reserved_words: ["admin"],
       sign_up_profile_fields: ["name", "avatar"],
     });
 
@@ -1291,6 +1308,9 @@ describe("sign-in experience", () => {
       username_case_sensitive: false,
       username_min_length: 3,
       username_max_length: 32,
+      username_allowed_punctuation: ["_", "-"],
+      username_allow_email_local_part: true,
+      username_reserved_words: [],
       sign_up_profile_fields: ["name"],
     });
   });

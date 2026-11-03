@@ -1340,6 +1340,10 @@ class MockStore {
       body.username_case_sensitive === undefined &&
       body.username_min_length === undefined &&
       body.username_max_length === undefined &&
+      body.username_allowed_punctuation === undefined &&
+      body.username_allow_email_local_part === undefined &&
+      body.username_preserve_case === undefined &&
+      body.username_reserved_words === undefined &&
       body.sign_up_profile_fields === undefined &&
       (body.captcha === undefined || captchaPatchIsEmpty(body.captcha)) &&
       body.login_lockout_threshold === undefined &&
@@ -1393,6 +1397,21 @@ class MockStore {
       ) {
         throw new ApiError(
           "sign_up_identifiers must be a non-empty subset of email, username that contains email",
+          { status: 400, code: "MONACA_INVALID_REQUEST" },
+        );
+      }
+    }
+    if (body.username_allowed_punctuation !== undefined) {
+      const allowed = body.username_allowed_punctuation;
+      if (
+        allowed.length > 3 ||
+        allowed.some(
+          (punctuation, index) =>
+            !["_", "-", "."].includes(punctuation) || allowed.slice(0, index).includes(punctuation),
+        )
+      ) {
+        throw new ApiError(
+          "username_allowed_punctuation may only contain a unique subset of _, - and .",
           { status: 400, code: "MONACA_INVALID_REQUEST" },
         );
       }
@@ -1451,6 +1470,20 @@ class MockStore {
         code: "MONACA_INVALID_REQUEST",
       });
     }
+    const usernameCaseSensitive =
+      body.username_case_sensitive ?? this.experience.username_case_sensitive;
+    const usernamePreserveCase =
+      body.username_preserve_case ?? this.experience.username_preserve_case;
+    if (usernameCaseSensitive && usernamePreserveCase) {
+      throw new ApiError("username_preserve_case requires username_case_sensitive to be false", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const usernameReservedWords =
+      body.username_reserved_words === undefined
+        ? undefined
+        : normaliseUsernameReservedWords(body.username_reserved_words);
     const rejectedWords =
       body.password_rejected_words === undefined
         ? undefined
@@ -1550,10 +1583,19 @@ class MockStore {
       sign_up_email_verification_required:
         body.sign_up_email_verification_required ??
         this.experience.sign_up_email_verification_required,
-      username_case_sensitive:
-        body.username_case_sensitive ?? this.experience.username_case_sensitive,
+      username_case_sensitive: usernameCaseSensitive,
       username_min_length: usernameMin,
       username_max_length: usernameMax,
+      username_allowed_punctuation:
+        body.username_allowed_punctuation === undefined
+          ? [...this.experience.username_allowed_punctuation]
+          : [...body.username_allowed_punctuation],
+      username_allow_email_local_part:
+        body.username_allow_email_local_part ??
+        this.experience.username_allow_email_local_part,
+      username_preserve_case: usernamePreserveCase,
+      username_reserved_words:
+        usernameReservedWords ?? [...this.experience.username_reserved_words],
       sign_up_profile_fields:
         body.sign_up_profile_fields ?? this.experience.sign_up_profile_fields,
       captcha,
@@ -1595,6 +1637,10 @@ class MockStore {
         username_case_sensitive: updated.username_case_sensitive,
         username_min_length: updated.username_min_length,
         username_max_length: updated.username_max_length,
+        username_allowed_punctuation: updated.username_allowed_punctuation,
+        username_allow_email_local_part: updated.username_allow_email_local_part,
+        username_preserve_case: updated.username_preserve_case,
+        username_reserved_words: updated.username_reserved_words,
         sign_up_profile_fields: updated.sign_up_profile_fields,
         captcha: { ...updated.captcha },
         login_lockout_threshold: updated.login_lockout_threshold,
@@ -2655,6 +2701,28 @@ function checkWebhookEvents(raw: string[]): string[] {
 function newWebhookSecret(): string {
   const half = () => crypto.randomUUID().replaceAll("-", "");
   return `whsec_${half()}${half()}`;
+}
+
+/** Lowercase, trim and de-duplicate reserved usernames; each must be 3–64 characters. */
+function normaliseUsernameReservedWords(words: string[]): string[] {
+  if (words.length > 100) {
+    throw new ApiError("username_reserved_words must list at most 100 words", {
+      status: 400,
+      code: "MONACA_INVALID_REQUEST",
+    });
+  }
+  const normalised: string[] = [];
+  for (const word of words) {
+    const value = word.trim().toLowerCase();
+    if (value.length < 3 || value.length > 64) {
+      throw new ApiError("each reserved username must be 3-64 characters", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (!normalised.includes(value)) normalised.push(value);
+  }
+  return normalised;
 }
 
 /** Lowercase, de-duplicate and bound the rejected-word list, exactly like the server. */

@@ -109,6 +109,14 @@ export interface SignInExperience {
   username_min_length: number;
   /** The tenant's longest accepted username. */
   username_max_length: number;
+  /** Punctuation allowed beside ASCII letters and digits (`_`, `-`, `.`). */
+  username_allowed_punctuation: string[];
+  /** Whether a username may equal the account's email local part. */
+  username_allow_email_local_part: boolean;
+  /** Whether the typed case is kept for display while matching ignores it. */
+  username_preserve_case: boolean;
+  /** Lowercased whole usernames the tenant refuses. */
+  username_reserved_words: string[];
   /** Which optional profile fields the sign-up form collects, in addition to the address. */
   sign_up_profile_fields: ("name" | "avatar")[];
   /** The tenant's CAPTCHA provider and which entrances demand a token. */

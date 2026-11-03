@@ -571,11 +571,30 @@ export const messages = {
     usernameCase: "Usernames are case-sensitive",
     usernameCaseHint:
       "When on, `Ada` and `ada` are different usernames and sign-in matches the typed case.",
+    usernamePreserveCase: "Keep the typed case for display",
+    usernamePreserveCaseHint:
+      "Only for case-insensitive usernames: matching and uniqueness ignore case, but the account shows the name as typed. Existing names are never rewritten.",
+    usernameAllowEmailLocal: "Allow the email local part as a username",
+    usernameAllowEmailLocalHint:
+      "When off, a new or changed username may not equal the account's own email local part.",
+    usernamePunctuation: "Allowed punctuation",
+    usernamePunctuationHint:
+      "ASCII letters and digits are always allowed. Existing usernames are exempt; the rules apply to new names and changes.",
+    usernamePunctuationUnderscore: "Underscore (_)",
+    usernamePunctuationHyphen: "Hyphen (-)",
+    usernamePunctuationDot: "Dot (.)",
+    usernameReservedWords: "Reserved usernames",
+    usernameReservedWordsHint:
+      "One whole name per line, matched case-insensitively. 3–64 characters each, at most 100.",
     signUpProfileFields: "Profile fields at sign-up",
     profileName: "Display name",
     profileAvatar: "Avatar URL",
     invalidUsernameLength:
       "Username lengths must be between 3 and 32 characters, and the shortest may not exceed the longest.",
+    invalidUsernamePreserveCase:
+      "A case-sensitive username already keeps its typed form; turn case sensitivity off first.",
+    invalidUsernameReservedWords:
+      "Each reserved username must be 3–64 characters, and the list may hold at most 100.",
     methods: "Sign-in methods",
     methodsHint:
       "At least one first-factor method must stay enabled — a tenant with neither has no way to sign in at all.",

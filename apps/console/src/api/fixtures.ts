@@ -472,6 +472,10 @@ export function seedSignInExperience(): SignInExperience {
     username_case_sensitive: false,
     username_min_length: 3,
     username_max_length: 32,
+    username_allowed_punctuation: ["_", "-"],
+    username_allow_email_local_part: true,
+    username_preserve_case: false,
+    username_reserved_words: [],
     sign_up_profile_fields: ["name"],
     captcha: {
       enabled: false,

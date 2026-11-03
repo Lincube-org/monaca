@@ -102,6 +102,12 @@ const signUpEmailVerification = ref(true);
 const usernameCaseSensitive = ref(false);
 const usernameMinLength = ref(3);
 const usernameMaxLength = ref(32);
+const usernameAllowUnderscore = ref(true);
+const usernameAllowHyphen = ref(true);
+const usernameAllowDot = ref(false);
+const usernameAllowEmailLocalPart = ref(true);
+const usernamePreserveCase = ref(false);
+const usernameReservedWordsText = ref("");
 const signUpProfileName = ref(true);
 const signUpProfileAvatar = ref(false);
 /** CAPTCHA settings; the secret is write-only, so "stored" is the only state the page can read. */
@@ -188,6 +194,23 @@ function rejectedWordsValues(): string[] {
   return [...new Set(words)];
 }
 
+/** The punctuation switches as the API's array, in a stable order. */
+function usernameAllowedPunctuation(): ("_" | "-" | ".")[] {
+  const allowed: ("_" | "-" | ".")[] = [];
+  if (usernameAllowUnderscore.value) allowed.push("_");
+  if (usernameAllowHyphen.value) allowed.push("-");
+  if (usernameAllowDot.value) allowed.push(".");
+  return allowed;
+}
+
+function usernameReservedWordsValues(): string[] {
+  const words = usernameReservedWordsText.value
+    .split(/[\n,]+/)
+    .map((word) => word.trim().toLowerCase())
+    .filter((word) => word !== "");
+  return [...new Set(words)];
+}
+
 function sameWords(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   const left = [...a].sort();
@@ -218,6 +241,10 @@ interface SwitchForm {
   usernameCaseSensitive: boolean;
   usernameMinLength: number;
   usernameMaxLength: number;
+  usernameAllowedPunctuation: ("_" | "-" | ".")[];
+  usernameAllowEmailLocalPart: boolean;
+  usernamePreserveCase: boolean;
+  usernameReservedWords: string[];
   signUpProfileFields: ("name" | "avatar")[];
   branding: Branding;
   captchaEnabled: boolean;
@@ -255,6 +282,10 @@ function formValues(): SwitchForm {
     usernameCaseSensitive: usernameCaseSensitive.value,
     usernameMinLength: usernameMinLength.value,
     usernameMaxLength: usernameMaxLength.value,
+    usernameAllowedPunctuation: usernameAllowedPunctuation(),
+    usernameAllowEmailLocalPart: usernameAllowEmailLocalPart.value,
+    usernamePreserveCase: usernamePreserveCase.value,
+    usernameReservedWords: usernameReservedWordsValues(),
     signUpProfileFields: signUpProfileFields(),
     branding: brandingValues(),
     captchaEnabled: captchaEnabled.value,
@@ -293,6 +324,10 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.username_case_sensitive === form.usernameCaseSensitive &&
     value.username_min_length === form.usernameMinLength &&
     value.username_max_length === form.usernameMaxLength &&
+    sameWords(value.username_allowed_punctuation, form.usernameAllowedPunctuation) &&
+    value.username_allow_email_local_part === form.usernameAllowEmailLocalPart &&
+    value.username_preserve_case === form.usernamePreserveCase &&
+    sameWords(value.username_reserved_words, form.usernameReservedWords) &&
     sameWords(value.sign_up_profile_fields, form.signUpProfileFields) &&
     sameBranding(value.branding, form.branding) &&
     value.captcha.enabled === form.captchaEnabled &&
@@ -331,6 +366,12 @@ function adopt(value: SignInExperience): void {
   usernameCaseSensitive.value = value.username_case_sensitive;
   usernameMinLength.value = value.username_min_length;
   usernameMaxLength.value = value.username_max_length;
+  usernameAllowUnderscore.value = value.username_allowed_punctuation.includes("_");
+  usernameAllowHyphen.value = value.username_allowed_punctuation.includes("-");
+  usernameAllowDot.value = value.username_allowed_punctuation.includes(".");
+  usernameAllowEmailLocalPart.value = value.username_allow_email_local_part;
+  usernamePreserveCase.value = value.username_preserve_case;
+  usernameReservedWordsText.value = value.username_reserved_words.join("\n");
   signUpProfileName.value = value.sign_up_profile_fields.includes("name");
   signUpProfileAvatar.value = value.sign_up_profile_fields.includes("avatar");
   brandName.value = value.branding.display_name ?? "";
@@ -399,6 +440,12 @@ watch(
     usernameCaseSensitive,
     usernameMinLength,
     usernameMaxLength,
+    usernameAllowUnderscore,
+    usernameAllowHyphen,
+    usernameAllowDot,
+    usernameAllowEmailLocalPart,
+    usernamePreserveCase,
+    usernameReservedWordsText,
     signUpProfileName,
     signUpProfileAvatar,
     captchaEnabled,
@@ -421,6 +468,18 @@ const rejectedWordsIssue = computed<"count" | "length" | null>(() => {
   if (words.some((word) => [...word].length < 3 || [...word].length > 64)) return "length";
   return null;
 });
+
+const usernameReservedWordsIssue = computed<"count" | "length" | null>(() => {
+  const words = usernameReservedWordsValues();
+  if (words.length > 100) return "count";
+  if (words.some((word) => [...word].length < 3 || [...word].length > 64)) return "length";
+  return null;
+});
+
+/** A case-sensitive tenant already keeps the typed form; asking to preserve it is contradictory. */
+const usernameCaseContradiction = computed(
+  () => usernameCaseSensitive.value && usernamePreserveCase.value,
+);
 
 const noFirstFactor = computed(() => !password.value && !emailCode.value);
 
@@ -577,6 +636,14 @@ async function save(): Promise<void> {
     formError.value = t("signInExperience.invalidUsernameLength");
     return;
   }
+  if (usernameCaseContradiction.value) {
+    formError.value = t("signInExperience.invalidUsernamePreserveCase");
+    return;
+  }
+  if (usernameReservedWordsIssue.value !== null) {
+    formError.value = t("signInExperience.invalidUsernameReservedWords");
+    return;
+  }
   if (sessionDays.value < SESSION_MIN_DAYS || sessionDays.value > SESSION_MAX_DAYS) {
     formError.value = t("signInExperience.invalidSessionTtl");
     return;
@@ -673,6 +740,18 @@ async function save(): Promise<void> {
   }
   if (usernameMaxLength.value !== base.username_max_length) {
     body.username_max_length = usernameMaxLength.value;
+  }
+  if (!sameWords(base.username_allowed_punctuation, usernameAllowedPunctuation())) {
+    body.username_allowed_punctuation = usernameAllowedPunctuation();
+  }
+  if (usernameAllowEmailLocalPart.value !== base.username_allow_email_local_part) {
+    body.username_allow_email_local_part = usernameAllowEmailLocalPart.value;
+  }
+  if (usernamePreserveCase.value !== base.username_preserve_case) {
+    body.username_preserve_case = usernamePreserveCase.value;
+  }
+  if (!sameWords(base.username_reserved_words, usernameReservedWordsValues())) {
+    body.username_reserved_words = usernameReservedWordsValues();
   }
   if (!sameWords(base.sign_up_profile_fields, signUpProfileFields())) {
     body.sign_up_profile_fields = signUpProfileFields();
@@ -1091,6 +1170,94 @@ function formatStamp(at: string): string {
                     </span>
                   </span>
                 </label>
+
+                <label class="flex items-start gap-2.5">
+                  <Checkbox
+                    id="username-preserve-case"
+                    :model-value="usernamePreserveCase"
+                    :disabled="update.isPending.value || usernameCaseSensitive"
+                    @update:model-value="(value: boolean | 'indeterminate') => (usernamePreserveCase = value === true)"
+                  />
+                  <span class="min-w-0 -mt-0.5">
+                    <Label for="username-preserve-case">{{ t('signInExperience.usernamePreserveCase') }}</Label>
+                    <span class="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+                      {{ t('signInExperience.usernamePreserveCaseHint') }}
+                    </span>
+                  </span>
+                </label>
+
+                <label class="flex items-start gap-2.5">
+                  <Checkbox
+                    id="username-allow-email-local"
+                    :model-value="usernameAllowEmailLocalPart"
+                    :disabled="update.isPending.value"
+                    @update:model-value="(value: boolean | 'indeterminate') => (usernameAllowEmailLocalPart = value === true)"
+                  />
+                  <span class="min-w-0 -mt-0.5">
+                    <Label for="username-allow-email-local">{{ t('signInExperience.usernameAllowEmailLocal') }}</Label>
+                    <span class="mt-0.5 block text-[11.5px] leading-snug text-ink-faint">
+                      {{ t('signInExperience.usernameAllowEmailLocalHint') }}
+                    </span>
+                  </span>
+                </label>
+
+                <div class="flex flex-col gap-2">
+                  <Label>{{ t('signInExperience.usernamePunctuation') }}</Label>
+                  <div class="flex flex-wrap items-center gap-4">
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="username-allow-underscore"
+                        :model-value="usernameAllowUnderscore"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (usernameAllowUnderscore = value === true)"
+                      />
+                      <span>{{ t('signInExperience.usernamePunctuationUnderscore') }}</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="username-allow-hyphen"
+                        :model-value="usernameAllowHyphen"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (usernameAllowHyphen = value === true)"
+                      />
+                      <span>{{ t('signInExperience.usernamePunctuationHyphen') }}</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <Checkbox
+                        id="username-allow-dot"
+                        :model-value="usernameAllowDot"
+                        :disabled="update.isPending.value"
+                        @update:model-value="(value: boolean | 'indeterminate') => (usernameAllowDot = value === true)"
+                      />
+                      <span>{{ t('signInExperience.usernamePunctuationDot') }}</span>
+                    </label>
+                  </div>
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.usernamePunctuationHint') }}
+                  </p>
+                </div>
+
+                <div class="flex flex-col gap-1.5">
+                  <Label for="username-reserved-words">{{ t('signInExperience.usernameReservedWords') }}</Label>
+                  <Textarea
+                    id="username-reserved-words"
+                    v-model="usernameReservedWordsText"
+                    rows="3"
+                    :invalid="usernameReservedWordsIssue !== null || usernameCaseContradiction"
+                    :disabled="update.isPending.value"
+                    placeholder="admin&#10;support"
+                    spellcheck="false"
+                  />
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.usernameReservedWordsHint') }}
+                  </p>
+                  <p v-if="usernameReservedWordsIssue !== null" class="text-[11.5px] leading-snug text-deny">
+                    {{ t('signInExperience.invalidUsernameReservedWords') }}
+                  </p>
+                  <p v-if="usernameCaseContradiction" class="text-[11.5px] leading-snug text-deny">
+                    {{ t('signInExperience.invalidUsernamePreserveCase') }}
+                  </p>
+                </div>
 
                 <div class="flex flex-col gap-2">
                   <Label>{{ t('signInExperience.signUpProfileFields') }}</Label>

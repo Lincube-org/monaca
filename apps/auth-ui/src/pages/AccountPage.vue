@@ -388,9 +388,11 @@ async function saveProfile(): Promise<void> {
     profileError.value = "errors.displayNameTooLong";
     return;
   }
-  // An empty field means "leave the username unchanged"; a non-empty one must be a valid claim.
+  // An empty field leaves the username unchanged. The tenant's exact grammar (length, punctuation,
+  // reserved words, email local part) is enforced by the server; this page only refuses obvious
+  // junk so the server's policy remains the single authority.
   const chosen = username.value.trim();
-  if (chosen !== "" && !/^[A-Za-z0-9_-]{3,32}$/.test(chosen)) {
+  if (chosen !== "" && !/^[A-Za-z0-9_.-]{1,64}$/.test(chosen)) {
     profileError.value = "errors.usernameInvalid";
     return;
   }

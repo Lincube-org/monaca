@@ -299,6 +299,14 @@ export interface SignInExperience {
   username_min_length: number;
   /** The longest accepted username, 3–32 characters. */
   username_max_length: number;
+  /** Punctuation allowed beside ASCII letters and digits (`_`, `-`, `.`). */
+  username_allowed_punctuation: string[];
+  /** Whether a username may equal the account's email local part. */
+  username_allow_email_local_part: boolean;
+  /** Whether a case-insensitive tenant keeps the typed form for display. */
+  username_preserve_case: boolean;
+  /** Lowercased whole usernames the tenant refuses. */
+  username_reserved_words: string[];
   /** The optional profile fields the sign-up form collects. */
   sign_up_profile_fields: ("name" | "avatar")[];
   /** The tenant's CAPTCHA provider and the entrances it gates. */
@@ -622,6 +630,10 @@ export interface UpdateSignInExperienceRequest {
   username_case_sensitive?: boolean;
   username_min_length?: number;
   username_max_length?: number;
+  username_allowed_punctuation?: ("_" | "-" | ".")[];
+  username_allow_email_local_part?: boolean;
+  username_preserve_case?: boolean;
+  username_reserved_words?: string[];
   sign_up_profile_fields?: ("name" | "avatar")[];
   /** The CAPTCHA provider and the entrances it gates. */
   captcha?: CaptchaPatch;

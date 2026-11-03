@@ -330,6 +330,7 @@ const profileAvatarAllowed = computed(
 );
 const usernameMinLength = computed(() => experience.value?.username_min_length ?? 3);
 const usernameMaxLength = computed(() => experience.value?.username_max_length ?? 32);
+const usernamePunctuation = computed(() => experience.value?.username_allowed_punctuation ?? ["_", "-"]);
 
 /** A sign-up that creates the account in one request, because the address needs no proof. */
 const directSignUp = computed(() => mode.value === "signup" && !emailVerificationRequired.value);
@@ -377,9 +378,12 @@ const signUpOpen = computed(
 
 /** The username grammar is the tenant's, not a page constant (§6.1). */
 function validUsername(value: string): boolean {
-  return new RegExp(`^[A-Za-z0-9_-]{${usernameMinLength.value},${usernameMaxLength.value}}$`).test(
-    value,
-  );
+  const punctuation = usernamePunctuation.value
+    .map((character) => (character === "-" ? "\\-" : character))
+    .join("");
+  return new RegExp(
+    `^[A-Za-z0-9${punctuation}]{${usernameMinLength.value},${usernameMaxLength.value}}$`,
+  ).test(value);
 }
 
 /** An absolute http(s) image URL, the same shape the account API accepts. */
