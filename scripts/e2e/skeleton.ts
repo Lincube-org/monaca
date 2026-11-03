@@ -562,9 +562,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "offline_access to a prompt=none request answers consent_required, and its interactive screen names only " +
       "offline_access and its token exchange carries a refresh token; adding projects:read answers " +
       "consent_required and its screen names only the new scope, after which the full set is silent again; a " +
-      "scope outside the client registration is invalid_scope; a one-shot approval is listed with remember=false, " +
-      "does not cover the next silent request, and withdrawal revokes its refresh token; consent.granted events " +
-      "record scopes, remember, mode and interaction id for both silent and interactive decisions",
+      "scope outside the client registration is invalid_scope; a partial approval issues a token carrying only " +
+      "the allowed scopes and no refresh token when offline_access was refused, its remembered subset leaves " +
+      "the refused scopes consent_required, a fresh password sign-in exposes only the scopes the remembered " +
+      "approval does not cover, refusing every scope answers access_denied and consumes the interaction, and " +
+      "an allowed scope outside the request is 400; a one-shot approval is listed with remember=false, does " +
+      "not cover the next silent request, and withdrawal revokes its refresh token; a client holding both " +
+      "kinds is listed once with kinds remember and one_shot, and withdrawal clears both and revokes the " +
+      "remembered refresh token; consent.granted events record scopes, remember, mode and interaction id for " +
+      "both silent and interactive decisions",
   },
 ];
 
@@ -8894,8 +8900,12 @@ async function signInCopyFlow(base: string, adminToken: string): Promise<StepRes
  * One third-party client walks the full path: consent without `offline_access`, a silent repeat,
  * a request that adds `offline_access` (which must not go silently), then a request that adds one
  * more scope (which must show a single screen naming only the new scope). A second client approves
- * one-shot, proves the next silent request asks again, and proves withdrawal ends its refresh
- * token. The final read checks the `consent.granted` audit trail for both modes.
+ * a subset (a token with only those scopes and no refresh), records a remembered subset, signs in
+ * afresh to see only the uncovered scopes, refuses every scope and finally holds a one-shot row
+ * beside a remembered one, so the account centre must aggregate and withdrawal must clear both.
+ * A separate client approves one-shot, proves the next silent request asks again, and proves
+ * withdrawal ends its refresh token. The final read checks the `consent.granted` audit trail for
+ * both modes.
  */
 async function consentSemanticsFlow(
   base: string,
@@ -8917,6 +8927,7 @@ async function consentSemanticsFlow(
   const redirectUri = "http://localhost:5173/bff/callback";
   const client1 = `e2e-consent-rem-${runId}`;
   const client2 = `e2e-consent-one-${runId}`;
+  const client3 = `e2e-consent-part-${runId}`;
   const scopes = "openid profile email offline_access projects:read";
   const verifier = `cs-sem-${runId}-${"v".repeat(32)}`;
   const challenge = base64Url(
@@ -8924,6 +8935,7 @@ async function consentSemanticsFlow(
   );
   let client1Row: string | undefined;
   let client2Row: string | undefined;
+  let client3Row: string | undefined;
 
   const authorize = (
     clientId: string,
@@ -8961,13 +8973,32 @@ async function consentSemanticsFlow(
       ? new URL(redirect, base).searchParams.get("code")
       : null;
   };
-  const errorOf = (response: HttpResult): string | null =>
-    new URL(response.headers.get("location") ?? "", base).searchParams.get("error");
-  const consent = (iid: string, remember: boolean): Promise<HttpResult> =>
+  const errorOf = (response: HttpResult): string | null => {
+    const redirect =
+      response.headers.get("location") ??
+      (response.body as { redirect_to?: unknown } | undefined)?.redirect_to;
+    return typeof redirect === "string" ? new URL(redirect, base).searchParams.get("error") : null;
+  };
+  const scopeOf = (body: unknown): string[] => {
+    const scope = (body as { scope?: unknown } | undefined)?.scope;
+    if (Array.isArray(scope)) {
+      return scope.filter((item): item is string => typeof item === "string");
+    }
+    return typeof scope === "string" ? scope.split(" ").filter(Boolean) : [];
+  };
+  const consent = (
+    iid: string,
+    remember: boolean,
+    allowedScopes?: string[],
+  ): Promise<HttpResult> =>
     call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(iid)}/consent`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision: "allow", remember }),
+      body: JSON.stringify(
+        allowedScopes === undefined
+          ? { decision: "allow", remember }
+          : { decision: "allow", remember, allowed_scopes: allowedScopes },
+      ),
     });
 
   try {
@@ -8999,19 +9030,29 @@ async function consentSemanticsFlow(
           is_third_party: true,
         }),
       });
-    const [app1, app2] = await Promise.all([
+    const [app1, app2, app3] = await Promise.all([
       makeClient(client1, "Remembered consent"),
       makeClient(client2, "One-shot consent"),
+      makeClient(client3, "Partial consent"),
     ]);
     client1Row = (app1.body as { id?: unknown } | undefined)?.id as string | undefined;
     client2Row = (app2.body as { id?: unknown } | undefined)?.id as string | undefined;
+    client3Row = (app3.body as { id?: unknown } | undefined)?.id as string | undefined;
     checks.push([
-      "two third-party clients are registered",
-      app1.status === 201 && app2.status === 201 &&
-        typeof client1Row === "string" && typeof client2Row === "string",
+      "three third-party clients are registered",
+      app1.status === 201 && app2.status === 201 && app3.status === 201 &&
+        typeof client1Row === "string" && typeof client2Row === "string" &&
+        typeof client3Row === "string",
     ]);
-    if (typeof client1Row !== "string" || typeof client2Row !== "string") {
-      return consentSemanticsFail(t, `POST /v1/clients → ${app1.status}/${app2.status}`);
+    if (
+      typeof client1Row !== "string" ||
+      typeof client2Row !== "string" ||
+      typeof client3Row !== "string"
+    ) {
+      return consentSemanticsFail(
+        t,
+        `POST /v1/clients → ${app1.status}/${app2.status}/${app3.status}`,
+      );
     }
 
     // --- first approval: no offline_access requested, so no refresh token ----------------------
@@ -9150,6 +9191,110 @@ async function consentSemanticsFlow(
       overScope.status === 302 && errorOf(overScope) === "invalid_scope",
     ]);
 
+    // --- partial approval: the account allows a subset and refuses offline_access ---------------
+    const partialOpened = await authorize(client3, "partial", scopes, {}, cookie);
+    const partialIid = interactionOf(partialOpened);
+    const partialConsent = partialIid === null
+      ? undefined
+      : await consent(partialIid, true, ["openid", "profile"]);
+    const partialCode = partialConsent === undefined ? null : codeOf(partialConsent);
+    checks.push([
+      "a partial approval issues a code for the approved subset only",
+      partialOpened.status === 302 && partialIid !== null && partialConsent?.status === 200 &&
+        partialCode !== null,
+    ]);
+    if (partialCode === null) return consentSemanticsFail(t, "partial consent did not issue a code");
+    const partialToken = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code: partialCode,
+      redirect_uri: redirectUri,
+      client_id: client3,
+      code_verifier: verifier,
+    });
+    checks.push([
+      "the token carries only the approved scopes and, without offline_access, no refresh token",
+      partialToken.status === 200 &&
+        sameStringList(scopeOf(partialToken.body), ["openid", "profile"]) &&
+        (partialToken.body as { refresh_token?: unknown } | undefined)?.refresh_token === undefined,
+    ]);
+    const partialSilent = await authorize(
+      client3,
+      "partial-silent",
+      "openid profile email",
+      { prompt: "none" },
+      cookie,
+    );
+    checks.push([
+      "the remembered subset does not cover the unapproved scope",
+      partialSilent.status === 302 && errorOf(partialSilent) === "consent_required",
+    ]);
+
+    // --- a fresh password sign-in sees only the scopes this account has not approved -----------
+    const freshOpened = await authorize(client3, "fresh", "openid profile email");
+    const freshIid = interactionOf(freshOpened);
+    const freshSignIn = freshIid === null
+      ? undefined
+      : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(freshIid)}/sign-in`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ identifier: email, password }),
+        });
+    const freshSession = /monaca_session=([0-9a-f-]{36})/.exec(
+      freshSignIn?.headers.get("set-cookie") ?? "",
+    )?.[1];
+    const freshCookie = freshSession === undefined ? undefined : `monaca_session=${freshSession}`;
+    const freshDetails = freshIid === null || freshCookie === undefined
+      ? undefined
+      : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(freshIid)}`, {
+          headers: { cookie: freshCookie },
+        });
+    checks.push([
+      "a fresh sign-in exposes only the scopes the remembered approval does not cover",
+      freshOpened.status === 302 && freshIid !== null && freshSignIn?.status === 200 &&
+        freshCookie !== undefined &&
+        sameStringList(
+          (freshDetails?.body as { consent_scopes?: unknown } | undefined)?.consent_scopes,
+          ["email"],
+        ),
+    ]);
+
+    // --- refusing every scope is the existing deny path ------------------------------------------
+    const allDenyOpened = await authorize(
+      client3,
+      "deny-all-screen",
+      "openid profile email",
+      { prompt: "consent" },
+      cookie,
+    );
+    const allDenyIid = interactionOf(allDenyOpened);
+    const allDeny = allDenyIid === null ? undefined : await consent(allDenyIid, true, []);
+    checks.push([
+      "refusing every scope answers access_denied and mints no code",
+      allDenyOpened.status === 302 && allDenyIid !== null && allDeny?.status === 200 &&
+        errorOf(allDeny) === "access_denied" && codeOf(allDeny) === null,
+    ]);
+    const allDenyReplay = allDenyIid === null ? undefined : await consent(allDenyIid, true, []);
+    checks.push([
+      "a refused interaction is consumed, so a replay cannot half-issue a code",
+      allDenyReplay !== undefined && allDenyReplay.status >= 400 && codeOf(allDenyReplay) === null,
+    ]);
+
+    const badSubsetOpened = await authorize(
+      client3,
+      "bad-subset",
+      "openid profile",
+      { prompt: "consent" },
+      cookie,
+    );
+    const badSubsetIid = interactionOf(badSubsetOpened);
+    const badSubset = badSubsetIid === null
+      ? undefined
+      : await consent(badSubsetIid, true, ["email"]);
+    checks.push([
+      "an allowed scope outside the request is rejected",
+      badSubsetOpened.status === 302 && badSubsetIid !== null && badSubset?.status === 400,
+    ]);
+
     // --- one-shot: approved once, listed, revocable, and never covers the next request ----------
     const oneOpened = await authorize(client2, "one", scopes, {}, cookie);
     const oneIid = interactionOf(oneOpened);
@@ -9175,7 +9320,22 @@ async function consentSemanticsFlow(
         errorOf(oneSilent) === "consent_required",
     ]);
 
-    type AppRow = { client_id?: unknown; remember?: unknown; scopes?: unknown };
+    // --- one client holding both a remembered and a one-shot approval ---------------------------
+    const mixedOpened = await authorize(client1, "mixed", scopes, { prompt: "consent" }, cookie);
+    const mixedIid = interactionOf(mixedOpened);
+    const mixedConsent = mixedIid === null ? undefined : await consent(mixedIid, false);
+    checks.push([
+      "a forced screen records a one-shot approval beside the remembered one",
+      mixedOpened.status === 302 && mixedIid !== null && mixedConsent?.status === 200 &&
+        codeOf(mixedConsent) !== null,
+    ]);
+
+    type AppRow = {
+      client_id?: unknown;
+      remember?: unknown;
+      scopes?: unknown;
+      kinds?: unknown;
+    };
     const listed = await call(`${base}/t/${TENANT}/account/authorized-apps`, {
       headers: { cookie },
     });
@@ -9186,6 +9346,14 @@ async function consentSemanticsFlow(
       "the account centre distinguishes remembered and one-shot approvals",
       listed.status === 200 && rememberRow?.remember === true &&
         oneShotRow?.remember === false,
+    ]);
+    const mixedRows = items.filter((row) => row.client_id === client1);
+    checks.push([
+      "one client's remembered and one-shot approvals are listed as a single entry",
+      mixedRows.length === 1 && rememberRow?.remember === true &&
+        Array.isArray(rememberRow?.kinds) &&
+        (rememberRow.kinds as unknown[]).includes("remember") &&
+        (rememberRow.kinds as unknown[]).includes("one_shot"),
     ]);
 
     const withdrawn = await call(
@@ -9201,6 +9369,29 @@ async function consentSemanticsFlow(
       "withdrawing a one-shot approval revokes its refresh token",
       withdrawn.status === 204 && dead.status === 400 &&
         (dead.body as { error?: unknown } | undefined)?.error === "invalid_grant",
+    ]);
+
+    const mixedWithdrawn = await call(
+      `${base}/t/${TENANT}/account/authorized-apps/${encodeURIComponent(client1)}`,
+      { method: "DELETE", headers: { cookie } },
+    );
+    const afterMixed = await call(`${base}/t/${TENANT}/account/authorized-apps`, {
+      headers: { cookie },
+    });
+    const mixedGone = ((afterMixed.body as { items?: AppRow[] } | undefined)?.items ?? []).every(
+      (row) => row.client_id !== client1,
+    );
+    const mixedRefreshDead = await tokenCall(base, {
+      grant_type: "refresh_token",
+      refresh_token: String(liveRefresh ?? ""),
+      client_id: client1,
+    });
+    const mixedSilentAgain = await authorize(client1, "mixed-gone", scopes, { prompt: "none" }, cookie);
+    checks.push([
+      "withdrawing an aggregated entry clears both kinds, its refresh token and the remembered access",
+      mixedWithdrawn.status === 204 && mixedGone && mixedRefreshDead.status === 400 &&
+        (mixedRefreshDead.body as { error?: unknown } | undefined)?.error === "invalid_grant" &&
+        mixedSilentAgain.status === 302 && errorOf(mixedSilentAgain) === "consent_required",
     ]);
 
     const audit = await call(
@@ -9243,7 +9434,7 @@ async function consentSemanticsFlow(
     detail = error instanceof Error ? error.message : String(error);
     checks.push([`the flow completed without an exception (${detail})`, false]);
   } finally {
-    for (const id of [client1Row, client2Row]) {
+    for (const id of [client1Row, client2Row, client3Row]) {
       if (typeof id === "string") {
         await call(`${base}/v1/clients/${id}`, { method: "DELETE", headers }).catch(() => undefined);
       }
@@ -9257,7 +9448,7 @@ async function consentSemanticsFlow(
     status: ok ? "pass" : "fail",
     ms: Math.round(performance.now() - t),
     detail: ok
-      ? `${checks.length} checks: first consent → silent repeat → offline_access gate → incremental scope → one-shot → revocation → audit`
+      ? `${checks.length} checks: first consent → silent repeat → offline_access gate → incremental scope → partial allow → fresh sign-in scopes → all-deny → one-shot → aggregation → revocation → audit`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
