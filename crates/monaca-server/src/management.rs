@@ -593,7 +593,7 @@ impl BrandingPatch {
 pub struct CaptchaPatch {
     /// Whether a challenge gates the entrances named below.
     pub enabled: Option<bool>,
-    /// `turnstile` | `recaptcha`.
+    /// `turnstile` | `recaptcha` | `hcaptcha`.
     pub provider: Option<String>,
     /// The public site key; an empty string clears it.
     pub site_key: Option<String>,
@@ -785,11 +785,11 @@ pub async fn update_sign_in_experience(
     }
     if let Some(captcha) = &body.captcha {
         if let Some(provider) = captcha.provider.as_deref()
-            && !matches!(provider, "turnstile" | "recaptcha")
+            && !matches!(provider, "turnstile" | "recaptcha" | "hcaptcha")
         {
             return Err(ApiError::problem(
                 kinds::INVALID_REQUEST,
-                "captcha.provider must be turnstile or recaptcha",
+                "captcha.provider must be turnstile, recaptcha or hcaptcha",
             ));
         }
         if let Some(site_key) = captcha.site_key.as_deref()

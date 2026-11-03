@@ -239,6 +239,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "HTTP email connector and outbox delivery (M1)",
         include_str!("../migrations/tenant_40.sql"),
     ),
+    (
+        41,
+        "hCaptcha as a CAPTCHA provider (M1)",
+        include_str!("../migrations/tenant_41.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

@@ -46,6 +46,11 @@ pub struct Config {
     pub bootstrap_admin_password: String,
     /// Whether `MONACA_ENV=prod`, which forbids the dev KEK and the bootstrap password.
     pub production: bool,
+    /// A dev/CI-only siteverify endpoint that replaces the provider's documented URL
+    /// (`MONACA_CAPTCHA_SITEVERIFY_URL`). The acceptance walk-through points this at a local
+    /// mock so a valid token can be proven without calling a real provider. Ignored in
+    /// production, where the provider URL is always the documented one.
+    pub captcha_siteverify_url: Option<String>,
 }
 
 impl Config {
@@ -83,6 +88,9 @@ impl Config {
             bootstrap_admin_password: env("MONACA_BOOTSTRAP_ADMIN_PASSWORD")
                 .unwrap_or_else(|| "monaca-dev-password".to_owned()),
             production: environment == "prod",
+            captcha_siteverify_url: matches!(environment.as_str(), "dev" | "ci")
+                .then(|| env("MONACA_CAPTCHA_SITEVERIFY_URL"))
+                .flatten(),
         }
     }
 
@@ -177,6 +185,7 @@ mod tests {
             bootstrap_admin_email: String::new(),
             bootstrap_admin_password: String::new(),
             production: false,
+            captcha_siteverify_url: None,
         };
         assert_eq!(config.issuer("demo"), "http://localhost:8080/t/demo");
         assert_eq!(

@@ -95,7 +95,7 @@ pub struct SignInExperienceRow {
     pub language: String,
     /// Whether a CAPTCHA challenge gates the entrances named below.
     pub captcha_enabled: bool,
-    /// `turnstile` | `recaptcha`.
+    /// `turnstile` | `recaptcha` | `hcaptcha`.
     pub captcha_provider: String,
     /// The provider's public site key; `null` until one is saved.
     pub captcha_site_key: Option<String>,
@@ -144,7 +144,7 @@ pub struct LoginFailureRow {
 pub struct SignInGuardrailsPatch {
     /// Whether CAPTCHA is enforced.
     pub captcha_enabled: Option<bool>,
-    /// `turnstile` | `recaptcha`.
+    /// `turnstile` | `recaptcha` | `hcaptcha`.
     pub captcha_provider: Option<String>,
     /// The public site key.
     pub captcha_site_key: Option<Option<String>>,

@@ -32,16 +32,17 @@ impl Flow {
     }
 }
 
-/// The two providers the contract names and the siteverify endpoint each documents.
+/// The three providers the contract names and the siteverify endpoint each documents.
 fn verify_url(provider: &str) -> Option<&'static str> {
     match provider {
         "turnstile" => Some("https://challenges.cloudflare.com/turnstile/v0/siteverify"),
         "recaptcha" => Some("https://www.google.com/recaptcha/api/siteverify"),
+        "hcaptcha" => Some("https://api.hcaptcha.com/siteverify"),
         _ => None,
     }
 }
 
-/// Both providers answer `{"success": true|false, …}` — a rejected token is still a 200.
+/// All three providers answer `{"success": true|false, …}` — a rejected token is still a 200.
 fn verification_passed(body: &[u8]) -> Result<bool, serde_json::Error> {
     #[derive(serde::Deserialize)]
     struct Answer {
@@ -50,7 +51,7 @@ fn verification_passed(body: &[u8]) -> Result<bool, serde_json::Error> {
     Ok(serde_json::from_slice::<Answer>(body)?.success)
 }
 
-/// The form both siteverify endpoints read.
+/// The form all three siteverify endpoints read.
 fn verification_form<'a>(secret: &'a str, token: &'a str) -> [(&'a str, &'a str); 2] {
     [("secret", secret), ("response", token)]
 }
@@ -79,12 +80,19 @@ pub async fn enforce(
     })?;
     let secret = String::from_utf8(secret)
         .map_err(|_| ApiError::internal("the stored CAPTCHA secret is not text"))?;
-    let url = verify_url(&experience.captcha_provider).ok_or_else(|| {
+    let provider_url = verify_url(&experience.captcha_provider).ok_or_else(|| {
         ApiError::internal(format!(
             "unknown CAPTCHA provider `{}`",
             experience.captcha_provider
         ))
     })?;
+    // The override exists so the acceptance walk-through can run a local siteverify; it is only
+    // populated in dev/CI and is `None` in production, where the provider's URL always wins.
+    let url = state
+        .config
+        .captcha_siteverify_url
+        .as_deref()
+        .unwrap_or(provider_url);
 
     let response = state
         .http
@@ -129,7 +137,11 @@ mod tests {
             verify_url("recaptcha"),
             Some("https://www.google.com/recaptcha/api/siteverify")
         );
-        assert_eq!(verify_url("hcaptcha"), None);
+        assert_eq!(
+            verify_url("hcaptcha"),
+            Some("https://api.hcaptcha.com/siteverify")
+        );
+        assert_eq!(verify_url("hcaptcha2"), None);
     }
 
     #[test]
@@ -140,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn the_form_names_the_parameters_both_providers_read() {
+    fn the_form_names_the_parameters_all_providers_read() {
         assert_eq!(
             verification_form("sekrit", "tok"),
             [("secret", "sekrit"), ("response", "tok")]
