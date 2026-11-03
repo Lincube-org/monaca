@@ -526,9 +526,8 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "lists de beside the default en; a bad tag, a single-segment key, a value over 500 characters and an empty " +
       "patch are 400; PATCH {language:'de',phrases:{}} removes the language, PATCH {default_language:'de'} keeps " +
       "the default listed, and each write is on the tenant audit chain as sign_in_copy.updated; " +
-      "GET /t/demo/sign-in-copy returns the default, ?lang=de and Accept-Language: de both choose it, an " +
-      "unconfigured ?lang=fr falls back to the default, and the hosted page renders the overridden phrase with " +
-      "lang=de on the document",
+      "GET /t/demo/sign-in-copy returns the default, ?lang=de and Accept-Language: de both choose it, and an " +
+      "unconfigured ?lang=fr falls back to the default (the hosted page itself is covered by the Playwright walk)",
   },
   {
     step: "55",
@@ -553,6 +552,19 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "the email-local-part switch refuses the match and then allows it; and with display preservation on, the " +
       "typed case is returned while a lowercased name signs in and an upper-cased duplicate is 409 " +
       "MONACA_USERNAME_TAKEN",
+  },
+  {
+    step: "57",
+    title: "consent semantics",
+    assertion:
+      "a third-party client's first approval (remembered default) issues a code without a refresh token when " +
+      "offline_access was not requested; a repeated request with the same scopes is silent; adding " +
+      "offline_access to a prompt=none request answers consent_required, and its interactive screen names only " +
+      "offline_access and its token exchange carries a refresh token; adding projects:read answers " +
+      "consent_required and its screen names only the new scope, after which the full set is silent again; a " +
+      "scope outside the client registration is invalid_scope; a one-shot approval is listed with remember=false, " +
+      "does not cover the next silent request, and withdrawal revokes its refresh token; consent.granted events " +
+      "record scopes, remember, mode and interaction id for both silent and interactive decisions",
   },
 ];
 
@@ -8783,6 +8795,484 @@ async function consentFlow(base: string, adminToken: string): Promise<StepResult
 }
 
 /**
+ * Step 54: per-language copy is writable, listable and negotiated by the public read.
+ *
+ * The hosted page is rendered by `auth-ui`, which the acceptance job does not run; the page
+ * assertion is therefore left to the Playwright walk, while this checks the API that feeds it.
+ */
+async function signInCopyFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const patch = (body: Record<string, unknown>): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-copy`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+  const languages = (body: unknown): string[] =>
+    ((body as { languages?: { language?: string }[] } | undefined)?.languages ?? [])
+      .map((item) => item.language ?? "");
+  const defaultLanguage = (body: unknown): unknown =>
+    (body as { default_language?: unknown } | undefined)?.default_language;
+
+  try {
+    const written = await patch({ language: "de", phrases: { "signIn.title": "Anmelden" } });
+    const listed = await call(`${base}/v1/sign-in-copy`, { headers });
+    const de = ((listed.body as { languages?: { language?: string; phrases?: Record<string, unknown> }[] } | undefined)
+      ?.languages ?? []).find((item) => item.language === "de");
+    checks.push([
+      "PATCH stores a language and the list carries its phrase",
+      written.status === 200 && listed.status === 200 &&
+        languages(listed.body).includes("de") &&
+        de?.phrases?.["signIn.title"] === "Anmelden",
+    ]);
+
+    const [badTag, singleSegment, longValue, empty] = await Promise.all([
+      patch({ language: "de_DE", phrases: { "signIn.title": "Anmelden" } }),
+      patch({ language: "de", phrases: { title: "Anmelden" } }),
+      patch({ language: "de", phrases: { "signIn.title": "x".repeat(501) } }),
+      patch({}),
+    ]);
+    checks.push([
+      "a malformed tag, a single-segment key, a 501-character value and an empty patch are 400",
+      badTag.status === 400 && singleSegment.status === 400 &&
+        longValue.status === 400 && empty.status === 400,
+    ]);
+
+    const removed = await patch({ language: "de", phrases: {} });
+    const afterRemove = await call(`${base}/v1/sign-in-copy`, { headers });
+    checks.push([
+      "an empty phrase set removes the language",
+      removed.status === 200 && !languages(afterRemove.body).includes("de"),
+    ]);
+
+    const defaulted = await patch({ default_language: "de" });
+    const afterDefault = await call(`${base}/v1/sign-in-copy`, { headers });
+    checks.push([
+      "changing the default keeps it listed",
+      defaulted.status === 200 && defaultLanguage(afterDefault.body) === "de" &&
+        languages(afterDefault.body).includes("de"),
+    ]);
+
+    const publicDefault = await call(`${base}/t/${TENANT}/sign-in-copy`);
+    const publicDe = await call(`${base}/t/${TENANT}/sign-in-copy?lang=de`);
+    const publicHeader = await call(`${base}/t/${TENANT}/sign-in-copy`, {
+      headers: { "accept-language": "de" },
+    });
+    const publicFallback = await call(`${base}/t/${TENANT}/sign-in-copy?lang=fr`);
+    checks.push([
+      "the public read follows the default, ?lang, Accept-Language and an unknown fallback",
+      defaultLanguage(publicDefault.body) === "de" &&
+        defaultLanguage(publicDe.body) === "de" &&
+        defaultLanguage(publicHeader.body) === "de" &&
+        defaultLanguage(publicFallback.body) === "de",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await patch({ default_language: "en" });
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "54",
+    title: "language and custom copy",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: write → list → refusals → remove → default → public negotiation`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 57: remembered versus one-shot consent, incremental scopes and offline access.
+ *
+ * One third-party client walks the full path: consent without `offline_access`, a silent repeat,
+ * a request that adds `offline_access` (which must not go silently), then a request that adds one
+ * more scope (which must show a single screen naming only the new scope). A second client approves
+ * one-shot, proves the next silent request asks again, and proves withdrawal ends its refresh
+ * token. The final read checks the `consent.granted` audit trail for both modes.
+ */
+async function consentSemanticsFlow(
+  base: string,
+  adminToken: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const sameStringList = (value: unknown, expected: string[]): boolean =>
+    Array.isArray(value) &&
+    value.length === expected.length &&
+    expected.every((item, index) => value[index] === item);
+
+  const email = `consent-sem-${runId}@demo.localhost`;
+  const password = `pw-${runId}-consent-sem`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const client1 = `e2e-consent-rem-${runId}`;
+  const client2 = `e2e-consent-one-${runId}`;
+  const scopes = "openid profile email offline_access projects:read";
+  const verifier = `cs-sem-${runId}-${"v".repeat(32)}`;
+  const challenge = base64Url(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+  );
+  let client1Row: string | undefined;
+  let client2Row: string | undefined;
+
+  const authorize = (
+    clientId: string,
+    tag: string,
+    scope: string,
+    extra: Record<string, string> = {},
+    cookie?: string,
+  ): Promise<HttpResult> =>
+    call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        scope,
+        state: `st-consent-sem-${runId}-${tag}`,
+        nonce: `n-consent-sem-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+        ...extra,
+      })}`,
+      {
+        redirect: "manual",
+        ...(cookie === undefined ? {} : { headers: { cookie } }),
+      },
+    );
+
+  const interactionOf = (response: HttpResult): string | null =>
+    new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
+  const codeOf = (response: HttpResult): string | null => {
+    const redirect =
+      response.headers.get("location") ??
+      (response.body as { redirect_to?: unknown } | undefined)?.redirect_to;
+    return typeof redirect === "string"
+      ? new URL(redirect, base).searchParams.get("code")
+      : null;
+  };
+  const errorOf = (response: HttpResult): string | null =>
+    new URL(response.headers.get("location") ?? "", base).searchParams.get("error");
+  const consent = (iid: string, remember: boolean): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(iid)}/consent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision: "allow", remember }),
+    });
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Consent Semantics", password }),
+    });
+    const accountId = (created.body as { id?: unknown } | undefined)?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return consentSemanticsFail(t, `POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const makeClient = (id: string, name: string): Promise<HttpResult> =>
+      call(`${base}/v1/clients`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          client_id: id,
+          name,
+          kind: "public",
+          redirect_uris: [redirectUri],
+          scopes: ["openid", "profile", "email", "offline_access", "projects:read"],
+          is_third_party: true,
+        }),
+      });
+    const [app1, app2] = await Promise.all([
+      makeClient(client1, "Remembered consent"),
+      makeClient(client2, "One-shot consent"),
+    ]);
+    client1Row = (app1.body as { id?: unknown } | undefined)?.id as string | undefined;
+    client2Row = (app2.body as { id?: unknown } | undefined)?.id as string | undefined;
+    checks.push([
+      "two third-party clients are registered",
+      app1.status === 201 && app2.status === 201 &&
+        typeof client1Row === "string" && typeof client2Row === "string",
+    ]);
+    if (typeof client1Row !== "string" || typeof client2Row !== "string") {
+      return consentSemanticsFail(t, `POST /v1/clients → ${app1.status}/${app2.status}`);
+    }
+
+    // --- first approval: no offline_access requested, so no refresh token ----------------------
+    const opened = await authorize(client1, "open", "openid profile email");
+    const firstIid = interactionOf(opened);
+    const signedIn = firstIid === null
+      ? undefined
+      : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(firstIid)}/sign-in`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ identifier: email, password }),
+        });
+    const sessionCookie = /monaca_session=([0-9a-f-]{36})/.exec(
+      signedIn?.headers.get("set-cookie") ?? "",
+    )?.[1];
+    const firstConsent = firstIid === null ? undefined : await consent(firstIid, true);
+    const firstCode = firstConsent === undefined ? null : codeOf(firstConsent);
+    checks.push([
+      "the first approval needs a screen and needs no offline access",
+      opened.status === 302 && firstIid !== null && signedIn?.status === 200 &&
+        sessionCookie !== undefined && firstConsent?.status === 200 && firstCode !== null,
+    ]);
+    if (sessionCookie === undefined || firstCode === null) {
+      return consentSemanticsFail(
+        t,
+        `first flow: authorize=${opened.status}, iid=${firstIid}, signin=${signedIn?.status} ${text(signedIn?.body)}, cookie=${sessionCookie}, consent=${firstConsent?.status} ${text(firstConsent?.body)}`,
+      );
+    }
+    const cookie = `monaca_session=${sessionCookie}`;
+    const firstToken = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code: firstCode,
+      redirect_uri: redirectUri,
+      client_id: client1,
+      code_verifier: verifier,
+    });
+    checks.push([
+      "without offline_access the exchange has no refresh token",
+      firstToken.status === 200 &&
+        (firstToken.body as { refresh_token?: unknown } | undefined)?.refresh_token === undefined,
+    ]);
+
+    // --- already approved: no screen; a new offline_access scope must not go silently ----------
+    const repeated = await authorize(client1, "repeat", "openid profile email", { prompt: "none" }, cookie);
+    checks.push([
+      "an already approved scope set skips the screen silently",
+      repeated.status === 302 && codeOf(repeated) !== null && errorOf(repeated) === null,
+    ]);
+    const offlineSilent = await authorize(
+      client1,
+      "offline-silent",
+      "openid profile email offline_access",
+      { prompt: "none" },
+      cookie,
+    );
+    checks.push([
+      "a new offline_access scope is not granted silently",
+      offlineSilent.status === 302 && errorOf(offlineSilent) === "consent_required",
+    ]);
+    const offlineOpened = await authorize(
+      client1,
+      "offline-screen",
+      "openid profile email offline_access",
+      {},
+      cookie,
+    );
+    const offlineIid = interactionOf(offlineOpened);
+    const offlineDetails = offlineIid === null
+      ? undefined
+      : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(offlineIid)}`, {
+          headers: { cookie },
+        });
+    const offlineConsent = offlineIid === null ? undefined : await consent(offlineIid, true);
+    const offlineCode = offlineConsent === undefined ? null : codeOf(offlineConsent);
+    checks.push([
+      "the offline_access screen names only the new scope and grants a refresh token",
+      offlineOpened.status === 302 && offlineIid !== null &&
+        sameStringList(
+          (offlineDetails?.body as { consent_scopes?: unknown } | undefined)?.consent_scopes,
+          ["offline_access"],
+        ) &&
+        offlineConsent?.status === 200 && offlineCode !== null,
+    ]);
+    if (offlineCode === null) return consentSemanticsFail(t, "offline consent did not issue a code");
+    const offlineToken = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code: offlineCode,
+      redirect_uri: redirectUri,
+      client_id: client1,
+      code_verifier: verifier,
+    });
+    const liveRefresh = (offlineToken.body as { refresh_token?: unknown } | undefined)?.refresh_token;
+    checks.push([
+      "the offline_access grant issues a refresh token",
+      offlineToken.status === 200 && typeof liveRefresh === "string",
+    ]);
+
+    // --- incremental scope: one screen naming only projects:read --------------------------------
+    const incrementalSilent = await authorize(
+      client1,
+      "incremental-silent",
+      scopes,
+      { prompt: "none" },
+      cookie,
+    );
+    checks.push([
+      "a new incremental scope is not silently approved",
+      incrementalSilent.status === 302 && errorOf(incrementalSilent) === "consent_required",
+    ]);
+    const incrementalOpened = await authorize(client1, "incremental", scopes, {}, cookie);
+    const incrementalIid = interactionOf(incrementalOpened);
+    const incrementalDetails = incrementalIid === null
+      ? undefined
+      : await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(incrementalIid)}`, {
+          headers: { cookie },
+        });
+    const incrementalConsent = incrementalIid === null ? undefined : await consent(incrementalIid, true);
+    checks.push([
+      "the incremental screen carries only the newly requested scope",
+      incrementalOpened.status === 302 && incrementalIid !== null &&
+        sameStringList(
+          (incrementalDetails?.body as { consent_scopes?: unknown } | undefined)?.consent_scopes,
+          ["projects:read"],
+        ) &&
+        incrementalConsent?.status === 200 && codeOf(incrementalConsent) !== null,
+    ]);
+    const silentAll = await authorize(client1, "all-silent", scopes, { prompt: "none" }, cookie);
+    checks.push([
+      "after the incremental approval the full scope set is silent again",
+      silentAll.status === 302 && codeOf(silentAll) !== null && errorOf(silentAll) === null,
+    ]);
+
+    const overScope = await authorize(client1, "over", "openid admin:all", {}, cookie);
+    checks.push([
+      "a scope outside the client registration is invalid_scope",
+      overScope.status === 302 && errorOf(overScope) === "invalid_scope",
+    ]);
+
+    // --- one-shot: approved once, listed, revocable, and never covers the next request ----------
+    const oneOpened = await authorize(client2, "one", scopes, {}, cookie);
+    const oneIid = interactionOf(oneOpened);
+    const oneConsent = oneIid === null ? undefined : await consent(oneIid, false);
+    const oneCode = oneConsent === undefined ? null : codeOf(oneConsent);
+    checks.push([
+      "a one-shot approval issues a code without remembering",
+      oneOpened.status === 302 && oneIid !== null && oneConsent?.status === 200 && oneCode !== null,
+    ]);
+    if (oneCode === null) return consentSemanticsFail(t, "one-shot consent did not issue a code");
+    const oneToken = await tokenCall(base, {
+      grant_type: "authorization_code",
+      code: oneCode,
+      redirect_uri: redirectUri,
+      client_id: client2,
+      code_verifier: verifier,
+    });
+    const oneRefresh = (oneToken.body as { refresh_token?: unknown } | undefined)?.refresh_token;
+    const oneSilent = await authorize(client2, "one-silent", scopes, { prompt: "none" }, cookie);
+    checks.push([
+      "one-shot does not cover the next silent request",
+      typeof oneRefresh === "string" && oneSilent.status === 302 &&
+        errorOf(oneSilent) === "consent_required",
+    ]);
+
+    type AppRow = { client_id?: unknown; remember?: unknown; scopes?: unknown };
+    const listed = await call(`${base}/t/${TENANT}/account/authorized-apps`, {
+      headers: { cookie },
+    });
+    const items = (listed.body as { items?: AppRow[] } | undefined)?.items ?? [];
+    const rememberRow = items.find((row) => row.client_id === client1);
+    const oneShotRow = items.find((row) => row.client_id === client2);
+    checks.push([
+      "the account centre distinguishes remembered and one-shot approvals",
+      listed.status === 200 && rememberRow?.remember === true &&
+        oneShotRow?.remember === false,
+    ]);
+
+    const withdrawn = await call(
+      `${base}/t/${TENANT}/account/authorized-apps/${encodeURIComponent(client2)}`,
+      { method: "DELETE", headers: { cookie } },
+    );
+    const dead = await tokenCall(base, {
+      grant_type: "refresh_token",
+      refresh_token: String(oneRefresh ?? ""),
+      client_id: client2,
+    });
+    checks.push([
+      "withdrawing a one-shot approval revokes its refresh token",
+      withdrawn.status === 204 && dead.status === 400 &&
+        (dead.body as { error?: unknown } | undefined)?.error === "invalid_grant",
+    ]);
+
+    const audit = await call(
+      `${base}/internal/audit?${new URLSearchParams({
+        tenant: TENANT,
+        action: "consent.granted",
+        limit: "100",
+      })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    type AuditRow = {
+      payload?: {
+        client_id?: unknown;
+        mode?: unknown;
+        remember?: unknown;
+        scopes?: unknown;
+        interaction_id?: unknown;
+      };
+    };
+    const events = (audit.body as { items?: AuditRow[] } | undefined)?.items ?? [];
+    const silentEvent = events.find(
+      (event) =>
+        event.payload?.client_id === client1 &&
+        event.payload?.mode === "silent" &&
+        event.payload?.remember === true,
+    );
+    const oneShotEvent = events.find(
+      (event) => event.payload?.client_id === client2 && event.payload?.remember === false,
+    );
+    checks.push([
+      "silent and interactive consent decisions are audited with scope and interaction",
+      audit.status === 200 &&
+        typeof silentEvent?.payload?.interaction_id === "string" &&
+        Array.isArray(silentEvent?.payload?.scopes) &&
+        (silentEvent.payload.scopes as unknown[]).includes("offline_access") &&
+        oneShotEvent?.payload?.mode === "interactive" &&
+        Array.isArray(oneShotEvent?.payload?.scopes),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    for (const id of [client1Row, client2Row]) {
+      if (typeof id === "string") {
+        await call(`${base}/v1/clients/${id}`, { method: "DELETE", headers }).catch(() => undefined);
+      }
+    }
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "57",
+    title: "consent semantics",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: first consent → silent repeat → offline_access gate → incremental scope → one-shot → revocation → audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+function consentSemanticsFail(t: number, why: string): StepResult {
+  return {
+    step: "57",
+    title: "consent semantics",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  };
+}
+
+/**
  * Step 51: mail copy is per tenant, rendered at send time, and restorable.
  *
  * The proof that a template is more than a stored string is the outbox: after a custom sign-up
@@ -11815,6 +12305,8 @@ async function main(): Promise<number> {
   push(await emailTemplatesFlow(base, adminToken, parsed.internalSecret));
   push(await captchaFlow(base, adminToken));
   push(await corsFlow(base, adminToken));
+  push(await signInCopyFlow(base, adminToken));
+  push(await consentSemanticsFlow(base, adminToken, parsed.internalSecret));
   push(await emailConnectorFlow(base, adminToken, parsed.internalSecret));
   push(await usernamePolicyFlow(base, adminToken));
 
