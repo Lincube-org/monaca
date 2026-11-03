@@ -617,13 +617,67 @@ pub async fn revoke_other_sessions(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// One third-party application the account approved, as the account centre lists it.
-fn authorized_app_json(app: &monaca_store::AuthorizedAppRow) -> Value {
+/// One third-party application the account approved, with both approval kinds a client may hold
+/// folded into a single row.
+struct AuthorizedAppSummary {
+    client_id: String,
+    name: String,
+    scopes: Vec<String>,
+    remembered: bool,
+    one_shot: bool,
+    granted_at: time::OffsetDateTime,
+    updated_at: time::OffsetDateTime,
+}
+
+/// Fold a client's remembered and one-shot rows into one entry, keeping the union of scopes and
+/// the earliest grant time.
+fn aggregate_authorized_apps(apps: &[monaca_store::AuthorizedAppRow]) -> Vec<AuthorizedAppSummary> {
+    let mut merged: Vec<AuthorizedAppSummary> = Vec::new();
+    for app in apps {
+        if let Some(existing) = merged.iter_mut().find(|row| row.client_id == app.client_id) {
+            for scope in &app.scopes {
+                if !existing.scopes.contains(scope) {
+                    existing.scopes.push(scope.clone());
+                }
+            }
+            if app.kind == "remember" {
+                existing.remembered = true;
+            } else {
+                existing.one_shot = true;
+            }
+            existing.granted_at = existing.granted_at.min(app.granted_at);
+            existing.updated_at = existing.updated_at.max(app.updated_at);
+        } else {
+            merged.push(AuthorizedAppSummary {
+                client_id: app.client_id.clone(),
+                name: app.name.clone(),
+                scopes: app.scopes.clone(),
+                remembered: app.kind == "remember",
+                one_shot: app.kind == "one_shot",
+                granted_at: app.granted_at,
+                updated_at: app.updated_at,
+            });
+        }
+    }
+    merged
+}
+
+/// One entry as the account centre renders it. `remember` stays for older clients; `kinds` names
+/// every approval the account holds for the client.
+fn authorized_app_json(app: &AuthorizedAppSummary) -> Value {
+    let mut kinds = Vec::new();
+    if app.remembered {
+        kinds.push("remember");
+    }
+    if app.one_shot {
+        kinds.push("one_shot");
+    }
     json!({
         "client_id": app.client_id,
         "name": app.name,
         "scopes": app.scopes,
-        "remember": app.kind == "remember",
+        "remember": app.remembered,
+        "kinds": kinds,
         "granted_at": crate::management::ts(app.granted_at),
         "updated_at": crate::management::ts(app.updated_at),
     })
@@ -640,7 +694,10 @@ pub async fn list_authorized_apps(
         .store
         .authorized_apps(&tenant, account.account_id())
         .await?;
-    let items: Vec<Value> = apps.iter().map(authorized_app_json).collect();
+    let items: Vec<Value> = aggregate_authorized_apps(&apps)
+        .iter()
+        .map(authorized_app_json)
+        .collect();
     Ok(Json(json!({ "items": items, "next": null })))
 }
 
