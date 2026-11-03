@@ -75,6 +75,7 @@ pub const M0_ACTIONS: &[&str] = &[
     "session.revoked",
     "session.revoked_all",
     "consent.revoked",
+    "consent.granted",
     "sign_in_experience.updated",
     "sign_in_copy.updated",
     "email_template.updated",
@@ -221,7 +222,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 59);
+        assert_eq!(M0_ACTIONS.len(), 60);
         for action in [
             "account.created",
             "account.updated",
@@ -269,6 +270,7 @@ mod tests {
             "session.revoked",
             "session.revoked_all",
             "consent.revoked",
+            "consent.granted",
             "sign_in_experience.updated",
             "sign_in_copy.updated",
             "email_template.updated",

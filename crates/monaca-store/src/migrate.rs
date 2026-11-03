@@ -249,6 +249,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "username policy and display case (M1)",
         include_str!("../migrations/tenant_42.sql"),
     ),
+    (
+        43,
+        "remembered and one-shot consent (M1)",
+        include_str!("../migrations/tenant_43.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

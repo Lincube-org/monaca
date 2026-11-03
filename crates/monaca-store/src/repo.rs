@@ -460,6 +460,10 @@ pub struct ConsentRow {
     pub client_id: Uuid,
     /// The scopes the account approved.
     pub scopes: Vec<String>,
+    /// `remember` or `one_shot`.
+    pub kind: String,
+    /// The `int_…` consent screen that recorded this row, when known.
+    pub interaction_id: Option<String>,
     /// When the approval was first recorded.
     pub granted_at: OffsetDateTime,
     /// When the scopes were last refreshed.
@@ -475,6 +479,8 @@ pub struct AuthorizedAppRow {
     pub name: String,
     /// The scopes the account approved.
     pub scopes: Vec<String>,
+    /// `remember` or `one_shot`.
+    pub kind: String,
     /// When the approval was first recorded.
     pub granted_at: OffsetDateTime,
     /// When the approval was last refreshed.
@@ -3953,7 +3959,10 @@ impl Store {
 
     // ---------------------------------------------------------------- consent grants
 
-    /// The account's recorded approval for a client, if any.
+    /// The account's *remembered* approval for a client, if any.
+    ///
+    /// A one-shot row is deliberately invisible here: it is listed and revocable, but it never
+    /// covers a later authorize request.
     pub async fn consent(
         &self,
         tenant: &TenantRow,
@@ -3962,8 +3971,9 @@ impl Store {
     ) -> Result<Option<ConsentRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, ConsentRow>(
-            "SELECT account_id, client_id, scopes, granted_at, updated_at
-             FROM tenant.consents WHERE account_id = $1 AND client_id = $2",
+            "SELECT account_id, client_id, scopes, kind, interaction_id, granted_at, updated_at
+             FROM tenant.consents
+             WHERE account_id = $1 AND client_id = $2 AND kind = 'remember'",
         )
         .bind(account_id.uuid())
         .bind(client_row_id)
@@ -3971,27 +3981,68 @@ impl Store {
         .await?)
     }
 
+    /// Every approval (remembered and one-shot) the account holds for one client.
+    pub async fn consents_for_client(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        client_row_id: Uuid,
+    ) -> Result<Vec<ConsentRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, ConsentRow>(
+            "SELECT account_id, client_id, scopes, kind, interaction_id, granted_at, updated_at
+             FROM tenant.consents WHERE account_id = $1 AND client_id = $2
+             ORDER BY granted_at",
+        )
+        .bind(account_id.uuid())
+        .bind(client_row_id)
+        .fetch_all(&pool)
+        .await?)
+    }
+
     /// Record or refresh an approval; approving again keeps the original `granted_at`.
+    ///
+    /// Remembering supersedes a pending one-shot row for the same client, because the remembered
+    /// scopes now cover everything that row listed.
     pub async fn upsert_consent(
         &self,
         tenant: &TenantRow,
         account_id: AccountId,
         client_row_id: Uuid,
         scopes: &[String],
+        kind: &str,
+        interaction_id: Option<&str>,
     ) -> Result<ConsentRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, ConsentRow>(
-            "INSERT INTO tenant.consents (account_id, client_id, scopes)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (account_id, client_id)
-             DO UPDATE SET scopes = EXCLUDED.scopes, updated_at = now()
-             RETURNING account_id, client_id, scopes, granted_at, updated_at",
+        let mut tx = pool.begin().await?;
+        let row = sqlx::query_as::<_, ConsentRow>(
+            "INSERT INTO tenant.consents (account_id, client_id, scopes, kind, interaction_id)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (account_id, client_id, kind)
+             DO UPDATE SET scopes = EXCLUDED.scopes,
+                           interaction_id = EXCLUDED.interaction_id,
+                           updated_at = now()
+             RETURNING account_id, client_id, scopes, kind, interaction_id, granted_at, updated_at",
         )
         .bind(account_id.uuid())
         .bind(client_row_id)
         .bind(scopes)
-        .fetch_one(&pool)
-        .await?)
+        .bind(kind)
+        .bind(interaction_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if kind == "remember" {
+            sqlx::query(
+                "DELETE FROM tenant.consents
+                 WHERE account_id = $1 AND client_id = $2 AND kind = 'one_shot'",
+            )
+            .bind(account_id.uuid())
+            .bind(client_row_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(row)
     }
 
     /// Third-party applications this account approved, most recently used first.
@@ -4002,18 +4053,18 @@ impl Store {
     ) -> Result<Vec<AuthorizedAppRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, AuthorizedAppRow>(
-            "SELECT c.client_id, c.name, g.scopes, g.granted_at, g.updated_at
+            "SELECT c.client_id, c.name, g.scopes, g.kind, g.granted_at, g.updated_at
              FROM tenant.consents g
              JOIN tenant.clients c ON c.id = g.client_id
              WHERE g.account_id = $1
-             ORDER BY g.updated_at DESC, c.name",
+             ORDER BY g.updated_at DESC, c.name, g.kind",
         )
         .bind(account_id.uuid())
         .fetch_all(&pool)
         .await?)
     }
 
-    /// Remove an approval; false when the account had not approved this client.
+    /// Remove every approval for one client; false when the account held none.
     pub async fn revoke_consent(
         &self,
         tenant: &TenantRow,

@@ -266,6 +266,8 @@ pub async fn authorize(
             None => true,
         });
 
+    let mut silent_approved = false;
+    let mut silent_interaction: Option<String> = None;
     if let Some(session) = session {
         // A disabled account must not keep riding an old session.
         if let Some(account) = state
@@ -275,18 +277,26 @@ pub async fn authorize(
             .filter(|account| account.state == "active")
         {
             if request.requires_consent(client.is_third_party) {
-                // A stored grant lets a returning user through without the screen. `prompt=consent`
-                // overrides it, and a first-party client never records one.
+                // A remembered grant lets a returning user through without the screen.
+                // `prompt=consent` overrides it, and a first-party client never records one.
+                let grant = remember_consent(
+                    &state,
+                    &tenant,
+                    account.account_id(),
+                    client.id,
+                )
+                .await?;
                 let approved = !request.forces_consent()
                     && client.is_third_party
-                    && consent_covers(
-                        &state,
-                        &tenant,
-                        account.account_id(),
-                        client.id,
-                        &request.scopes,
-                    )
-                    .await?;
+                    && grant
+                        .as_ref()
+                        .is_some_and(|grant| consent_covers(grant, &request.scopes));
+                if approved {
+                    silent_approved = true;
+                    silent_interaction = grant
+                        .as_ref()
+                        .and_then(|grant| grant.interaction_id.clone());
+                }
                 if !approved {
                     // `prompt=none` may not open a page; with a session but no recorded consent the
                     // only compliant answer is the `consent_required` error (OIDC Core §3.1.2.6).
@@ -333,6 +343,20 @@ pub async fn authorize(
             )
             .await?;
             state.store.touch_session(&tenant, session.id, now).await?;
+            if silent_approved {
+                audit_consent_granted(
+                    &state,
+                    &tenant,
+                    account.account_id(),
+                    &client.client_id,
+                    &client.name,
+                    &request.scopes,
+                    true,
+                    "silent",
+                    silent_interaction.as_deref(),
+                )
+                .await;
+            }
             return Ok(found(&append_query(
                 &request.redirect_uri,
                 &[("code", code.as_str()), ("state", request.state.as_str())],
@@ -386,24 +410,47 @@ fn build_interaction(
     }
 }
 
-/// Whether the account's stored approval for `client_row_id` covers every requested scope.
-async fn consent_covers(
+/// The account's *remembered* approval for a client, if any.
+async fn remember_consent(
     state: &AppState,
     tenant: &TenantRow,
     account_id: AccountId,
     client_row_id: Uuid,
-    scopes: &[String],
-) -> Result<bool, ApiError> {
-    let Some(grant) = state
+) -> Result<Option<monaca_store::ConsentRow>, ApiError> {
+    Ok(state
         .store
         .consent(tenant, account_id, client_row_id)
-        .await?
-    else {
-        return Ok(false);
-    };
-    Ok(scopes
+        .await?)
+}
+
+/// Whether a remembered approval covers every requested scope.
+fn consent_covers(grant: &monaca_store::ConsentRow, scopes: &[String]) -> bool {
+    scopes
         .iter()
-        .all(|scope| grant.scopes.iter().any(|approved| approved == scope)))
+        .all(|scope| grant.scopes.iter().any(|approved| approved == scope))
+}
+
+/// The requested scopes a remembered grant does not cover yet.
+fn consent_new_scopes(grant: Option<&monaca_store::ConsentRow>, scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| {
+            grant.is_none_or(|grant| !grant.scopes.iter().any(|approved| approved == *scope))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The remembered scopes plus the request, so a later request that names only a new scope
+/// does not erase what was approved earlier.
+fn merged_scopes(grant: Option<&monaca_store::ConsentRow>, scopes: &[String]) -> Vec<String> {
+    let mut merged = grant.map(|grant| grant.scopes.clone()).unwrap_or_default();
+    for scope in scopes {
+        if !merged.contains(scope) {
+            merged.push(scope.clone());
+        }
+    }
+    merged
 }
 
 /// Where the auth-ui sign-in page lives for this interaction.
@@ -430,6 +477,25 @@ pub async fn interaction_details(
         .await
         .map_err(ApiError::Interaction)?;
     let mut body = interaction.to_public_json(signed_in.is_some());
+    if interaction.consent_required {
+        // A previously approved scope is not part of the incremental consent screen; before
+        // sign-in there is no account, so the page shows the whole request.
+        let scopes = match signed_in {
+            Some(account_id) => {
+                let tenant = state.tenant(&interaction.tenant).await?;
+                let grant = remember_consent(
+                    &state,
+                    &tenant,
+                    AccountId::from_uuid(account_id),
+                    interaction.client_row_id,
+                )
+                .await?;
+                consent_new_scopes(grant.as_ref(), &interaction.scopes)
+            }
+            None => interaction.scopes.clone(),
+        };
+        body["consent_scopes"] = json!(scopes);
+    }
     body["mfa_required"] = json!(pending.is_some());
     // A mandatory policy parks the flow on an enrollment step instead; the page needs to know
     // which of the two it is rendering.
@@ -890,15 +956,17 @@ async fn complete_sign_in(
     // consent step can redeem it. An approval recorded earlier skips the screen unless
     // `prompt=consent` explicitly asked for it again.
     if interaction.consent_required {
+        let grant = remember_consent(
+            &state,
+            &tenant,
+            account.account_id(),
+            interaction.client_row_id,
+        )
+        .await?;
         let approved = !interaction.consent_prompted
-            && consent_covers(
-                &state,
-                &tenant,
-                account.account_id(),
-                interaction.client_row_id,
-                &interaction.scopes,
-            )
-            .await?;
+            && grant
+                .as_ref()
+                .is_some_and(|grant| consent_covers(grant, &interaction.scopes));
         if !approved {
             state
                 .mark_interaction_signed_in(iid, account.id, session_id)
@@ -927,6 +995,8 @@ async fn complete_sign_in(
         account,
         Some(session_id),
         false,
+        true,
+        Some("silent"),
     )
     .await?;
     Ok(with_session_cookie(
@@ -2816,6 +2886,10 @@ fn with_session_cookie(
 pub struct ConsentBody {
     /// `allow` | `deny`.
     pub decision: String,
+    /// Whether the approval should cover future authorize requests; defaults to `true`, the
+    /// pre-existing behaviour.
+    #[serde(default)]
+    pub remember: Option<bool>,
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/consent` — the second half of the login/consent challenge.
@@ -2855,7 +2929,17 @@ pub async fn consent(
         .await?
         .ok_or_else(|| ApiError::problem(kinds::INVALID_REQUEST, "account is gone"))?;
 
-    approve_interaction(state, tenant, interaction, account, session_id, true).await
+    approve_interaction(
+        state,
+        tenant,
+        interaction,
+        account,
+        session_id,
+        true,
+        body.remember.unwrap_or(true),
+        Some("interactive"),
+    )
+    .await
 }
 
 /// Mint the authorization code for an approved interaction and return the client redirect.
@@ -2869,29 +2953,85 @@ async fn approve_interaction(
     account: AccountRow,
     session_id: Option<Uuid>,
     record_consent: bool,
+    remember: bool,
+    audit_mode: Option<&str>,
 ) -> Result<Response, ApiError> {
     let org_slug = interaction.organization.clone();
     let org = state.store.org_by_slug(&tenant, &org_slug).await?;
+    let existing = remember_consent(
+        &state,
+        &tenant,
+        account.account_id(),
+        interaction.client_row_id,
+    )
+    .await?;
+    let new_scopes = consent_new_scopes(existing.as_ref(), &interaction.scopes);
+    let client = state
+        .store
+        .client_by_id(&tenant, interaction.client_row_id)
+        .await?;
 
     // A standing approval belongs to third-party applications; `prompt=consent` on a first-party
-    // client is a one-off confirmation, not something the account centre should list.
+    // client is a one-off confirmation, not something the account centre should list. A one-shot
+    // decision is recorded so it can be listed and withdrawn, but it never covers a later request.
     if record_consent
-        && state
-            .store
-            .client_by_id(&tenant, interaction.client_row_id)
-            .await?
+        && client
+            .as_ref()
             .is_some_and(|client| client.is_third_party)
-        && let Err(err) = state
+        && let Some(client) = client.as_ref()
+    {
+        let kind = if remember { "remember" } else { "one_shot" };
+        let scopes = if remember {
+            merged_scopes(existing.as_ref(), &interaction.scopes)
+        } else {
+            interaction.scopes.clone()
+        };
+        if let Err(err) = state
             .store
             .upsert_consent(
                 &tenant,
                 account.account_id(),
                 interaction.client_row_id,
-                &interaction.scopes,
+                &scopes,
+                kind,
+                Some(&interaction.interaction_id.to_string()),
             )
             .await
+        {
+            tracing::warn!(%err, "could not record the consent grant");
+        }
+        if let Some(mode) = audit_mode {
+            audit_consent_granted(
+                &state,
+                &tenant,
+                account.account_id(),
+                &client.client_id,
+                &client.name,
+                &new_scopes,
+                remember,
+                mode,
+                Some(&interaction.interaction_id.to_string()),
+            )
+            .await;
+        }
+    } else if audit_mode == Some("silent")
+        && client
+            .as_ref()
+            .is_some_and(|client| client.is_third_party)
+        && let Some(client) = client.as_ref()
     {
-        tracing::warn!(%err, "could not record the consent grant");
+        audit_consent_granted(
+            &state,
+            &tenant,
+            account.account_id(),
+            &client.client_id,
+            &client.name,
+            &interaction.scopes,
+            true,
+            "silent",
+            Some(&interaction.interaction_id.to_string()),
+        )
+        .await;
     }
     // `auth_time` is the authentication instant, which is the session's creation when one exists.
     let auth_time = match session_id {
@@ -2931,6 +3071,50 @@ async fn approve_interaction(
         ],
     );
     Ok(Json(json!({ "redirect_to": redirect_to })).into_response())
+}
+
+/// Record a consent decision — interactive or inherited silently — on the tenant chain.
+///
+/// `interaction_id` names the screen (or, for the session fast path, the interaction that recorded
+/// the remembered grant), and a silent event also gets its own `authorization_id` so two silent
+/// issuances under one remembered grant remain distinguishable.
+#[allow(clippy::too_many_arguments)]
+async fn audit_consent_granted(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    account_id: AccountId,
+    client_id: &str,
+    client_name: &str,
+    scopes: &[String],
+    remember: bool,
+    mode: &str,
+    interaction_id: Option<&str>,
+) {
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "consent.granted".into(),
+        actor_chain: vec![AuditActor::account(account_id)],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "client_id": client_id,
+            "name": client_name,
+            "scopes": scopes,
+            "remember": remember,
+            "mode": mode,
+            "interaction_id": interaction_id,
+            "authorization_id": (mode == "silent").then(|| Uuid::now_v7().to_string()),
+        }),
+    };
+    if let Err(err) = state.audit_tenant(tenant, &event).await {
+        tracing::warn!(%err, "could not append consent.granted audit event");
+    }
 }
 
 /// Store a single-use authorization code and record the audit event.

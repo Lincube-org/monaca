@@ -623,6 +623,7 @@ fn authorized_app_json(app: &monaca_store::AuthorizedAppRow) -> Value {
         "client_id": app.client_id,
         "name": app.name,
         "scopes": app.scopes,
+        "remember": app.kind == "remember",
         "granted_at": crate::management::ts(app.granted_at),
         "updated_at": crate::management::ts(app.updated_at),
     })
@@ -656,13 +657,22 @@ pub async fn revoke_authorized_app(
     let Some(client_row) = state.store.client_by_client_id(&tenant, &client).await? else {
         return Err(ApiError::not_found("application"));
     };
-    let Some(grant) = state
+    let grants = state
         .store
-        .consent(&tenant, account.account_id(), client_row.id)
-        .await?
-    else {
+        .consents_for_client(&tenant, account.account_id(), client_row.id)
+        .await?;
+    if grants.is_empty() {
         return Err(ApiError::not_found("application"));
-    };
+    }
+    let mut scopes: Vec<String> = Vec::new();
+    for grant in &grants {
+        for scope in &grant.scopes {
+            if !scopes.contains(scope) {
+                scopes.push(scope.clone());
+            }
+        }
+    }
+    let kinds: Vec<&str> = grants.iter().map(|grant| grant.kind.as_str()).collect();
     if !state
         .store
         .revoke_consent(&tenant, account.account_id(), client_row.id)
@@ -693,7 +703,8 @@ pub async fn revoke_authorized_app(
         payload: json!({
             "client_id": client_row.client_id,
             "name": client_row.name,
-            "scopes": grant.scopes,
+            "scopes": scopes,
+            "kinds": kinds,
         }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
