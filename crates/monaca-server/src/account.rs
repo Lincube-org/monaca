@@ -231,7 +231,7 @@ pub async fn update_account(
     let username = body
         .username
         .as_deref()
-        .map(|raw| check_username(raw, &experience))
+        .map(|raw| check_username(raw, &experience, Some(&account.primary_email)))
         .transpose()?;
     let avatar_url = body
         .avatar_url
@@ -261,7 +261,12 @@ pub async fn update_account(
         // A username another account holds is a `409 MONACA_USERNAME_TAKEN` (§6.1).
         state
             .store
-            .set_username(&tenant, account.account_id(), &username)
+            .set_username(
+                &tenant,
+                account.account_id(),
+                &username.value,
+                username.display.as_deref(),
+            )
             .await?;
     }
     Ok(Json(profile_json(&state, &tenant, &account).await?))

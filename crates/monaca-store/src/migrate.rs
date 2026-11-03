@@ -244,6 +244,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "hCaptcha as a CAPTCHA provider (M1)",
         include_str!("../migrations/tenant_41.sql"),
     ),
+    (
+        42,
+        "username policy and display case (M1)",
+        include_str!("../migrations/tenant_42.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

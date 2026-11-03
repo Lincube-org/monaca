@@ -449,6 +449,7 @@ pub async fn sso_callback(
                     None,
                     false,
                     None,
+                    None,
                 )
                 .await?;
             (account, true)

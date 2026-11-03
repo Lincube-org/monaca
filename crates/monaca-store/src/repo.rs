@@ -89,6 +89,14 @@ pub struct SignInExperienceRow {
     pub username_min_length: i32,
     /// The longest accepted username, in characters.
     pub username_max_length: i32,
+    /// The punctuation characters allowed beside ASCII letters and digits (`_`, `-`, `.`).
+    pub username_allowed_punctuation: Vec<String>,
+    /// Whether a username may equal its account's email local part.
+    pub username_allow_email_local_part: bool,
+    /// Whether the typed case is kept in `display_value` while `value` stays lowercased.
+    pub username_preserve_case: bool,
+    /// Lowercased whole usernames the tenant refuses, at most 100.
+    pub username_reserved_words: Vec<String>,
     /// The profile fields the sign-up form collects (`name`, `avatar`).
     pub sign_up_profile_fields: Vec<String>,
     /// The default language tag the hosted page announces and negotiates against.
@@ -875,6 +883,7 @@ impl Store {
         password_phc: Option<&str>,
         is_tenant_admin: bool,
         username: Option<&str>,
+        username_display: Option<&str>,
     ) -> Result<AccountRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
@@ -903,12 +912,13 @@ impl Store {
 
         if let Some(username) = username {
             sqlx::query(
-                "INSERT INTO tenant.account_identifiers (id, account_id, kind, value)
-                 VALUES ($1,$2,'username',$3)",
+                "INSERT INTO tenant.account_identifiers (id, account_id, kind, value, display_value)
+                 VALUES ($1,$2,'username',$3,$4)",
             )
             .bind(Uuid::now_v7())
             .bind(account_id.uuid())
             .bind(username)
+            .bind(username_display)
             .execute(&mut *tx)
             .await
             .map_err(|err| unique_conflict(err, "username"))?;
@@ -1010,7 +1020,9 @@ impl Store {
                     password_reject_repetition_and_sequence, password_rejected_words,
                     session_ttl_secs, refresh_token_ttl_secs, sign_up_identifiers,
                     sign_up_email_verification_required, username_case_sensitive,
-                    username_min_length, username_max_length, sign_up_profile_fields, language,
+                    username_min_length, username_max_length, username_allowed_punctuation,
+                    username_allow_email_local_part, username_preserve_case,
+                    username_reserved_words, sign_up_profile_fields, language,
                     captcha_enabled, captcha_provider, captcha_site_key, captcha_secret_enc,
                     captcha_on_sign_in, captcha_on_sign_up, captcha_on_password_reset,
                     login_lockout_threshold, login_lockout_duration_secs, updated_at
@@ -1046,6 +1058,10 @@ impl Store {
         username_case_sensitive: Option<bool>,
         username_min_length: Option<i32>,
         username_max_length: Option<i32>,
+        username_allowed_punctuation: Option<Vec<String>>,
+        username_allow_email_local_part: Option<bool>,
+        username_preserve_case: Option<bool>,
+        username_reserved_words: Option<Vec<String>>,
         sign_up_profile_fields: Option<Vec<String>>,
     ) -> Result<SignInExperienceRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
@@ -1074,6 +1090,12 @@ impl Store {
                  username_case_sensitive = COALESCE($19, username_case_sensitive),
                  username_min_length = COALESCE($20, username_min_length),
                  username_max_length = COALESCE($21, username_max_length),
+                 username_allowed_punctuation =
+                   COALESCE($23, username_allowed_punctuation),
+                 username_allow_email_local_part =
+                   COALESCE($24, username_allow_email_local_part),
+                 username_preserve_case = COALESCE($25, username_preserve_case),
+                 username_reserved_words = COALESCE($26, username_reserved_words),
                  sign_up_profile_fields = COALESCE($22, sign_up_profile_fields),
                  updated_at = now()
              WHERE singleton
@@ -1085,9 +1107,11 @@ impl Store {
                        password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
                        sign_up_identifiers, sign_up_email_verification_required,
                        username_case_sensitive, username_min_length, username_max_length,
-                       sign_up_profile_fields, language, captcha_enabled, captcha_provider,
-                       captcha_site_key, captcha_secret_enc, captcha_on_sign_in,
-                       captcha_on_sign_up, captcha_on_password_reset, login_lockout_threshold,
+                       username_allowed_punctuation, username_allow_email_local_part,
+                       username_preserve_case, username_reserved_words, sign_up_profile_fields,
+                       language, captcha_enabled, captcha_provider, captcha_site_key,
+                       captcha_secret_enc, captcha_on_sign_in, captcha_on_sign_up,
+                       captcha_on_password_reset, login_lockout_threshold,
                        login_lockout_duration_secs, updated_at",
         )
         .bind(sign_up_enabled)
@@ -1112,6 +1136,10 @@ impl Store {
         .bind(username_min_length)
         .bind(username_max_length)
         .bind(sign_up_profile_fields)
+        .bind(username_allowed_punctuation)
+        .bind(username_allow_email_local_part)
+        .bind(username_preserve_case)
+        .bind(username_reserved_words)
         .fetch_one(&pool)
         .await?)
     }
@@ -1144,9 +1172,11 @@ impl Store {
                        password_rejected_words, session_ttl_secs, refresh_token_ttl_secs,
                        sign_up_identifiers, sign_up_email_verification_required,
                        username_case_sensitive, username_min_length, username_max_length,
-                       sign_up_profile_fields, language, captcha_enabled, captcha_provider,
-                       captcha_site_key, captcha_secret_enc, captcha_on_sign_in,
-                       captcha_on_sign_up, captcha_on_password_reset, login_lockout_threshold,
+                       username_allowed_punctuation, username_allow_email_local_part,
+                       username_preserve_case, username_reserved_words, sign_up_profile_fields,
+                       language, captcha_enabled, captcha_provider, captcha_site_key,
+                       captcha_secret_enc, captcha_on_sign_in, captcha_on_sign_up,
+                       captcha_on_password_reset, login_lockout_threshold,
                        login_lockout_duration_secs, updated_at",
         )
         .bind(patch.captcha_enabled)
@@ -1750,7 +1780,8 @@ impl Store {
         Ok(Some((account, phc)))
     }
 
-    /// The account's username, if one was set.
+    /// The account's username, if one was set: the preserved display form when the tenant keeps
+    /// case, otherwise the normalised identifier.
     pub async fn account_username(
         &self,
         tenant: &TenantRow,
@@ -1758,7 +1789,7 @@ impl Store {
     ) -> Result<Option<String>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, (String,)>(
-            "SELECT value FROM tenant.account_identifiers
+            "SELECT COALESCE(display_value, value) FROM tenant.account_identifiers
              WHERE account_id = $1 AND kind = 'username' LIMIT 1",
         )
         .bind(account_id.uuid())
@@ -1771,12 +1802,14 @@ impl Store {
     ///
     /// Callers pass an already-normalised (lowercased, syntactically valid) username; the unique
     /// index is the authority, so a race between two accounts yields `AlreadyExists` rather than a
-    /// duplicate row.
+    /// duplicate row. `display` keeps the typed case for presentation and is `None` when the
+    /// tenant folds the name.
     pub async fn set_username(
         &self,
         tenant: &TenantRow,
         account_id: AccountId,
         username: &str,
+        display: Option<&str>,
     ) -> Result<(), StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
@@ -1791,21 +1824,27 @@ impl Store {
 
         match existing {
             Some((id,)) => {
-                sqlx::query("UPDATE tenant.account_identifiers SET value = $2 WHERE id = $1")
-                    .bind(id)
-                    .bind(username)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|err| unique_conflict(err, "username"))?;
+                sqlx::query(
+                    "UPDATE tenant.account_identifiers
+                     SET value = $2, display_value = $3 WHERE id = $1",
+                )
+                .bind(id)
+                .bind(username)
+                .bind(display)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| unique_conflict(err, "username"))?;
             }
             None => {
                 sqlx::query(
-                    "INSERT INTO tenant.account_identifiers (id, account_id, kind, value)
-                     VALUES ($1,$2,'username',$3)",
+                    "INSERT INTO tenant.account_identifiers
+                       (id, account_id, kind, value, display_value)
+                     VALUES ($1,$2,'username',$3,$4)",
                 )
                 .bind(Uuid::now_v7())
                 .bind(account_id.uuid())
                 .bind(username)
+                .bind(display)
                 .execute(&mut *tx)
                 .await
                 .map_err(|err| unique_conflict(err, "username"))?;

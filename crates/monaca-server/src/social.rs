@@ -563,6 +563,7 @@ async fn resolve_sign_in_account(
                     None,
                     false,
                     None,
+                    None,
                 )
                 .await?;
             (account, true)

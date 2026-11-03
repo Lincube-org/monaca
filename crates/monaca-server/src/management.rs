@@ -302,6 +302,7 @@ pub async fn create_account(
             Some(&phc),
             false,
             None,
+            None,
         )
         .await?;
 
@@ -402,6 +403,11 @@ pub async fn update_account(
         Some(value) => Some(value),
         None => None,
     };
+    let account = state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     let display_name = body
         .display_name
@@ -411,19 +417,13 @@ pub async fn update_account(
     let username = body
         .username
         .as_deref()
-        .map(|raw| crate::protocol::check_username(raw, &experience))
+        .map(|raw| crate::protocol::check_username(raw, &experience, Some(&account.primary_email)))
         .transpose()?;
     let avatar_url = body
         .avatar_url
         .as_deref()
         .map(crate::account::check_avatar_url)
         .transpose()?;
-
-    let account = state
-        .store
-        .account_by_id(&tenant, account_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("account"))?;
 
     if let Some(target) = state_change
         && account.state != target
@@ -482,15 +482,21 @@ pub async fn update_account(
         changed.push("display_name");
         profile_payload.insert("display_name".into(), json!(name));
     }
-    if let Some(username) = username
-        && current_username.as_deref() != Some(username.as_str())
-    {
-        state
-            .store
-            .set_username(&tenant, account_id, &username)
-            .await?;
-        changed.push("username");
-        profile_payload.insert("username".into(), json!(username));
+    if let Some(username) = username {
+        let display = username.display.as_deref().unwrap_or(&username.value);
+        if current_username.as_deref() != Some(display) {
+            state
+                .store
+                .set_username(
+                    &tenant,
+                    account_id,
+                    &username.value,
+                    username.display.as_deref(),
+                )
+                .await?;
+            changed.push("username");
+            profile_payload.insert("username".into(), json!(display));
+        }
     }
     if let Some(avatar_url) = avatar_url
         && account.avatar_url.as_deref() != avatar_url.as_deref()
@@ -664,6 +670,14 @@ pub struct UpdateSignInExperienceBody {
     pub username_min_length: Option<i32>,
     /// The longest accepted username, 3–32 characters.
     pub username_max_length: Option<i32>,
+    /// Punctuation allowed beside ASCII letters and digits: a subset of `_`, `-`, `.`.
+    pub username_allowed_punctuation: Option<Vec<String>>,
+    /// Whether a username may equal the account's email local part.
+    pub username_allow_email_local_part: Option<bool>,
+    /// Whether a case-insensitive tenant keeps the typed form for display.
+    pub username_preserve_case: Option<bool>,
+    /// Lowercased whole usernames the tenant refuses, at most 100.
+    pub username_reserved_words: Option<Vec<String>>,
     /// The profile fields the sign-up form collects (`name`, `avatar`).
     pub sign_up_profile_fields: Option<Vec<String>>,
     /// The CAPTCHA provider and the entrances it gates.
@@ -719,6 +733,10 @@ pub async fn update_sign_in_experience(
         && body.username_case_sensitive.is_none()
         && body.username_min_length.is_none()
         && body.username_max_length.is_none()
+        && body.username_allowed_punctuation.is_none()
+        && body.username_allow_email_local_part.is_none()
+        && body.username_preserve_case.is_none()
+        && body.username_reserved_words.is_none()
         && body.sign_up_profile_fields.is_none()
         && body.captcha.as_ref().is_none_or(CaptchaPatch::is_empty)
         && body.login_lockout_threshold.is_none()
@@ -770,6 +788,18 @@ pub async fn update_sign_in_experience(
             return Err(ApiError::problem(
                 kinds::INVALID_REQUEST,
                 "sign_up_identifiers must be a non-empty subset of email, username that contains email",
+            ));
+        }
+    }
+    if let Some(allowed) = body.username_allowed_punctuation.as_deref() {
+        let valid = allowed.iter().enumerate().all(|(index, punctuation)| {
+            matches!(punctuation.as_str(), "_" | "-" | ".")
+                && !allowed[..index].contains(punctuation)
+        });
+        if !valid || allowed.len() > 3 {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "username_allowed_punctuation may only contain a unique subset of _, - and .",
             ));
         }
     }
@@ -826,6 +856,8 @@ pub async fn update_sign_in_experience(
         ));
     }
     let rejected_words = normalise_rejected_words(body.password_rejected_words.as_deref())?;
+    let username_reserved_words =
+        normalise_username_reserved_words(body.username_reserved_words.as_deref())?;
     if let Some(branding) = &body.branding {
         check_branding(branding)?;
     }
@@ -860,6 +892,18 @@ pub async fn update_sign_in_experience(
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "username lengths must be 3–32 characters and min must not exceed max",
+        ));
+    }
+    let username_case_sensitive = body
+        .username_case_sensitive
+        .unwrap_or(current.username_case_sensitive);
+    let username_preserve_case = body
+        .username_preserve_case
+        .unwrap_or(current.username_preserve_case);
+    if username_case_sensitive && username_preserve_case {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "username_preserve_case requires username_case_sensitive to be false",
         ));
     }
     let password = body
@@ -942,6 +986,10 @@ pub async fn update_sign_in_experience(
             body.username_case_sensitive,
             body.username_min_length,
             body.username_max_length,
+            body.username_allowed_punctuation,
+            body.username_allow_email_local_part,
+            body.username_preserve_case,
+            username_reserved_words,
             body.sign_up_profile_fields,
         )
         .await?;
@@ -1077,6 +1125,10 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
         "username_case_sensitive": experience.username_case_sensitive,
         "username_min_length": experience.username_min_length,
         "username_max_length": experience.username_max_length,
+        "username_allowed_punctuation": experience.username_allowed_punctuation,
+        "username_allow_email_local_part": experience.username_allow_email_local_part,
+        "username_preserve_case": experience.username_preserve_case,
+        "username_reserved_words": experience.username_reserved_words,
         "sign_up_profile_fields": experience.sign_up_profile_fields,
         "captcha": captcha_json(experience, true),
         "login_lockout_threshold": experience.login_lockout_threshold,
@@ -1117,6 +1169,35 @@ pub(crate) fn branding_json(branding: &BrandingRow) -> Value {
         "website_url": branding.website_url,
         "custom_css": branding.custom_css,
     })
+}
+
+/// Lowercase, trim and de-duplicate the tenant's reserved usernames.
+fn normalise_username_reserved_words(
+    words: Option<&[String]>,
+) -> Result<Option<Vec<String>>, ApiError> {
+    let Some(words) = words else {
+        return Ok(None);
+    };
+    if words.len() > 100 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "username_reserved_words must list at most 100 words",
+        ));
+    }
+    let mut normalised = Vec::with_capacity(words.len());
+    for word in words {
+        let word = word.trim().to_lowercase();
+        if word.chars().count() < 3 || word.chars().count() > 64 {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "each reserved username must be 3-64 characters",
+            ));
+        }
+        if !normalised.contains(&word) {
+            normalised.push(word);
+        }
+    }
+    Ok(Some(normalised))
 }
 
 /// Validate and normalise the rejected-word list: lowercase, de-duplicated and bounded.

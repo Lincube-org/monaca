@@ -99,6 +99,10 @@ pub async fn sign_in_experience(
         "username_case_sensitive": experience.username_case_sensitive,
         "username_min_length": experience.username_min_length,
         "username_max_length": experience.username_max_length,
+        "username_allowed_punctuation": experience.username_allowed_punctuation,
+        "username_allow_email_local_part": experience.username_allow_email_local_part,
+        "username_preserve_case": experience.username_preserve_case,
+        "username_reserved_words": experience.username_reserved_words,
         "sign_up_profile_fields": experience.sign_up_profile_fields,
         "captcha": crate::management::captcha_json(&experience, false),
         "branding": crate::management::branding_json(&branding),
@@ -1208,15 +1212,30 @@ fn has_sequential_run(password: &str, run: usize) -> bool {
     false
 }
 
+/// A username that passed the tenant's policy: the stored identifier and its display form.
+#[derive(Debug, Clone)]
+pub(crate) struct CheckedUsername {
+    /// The sign-in identifier: the typed form when case-sensitive, otherwise lowercased.
+    pub value: String,
+    /// The typed form to show while `username_preserve_case` is on, otherwise `None`.
+    pub display: Option<String>,
+}
+
 /// Validate and normalise a username under the tenant's policy (§6.1).
 ///
 /// It is a sign-in identifier, so it may not contain `@` (that is how the sign-in endpoint tells the
 /// two namespaces apart). A tenant that keeps usernames case-sensitive stores them as typed and
-/// compares exactly; otherwise they are stored lowercased, matching the case-insensitive lookup.
+/// compares exactly; otherwise they are stored lowercased, matching the case-insensitive lookup,
+/// and `username_preserve_case` may keep the typed form in a separate display column.
+///
+/// `email` is the account's own address, used only by the local-part switch. Existing identifiers
+/// are never re-checked: this runs on creation and on a username change, which is why a tightened
+/// policy cannot strand an account that already signed in.
 pub(crate) fn check_username(
     raw: &str,
     experience: &SignInExperienceRow,
-) -> Result<String, ApiError> {
+    email: Option<&str>,
+) -> Result<CheckedUsername, ApiError> {
     let trimmed = raw.trim();
     let username = if experience.username_case_sensitive {
         trimmed.to_owned()
@@ -1226,17 +1245,60 @@ pub(crate) fn check_username(
     let min = experience.username_min_length.max(1) as usize;
     let max = experience.username_max_length.max(1) as usize;
     let length = username.chars().count();
+    let allowed = &experience.username_allowed_punctuation;
     if !(min..=max).contains(&length)
-        || !username
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        || !username.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || allowed
+                    .iter()
+                    .any(|punctuation| punctuation.chars().next() == Some(c))
+        })
+    {
+        let punctuation = if allowed.is_empty() {
+            String::new()
+        } else {
+            format!(" or one of {}", allowed.join(" "))
+        };
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("username must be {min}-{max} ASCII letters, digits{punctuation}"),
+        ));
+    }
+    let lowered = username.to_lowercase();
+    if experience
+        .username_reserved_words
+        .iter()
+        .any(|word| word == &lowered)
     {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            format!("username must be {min}-{max} letters, digits, `_` or `-`"),
+            "username is reserved",
         ));
     }
-    Ok(username)
+    if !experience.username_allow_email_local_part
+        && let Some(email) = email
+    {
+        let local_part = email
+            .split('@')
+            .next()
+            .unwrap_or(email)
+            .trim()
+            .to_lowercase();
+        if lowered == local_part {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "username must not match the account's email local part",
+            ));
+        }
+    }
+    let display = (!experience.username_case_sensitive
+        && experience.username_preserve_case
+        && trimmed != username)
+        .then(|| trimmed.to_owned());
+    Ok(CheckedUsername {
+        value: username,
+        display,
+    })
 }
 
 /// The interaction and its tenant, or the interaction error the page should render.
@@ -1386,7 +1448,8 @@ fn check_sign_up_profile(
     username: Option<&str>,
     display_name: Option<&str>,
     avatar_url: Option<&str>,
-) -> Result<(Option<String>, Option<String>, Option<String>), ApiError> {
+    email: &str,
+) -> Result<(Option<CheckedUsername>, Option<String>, Option<String>), ApiError> {
     let username = match username.map(str::trim).filter(|value| !value.is_empty()) {
         Some(raw) => {
             if !experience
@@ -1399,7 +1462,7 @@ fn check_sign_up_profile(
                     "username is not an available sign-up identifier",
                 ));
             }
-            Some(check_username(raw, experience)?)
+            Some(check_username(raw, experience, Some(email))?)
         }
         None => None,
     };
@@ -1447,6 +1510,7 @@ async fn complete_sign_up(
     email: &str,
     password: &str,
     username: Option<String>,
+    username_display: Option<String>,
     display_name: Option<String>,
     avatar_url: Option<String>,
 ) -> Result<Response, ApiError> {
@@ -1465,6 +1529,7 @@ async fn complete_sign_up(
             Some(&phc),
             false,
             username.as_deref(),
+            username_display.as_deref(),
         )
         .await?;
     let account = match avatar_url.as_deref() {
@@ -1599,10 +1664,13 @@ pub async fn sign_up(
         body.username.as_deref(),
         body.display_name.as_deref(),
         body.avatar_url.as_deref(),
+        &email,
     )?;
+    let username_value = username.as_ref().map(|checked| checked.value.clone());
+    let username_display = username.as_ref().and_then(|checked| checked.display.clone());
     let local_part = email.split('@').next().unwrap_or(&email);
     let mut identifiers = vec![local_part];
-    if let Some(username) = username.as_deref() {
+    if let Some(username) = username_value.as_deref() {
         identifiers.push(username);
     }
     check_password(&password, &experience, &identifiers)?;
@@ -1614,7 +1682,8 @@ pub async fn sign_up(
         &headers,
         &email,
         &password,
-        username,
+        username_value,
+        username_display,
         display_name,
         avatar_url,
     )
@@ -1642,10 +1711,13 @@ pub async fn sign_up_verify(
         body.username.as_deref(),
         body.display_name.as_deref(),
         body.avatar_url.as_deref(),
+        &email,
     )?;
+    let username_value = username.as_ref().map(|checked| checked.value.clone());
+    let username_display = username.as_ref().and_then(|checked| checked.display.clone());
     let local_part = email.split('@').next().unwrap_or(&email);
     let mut identifiers = vec![local_part];
-    if let Some(username) = username.as_deref() {
+    if let Some(username) = username_value.as_deref() {
         identifiers.push(username);
     }
     check_password(&body.password, &experience, &identifiers)?;
@@ -1671,7 +1743,8 @@ pub async fn sign_up_verify(
         &headers,
         &email,
         &body.password,
-        username,
+        username_value,
+        username_display,
         display_name,
         avatar_url,
     )
