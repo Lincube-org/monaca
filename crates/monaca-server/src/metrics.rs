@@ -321,6 +321,16 @@ pub async fn middleware(
 }
 
 /// `GET /metrics` — the Prometheus text exposition.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    tag = "meta",
+    summary = "Prometheus metrics",
+    description = "Prometheus text exposition. Keep it off the public origin.",
+    responses(
+        (status = 200, description = "Prometheus text.", content_type = "text/plain")
+    )
+)]
 pub async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],

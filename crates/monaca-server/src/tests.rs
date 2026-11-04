@@ -147,6 +147,26 @@ fn the_openapi_document_has_the_expected_envelope() {
     assert_eq!(value["info"]["version"], env!("CARGO_PKG_VERSION"));
 }
 
+/// The path overlay names the mounted management and protocol surface.
+#[test]
+fn the_openapi_document_covers_the_mounted_surface() {
+    let value = crate::routes::openapi_value();
+    let paths = value["paths"].as_object().expect("paths");
+    for (path, method) in [
+        ("/t/{tenant}/oauth2/token", "post"),
+        ("/v1/accounts", "get"),
+        ("/v1/clients/{client}/secret", "post"),
+        ("/v1/webhooks/{webhook}/deliveries", "get"),
+        ("/metrics", "get"),
+        ("/v1/rate-limits", "patch"),
+    ] {
+        assert!(
+            paths.get(path).and_then(|item| item.get(method)).is_some(),
+            "{method} {path} must be described"
+        );
+    }
+}
+
 /// Both documented responses carry a schema, so the SDK generator has something to emit.
 #[test]
 fn the_documented_responses_have_schemas() {

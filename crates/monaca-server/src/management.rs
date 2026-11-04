@@ -22,7 +22,7 @@ use monaca_types::{
     AccountId, AgentId, AgentKeyId, EventId, GrantId, PasskeyId, RoleId, SessionId, TenantId,
     TypedId,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -2561,7 +2561,7 @@ fn validate_public_jwk(jwk: &Value) -> Result<(), ApiError> {
 }
 
 /// One configured layer in `PATCH /v1/rate-limits` — §6.2.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RateLimitItem {
     /// `authorize` | `token` | `userinfo` | `management`.
     pub endpoint: String,
@@ -2574,28 +2574,83 @@ pub struct RateLimitItem {
 }
 
 /// `PATCH /v1/rate-limits` body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RateLimitsPatch {
     /// The complete replacement set. An empty list restores the built-in defaults.
     pub items: Vec<RateLimitItem>,
 }
 
+/// A built-in default in the `/v1/rate-limits` document.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RateLimitDefaultView {
+    /// The endpoint class.
+    pub endpoint: String,
+    /// Requests allowed per window.
+    pub limit: i32,
+    /// Window length in seconds.
+    pub window_secs: i32,
+}
+
+/// One configured row in the `/v1/rate-limits` document.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RateLimitView {
+    /// The endpoint class.
+    pub endpoint: String,
+    /// The protocol client id, or `null` for the tenant-wide layer.
+    pub client_id: Option<String>,
+    /// Requests allowed per window.
+    pub limit: i32,
+    /// Window length in seconds.
+    pub window_secs: i32,
+}
+
+/// `GET`/`PATCH /v1/rate-limits` response — §6.2.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RateLimitsDocument {
+    /// The built-in defaults, always present.
+    pub defaults: Vec<RateLimitDefaultView>,
+    /// Every configured layer.
+    pub items: Vec<RateLimitView>,
+}
+
 /// `GET /v1/rate-limits` — the effective defaults plus every configured row.
+#[utoipa::path(
+    get,
+    path = "/v1/rate-limits",
+    tag = "management",
+    summary = "Read the request gates",
+    description = "Returns the four built-in defaults and every configured tenant or client layer.",
+    responses(
+        (status = 200, description = "The effective gates.", body = RateLimitsDocument)
+    )
+)]
 pub async fn get_rate_limits(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RateLimitsDocument>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let rows = state.store.rate_limits(&tenant).await?;
-    Ok(Json(rate_limits_json(&rows)))
+    Ok(Json(rate_limits_document(&rows)))
 }
 
 /// `PATCH /v1/rate-limits` — replace the tenant's whole gate configuration.
+#[utoipa::path(
+    patch,
+    path = "/v1/rate-limits",
+    tag = "management",
+    summary = "Replace the request gates",
+    description = "Replaces the complete set. An empty items list restores the built-in defaults.",
+    request_body = RateLimitsPatch,
+    responses(
+        (status = 200, description = "The saved gates.", body = RateLimitsDocument),
+        (status = 400, description = "An endpoint, limit, window or client id is invalid.")
+    )
+)]
 pub async fn update_rate_limits(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<RateLimitsPatch>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RateLimitsDocument>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
 
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
@@ -2649,29 +2704,29 @@ pub async fn update_rate_limits(
     state.store.reset_rate_limit_counters(&tenant).await?;
     state.invalidate_rate_limits(&tenant).await;
     let saved = state.store.rate_limits(&tenant).await?;
-    Ok(Json(rate_limits_json(&saved)))
+    Ok(Json(rate_limits_document(&saved)))
 }
 
-fn rate_limits_json(rows: &[RateLimitRow]) -> Value {
-    json!({
-        "defaults": crate::rate_limit::defaults()
+fn rate_limits_document(rows: &[RateLimitRow]) -> RateLimitsDocument {
+    RateLimitsDocument {
+        defaults: crate::rate_limit::defaults()
             .into_iter()
-            .map(|(endpoint, limit, window_secs)| json!({
-                "endpoint": endpoint,
-                "limit": limit,
-                "window_secs": window_secs,
-            }))
-            .collect::<Vec<_>>(),
-        "items": rows
+            .map(|(endpoint, limit, window_secs)| RateLimitDefaultView {
+                endpoint: endpoint.to_owned(),
+                limit,
+                window_secs,
+            })
+            .collect(),
+        items: rows
             .iter()
-            .map(|row| json!({
-                "endpoint": row.endpoint,
-                "client_id": row.client_id,
-                "limit": row.limit_count,
-                "window_secs": row.window_secs,
-            }))
-            .collect::<Vec<_>>(),
-    })
+            .map(|row| RateLimitView {
+                endpoint: row.endpoint.clone(),
+                client_id: row.client_id.clone(),
+                limit: row.limit_count,
+                window_secs: row.window_secs,
+            })
+            .collect(),
+    }
 }
 
 /// RFC 7638 thumbprint: SHA-256 hex of the canonical `{crv,kty,x,y}` object.

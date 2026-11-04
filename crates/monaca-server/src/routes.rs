@@ -25,7 +25,20 @@ use crate::state::AppState;
         version = env!("CARGO_PKG_VERSION"),
         description = "Identity and access management for the AI-agent era."
     ),
-    paths(healthz, version)
+    paths(
+        healthz,
+        version,
+        crate::metrics::scrape,
+        crate::management::get_rate_limits,
+        crate::management::update_rate_limits
+    ),
+    components(schemas(
+        crate::management::RateLimitItem,
+        crate::management::RateLimitsPatch,
+        crate::management::RateLimitDefaultView,
+        crate::management::RateLimitView,
+        crate::management::RateLimitsDocument
+    ))
 )]
 pub struct ApiDoc;
 
@@ -53,6 +66,140 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// The generated OpenAPI document.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     <ApiDoc as utoipa::OpenApi>::openapi()
+}
+
+/// The complete route surface, with the methods each path accepts.
+///
+/// The typed slice (`healthz`, `version`, `metrics`, `/v1/rate-limits`) is annotated on the
+/// handlers and carries schemas. The rest is registered here with a summary, so the document
+/// never claims a path exists that the router does not mount, and an SDK operation exists for
+/// every mounted method while the response schemas are filled in incrementally.
+const SURFACE: &[(&str, &[&str], &str)] = &[
+    ("/t/{tenant}/.well-known/openid-configuration", &["get"], "Tenant discovery"),
+    ("/t/{tenant}/.well-known/jwks.json", &["get"], "Tenant JWKS"),
+    ("/t/{tenant}/oauth2/authorize", &["get"], "Authorization request"),
+    ("/t/{tenant}/oauth2/token", &["post"], "Token endpoint"),
+    ("/t/{tenant}/oauth2/userinfo", &["get", "post"], "UserInfo"),
+    ("/t/{tenant}/oauth2/introspect", &["post"], "Token introspection"),
+    ("/t/{tenant}/oauth2/revoke", &["post"], "Token revocation"),
+    ("/t/{tenant}/oauth2/par", &["post"], "Pushed authorization request"),
+    ("/t/{tenant}/oauth2/end-session", &["get", "post"], "End a session"),
+    ("/t/{tenant}/interaction/{iid}", &["get"], "Interaction details"),
+    ("/t/{tenant}/interaction/{iid}/sign-in", &["post"], "Password sign-in"),
+    ("/t/{tenant}/interaction/{iid}/sign-up", &["post"], "Sign-up"),
+    ("/t/{tenant}/interaction/{iid}/consent", &["post"], "Consent"),
+    ("/t/{tenant}/interaction/{iid}/abort", &["post"], "Abort an interaction"),
+    ("/t/{tenant}/connectors", &["get"], "Public social connectors"),
+    ("/t/{tenant}/sign-in-experience", &["get"], "Public sign-in experience"),
+    ("/v1/accounts", &["get", "post"], "List and create accounts"),
+    ("/v1/accounts/{id}", &["get", "patch"], "Read and update an account"),
+    ("/v1/accounts/{id}/sessions", &["get", "delete"], "Account sessions"),
+    ("/v1/accounts/{id}/sessions/{session}", &["delete"], "Revoke one session"),
+    ("/v1/accounts/{id}/security", &["get"], "Account security summary"),
+    ("/v1/accounts/{id}/mfa", &["delete"], "Remove the second factor"),
+    ("/v1/accounts/{id}/passkeys/{passkey}", &["delete"], "Remove a passkey"),
+    ("/v1/accounts/{id}/roles/{role}", &["post", "delete"], "Assign or remove a role"),
+    ("/v1/orgs", &["get", "post"], "List and create organizations"),
+    ("/v1/orgs/{org}", &["get", "patch"], "Read and update an organization"),
+    ("/v1/orgs/{org}/members", &["get", "post"], "Organization members"),
+    ("/v1/orgs/{org}/members/{account}", &["patch", "delete"], "One member"),
+    ("/v1/orgs/{org}/email-domains", &["get", "post"], "Email domains"),
+    ("/v1/orgs/{org}/email-domains/{domain}", &["delete"], "Remove an email domain"),
+    ("/v1/orgs/{org}/invitations", &["get", "post"], "Invitations"),
+    ("/v1/orgs/{org}/invitations/{invitation}", &["delete"], "Revoke an invitation"),
+    ("/v1/orgs/{org}/roles", &["get", "post"], "Organization roles"),
+    ("/v1/orgs/{org}/roles/{role}", &["patch", "delete"], "One organization role"),
+    (
+        "/v1/orgs/{org}/members/{account}/roles",
+        &["get", "post"],
+        "Member role assignments",
+    ),
+    (
+        "/v1/orgs/{org}/members/{account}/roles/{role}",
+        &["delete"],
+        "Remove a member role",
+    ),
+    ("/v1/orgs/{org}/agents", &["get", "post"], "Agents"),
+    ("/v1/orgs/{org}/agents/{agent}/keys", &["post"], "Register an agent key"),
+    (
+        "/v1/orgs/{org}/agents/{agent}/keys/{key}",
+        &["delete"],
+        "Revoke an agent key",
+    ),
+    ("/v1/orgs/{org}/grants", &["get", "post"], "Grants"),
+    ("/v1/orgs/{org}/grants/{grant}", &["delete"], "Revoke a grant"),
+    ("/v1/orgs/{org}/audit", &["get"], "Audit events"),
+    ("/v1/orgs/{org}/audit/verify", &["get"], "Verify an audit chain"),
+    ("/v1/connectors", &["get", "post"], "Social connectors"),
+    ("/v1/connectors/{connector}", &["patch", "delete"], "One social connector"),
+    ("/v1/sso-connectors", &["get", "post"], "SSO connectors"),
+    ("/v1/sso-connectors/{connector}", &["delete"], "One SSO connector"),
+    ("/v1/clients", &["get", "post"], "OAuth clients"),
+    ("/v1/clients/{client}", &["get", "patch", "delete"], "One OAuth client"),
+    ("/v1/clients/{client}/secret", &["post"], "Rotate a client secret"),
+    ("/v1/sign-in-experience", &["get", "patch"], "Sign-in policy"),
+    ("/v1/sign-in-copy", &["get", "patch"], "Sign-in copy"),
+    ("/v1/email-templates", &["get"], "Email templates"),
+    (
+        "/v1/email-templates/{purpose}",
+        &["patch", "delete"],
+        "One email template",
+    ),
+    (
+        "/v1/email-connector",
+        &["get", "patch", "delete"],
+        "Delivery connector",
+    ),
+    ("/v1/resources", &["get", "post"], "API resources"),
+    (
+        "/v1/resources/{resource}",
+        &["get", "patch", "delete"],
+        "One API resource",
+    ),
+    ("/v1/roles", &["get", "post"], "Tenant roles"),
+    ("/v1/roles/{role}", &["delete"], "One tenant role"),
+    ("/v1/webhooks", &["get", "post"], "Webhooks"),
+    (
+        "/v1/webhooks/{webhook}",
+        &["patch", "delete"],
+        "One webhook",
+    ),
+    (
+        "/v1/webhooks/{webhook}/secret",
+        &["post"],
+        "Rotate a webhook secret",
+    ),
+    (
+        "/v1/webhooks/{webhook}/deliveries",
+        &["get"],
+        "Webhook deliveries",
+    ),
+];
+
+/// The generated document plus the path overlay above, as JSON.
+pub fn openapi_value() -> serde_json::Value {
+    let mut value = serde_json::to_value(openapi_document())
+        .expect("the generated OpenAPI document serializes");
+    let paths = value["paths"]
+        .as_object_mut()
+        .expect("the generated document has a paths object");
+    for (path, methods, summary) in SURFACE {
+        let item = paths
+            .entry((*path).to_owned())
+            .or_insert_with(|| serde_json::json!({}));
+        for method in *methods {
+            if item.get(*method).is_some() {
+                continue;
+            }
+            item[*method] = serde_json::json!({
+                "summary": summary,
+                "responses": {
+                    "200": { "description": "See docs/contracts/m0.md for the body." }
+                }
+            });
+        }
+    }
+    value
 }
 
 /// `/healthz`, `/version` and the Prometheus scrape endpoint — §6.4.

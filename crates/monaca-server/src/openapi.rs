@@ -19,10 +19,8 @@
 use std::path::Path;
 
 use anyhow::Context as _;
-use utoipa::OpenApi as _;
 
 use crate::cli::{OpenapiArgs, OpenapiTarget};
-use crate::routes::ApiDoc;
 
 /// The audit actions §8.1 fixes for M0.
 ///
@@ -116,9 +114,8 @@ const DECISIONS: &[&str] = &["allow", "deny", "info"];
 pub fn run(args: OpenapiArgs) -> anyhow::Result<()> {
     match args.target {
         None => {
-            let document = <ApiDoc as utoipa::OpenApi>::openapi();
-            let json = document
-                .to_pretty_json()
+            let document = crate::routes::openapi_value();
+            let json = serde_json::to_string_pretty(&document)
                 .context("the OpenAPI document could not be serialized")?;
             println!("{json}");
             Ok(())

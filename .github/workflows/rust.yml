@@ -270,6 +270,10 @@ jobs:
           mkdir -p spec/events
           cargo run --quiet --release -p monaca-server -- openapi > spec/openapi.json
 
+      - name: SDK types from the OpenAPI document
+        working-directory: packages/sdk
+        run: bun run generate
+
       - name: Event JSON Schemas → spec/events/
         run: |
           # The subcommand owns the directory contents; a stale schema must not survive a
@@ -290,13 +294,13 @@ jobs:
         id: drift
         shell: bash
         run: |
-          git add -N packages/core/index.d.ts spec/openapi.json spec/events
-          if git diff --quiet -- packages/core/index.d.ts spec/openapi.json spec/events; then
+          git add -N packages/core/index.d.ts spec/openapi.json spec/events packages/sdk/src/schema.gen.ts
+          if git diff --quiet -- packages/core/index.d.ts spec/openapi.json spec/events packages/sdk/src/schema.gen.ts; then
             echo "drifted=0" >> "$GITHUB_OUTPUT"
             echo "Generated files match the committed copies."
           else
             echo "drifted=1" >> "$GITHUB_OUTPUT"
-            git diff --stat -- packages/core/index.d.ts spec/openapi.json spec/events
+            git diff --stat -- packages/core/index.d.ts spec/openapi.json spec/events packages/sdk/src/schema.gen.ts
             echo "::warning::generated files drifted; refresh them with: bun run fetch:native"
           fi
 
@@ -428,6 +432,14 @@ jobs:
           # A second run replays the org migration set on the orgs bootstrap just created, which
           # is the path a deployment uses to upgrade schemas provisioned before a migration.
           .monaca/bin/monaca-server migrate
+
+      # §5.1 opt-in tenant login. The script provisions the role, starts a second server with
+      # MONACA_APP_DATABASE_URL, proves a real write/read through it, and requires DDL, a direct
+      # org-schema read and another database to be denied.
+      - name: Stage 0c — least-privilege app role
+        env:
+          MONACA_SERVER_BIN: .monaca/bin/monaca-server
+        run: bun scripts/verify-app-role.ts
 
       # §10.7: remote-deploy.sh refuses to migrate without a dump, so the dump and the restore
       # are exercised here. The runner's pg_dump is not guaranteed to match a v18 server, so the
