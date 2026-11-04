@@ -505,6 +505,14 @@ jobs:
             --admin-secret "$MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET" \
             --console-secret "$MONACA_CONSOLE_CLIENT_SECRET"
 
+      # §10.7: data created under the current KEK, a restart with the new key as current and the
+      # old one as previous, `rewrap`, then a restart with only the new key. The drill proves the
+      # signing key, a TOTP seed and a connector secret all survived the old key's removal.
+      - name: Stage 1b — KEK rotation drill
+        env:
+          MONACA_SERVER_BIN: .monaca/bin/monaca-server
+        run: bun scripts/verify-kek-rotation.ts
+
       # §2.2/§6.3: prod must refuse to start without its secrets, and the plaintext outbox reader
       # must not exist in prod. The KEK here is valid hex but not the CI dev KEK; nothing on this
       # route decrypts anything, so the mismatch is irrelevant to the checks below.

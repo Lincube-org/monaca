@@ -28,7 +28,9 @@ pub use jwk::{jwk_thumbprint, verify_embedded_jwk};
 pub use jws::{
     SigningKeyPair, decode_unverified, verify_jws, verify_jws_with_audience, verify_rs256_jws,
 };
-pub use keys::{EnvKeyProvider, Jwks, generate_pkcs8_der, open, public_jwk_from_der, seal};
+pub use keys::{
+    EnvKeyProvider, Jwks, generate_pkcs8_der, open, open_any, public_jwk_from_der, rewrap, seal,
+};
 pub use password::{Argon2Params, hash_password, verify_password};
 pub use secret::{
     BACKUP_CODE_COUNT, BACKUP_CODE_LEN, DEFAULT_CODE_DIGITS, format_backup_code,
@@ -61,6 +63,19 @@ pub trait KeyProvider: Send + Sync + 'static {
 
     /// The 32-byte data-encryption key for `tenant`, derived or fetched on demand.
     fn tenant_dek(&self, tenant: &monaca_types::TenantId) -> Option<[u8; 32]>;
+
+    /// Every DEK that may open existing data for `tenant`, current first.
+    ///
+    /// During a KEK rotation the provider keeps the previous key here until every sealed value has
+    /// been re-wrapped. A provider without rotation returns exactly one entry.
+    fn tenant_deks(&self, tenant: &monaca_types::TenantId) -> Vec<[u8; 32]> {
+        self.tenant_dek(tenant).into_iter().collect()
+    }
+
+    /// The previous platform KEK while a rotation is in progress, if the provider keeps one.
+    fn previous_platform_kek(&self) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// A cryptographic failure.

@@ -36,8 +36,21 @@ pub enum Command {
     Bootstrap,
     /// Audit-chain operations.
     Audit(AuditArgs),
+    /// Re-wrap sealed values under the current KEK (the second step of a rotation).
+    Rewrap(RewrapArgs),
     /// Print generated contracts.
     Openapi(OpenapiArgs),
+}
+
+/// `rewrap` options.
+#[derive(Debug, Args)]
+pub struct RewrapArgs {
+    /// Only this tenant slug; without it, every registered tenant.
+    #[arg(long)]
+    pub tenant: Option<String>,
+    /// Report how many values would move without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `serve` options.

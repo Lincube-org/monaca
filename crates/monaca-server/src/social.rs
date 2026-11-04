@@ -27,7 +27,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
-    decode_unverified, encode_base64url, generate_challenge, open, seal, verify_rs256_jws,
+    decode_unverified, encode_base64url, generate_challenge, seal, verify_rs256_jws,
 };
 use monaca_oidc::is_absolute_http_url;
 use monaca_store::{AccountRow, SocialConnectorRow, StoreError, TenantRow};
@@ -702,7 +702,9 @@ pub async fn connector_callback(
 
     let verifier = match pending.code_verifier_enc.as_deref() {
         Some(sealed) => {
-            let bytes = open(&state.tenant_dek(&tenant)?, sealed).map_err(ApiError::internal)?;
+            let bytes = state
+                .open_tenant(&tenant, sealed)
+                .map_err(ApiError::internal)?;
             Some(String::from_utf8(bytes).map_err(ApiError::internal)?)
         }
         None => None,
@@ -1286,7 +1288,8 @@ async fn exchange_and_read(
     verifier: Option<&str>,
     nonce: Option<&str>,
 ) -> Result<SocialUser, ApiError> {
-    let secret = open(&state.tenant_dek(tenant)?, &connector.client_secret_enc)
+    let secret = state
+        .open_tenant(tenant, &connector.client_secret_enc)
         .map_err(ApiError::internal)?;
     let secret = String::from_utf8(secret).map_err(ApiError::internal)?;
 

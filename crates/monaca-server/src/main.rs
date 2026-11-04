@@ -32,6 +32,7 @@ mod passkey;
 mod protocol;
 mod rate_limit;
 mod resources;
+mod rewrap;
 mod routes;
 mod schemas;
 mod session;
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Audit(args) => match args.command {
             cli::AuditCommand::Verify => audit_verify().await,
         },
+        Command::Rewrap(args) => rewrap::run(args).await,
     }
 }
 

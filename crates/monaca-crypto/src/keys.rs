@@ -126,26 +126,102 @@ impl Jwks {
 #[derive(Clone)]
 pub struct EnvKeyProvider {
     kek: [u8; 32],
+    /// The key a rotation is retiring. Data sealed under it stays readable until
+    /// [`rewrap`](crate::rewrap) has moved every value to `kek`.
+    previous: Option<[u8; 32]>,
 }
 
 impl EnvKeyProvider {
     /// Build a provider from a 64-character hex KEK.
     pub fn from_hex(kek_hex: &str) -> Result<Self, CryptoError> {
-        let bytes = hex::decode(kek_hex.trim())
-            .map_err(|err| CryptoError::KeyMaterial(format!("the KEK is not hex: {err}")))?;
-        let kek: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            CryptoError::KeyMaterial(format!(
-                "the KEK must be 32 bytes (64 hex chars), got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self { kek })
+        Self::from_hex_with_previous(kek_hex, None)
+    }
+
+    /// Build a provider with an optional previous KEK for a rotation.
+    pub fn from_hex_with_previous(
+        kek_hex: &str,
+        previous_hex: Option<&str>,
+    ) -> Result<Self, CryptoError> {
+        let kek = decode_kek(kek_hex)?;
+        let previous = previous_hex.map(decode_kek).transpose()?;
+        if previous.is_some_and(|previous| previous == kek) {
+            return Err(CryptoError::KeyMaterial(
+                "MONACA_KEK_PREVIOUS is the current KEK".to_owned(),
+            ));
+        }
+        Ok(Self { kek, previous })
     }
 
     /// The KEK, for callers that need to wrap a DEK themselves.
     pub fn kek(&self) -> &[u8; 32] {
         &self.kek
     }
+
+    /// The KEK a rotation is retiring, if one is configured.
+    pub fn previous_kek(&self) -> Option<&[u8; 32]> {
+        self.previous.as_ref()
+    }
+}
+
+fn decode_kek(kek_hex: &str) -> Result<[u8; 32], CryptoError> {
+    let bytes = hex::decode(kek_hex.trim())
+        .map_err(|err| CryptoError::KeyMaterial(format!("the KEK is not hex: {err}")))?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        CryptoError::KeyMaterial(format!(
+            "the KEK must be 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        ))
+    })
+}
+
+/// The DEK derived from one KEK for one tenant.
+fn derive_tenant_dek(kek: &[u8; 32], tenant: &monaca_types::TenantId) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(kek);
+    hasher.update(b"monaca:tenant-dek:v1");
+    hasher.update(tenant.uuid().as_bytes());
+    let digest = hasher.finalize();
+    let mut dek = [0u8; 32];
+    dek.copy_from_slice(&digest);
+    dek
+}
+
+/// Open `sealed` with the first DEK that authenticates it.
+///
+/// The order is the caller's: the current key first, then any key kept for a rotation. AES-GCM's
+/// authentication tag means a wrong key fails rather than returning other plaintext.
+pub fn open_any(deks: &[[u8; 32]], sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    if deks.is_empty() {
+        return Err(CryptoError::TenantKeyMissing);
+    }
+    let mut last = None;
+    for dek in deks {
+        match open(dek, sealed) {
+            Ok(plain) => return Ok(plain),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.unwrap_or(CryptoError::Decryption))
+}
+
+/// Move a sealed value to the current key.
+///
+/// `None` means the value already opens with `deks[0]`, so a re-run skips it. `Some` is the value
+/// re-sealed under the current key. [`CryptoError::Decryption`] means no configured key opens it —
+/// the caller must stop rather than overwrite data it cannot read.
+pub fn rewrap(deks: &[[u8; 32]], sealed: &[u8]) -> Result<Option<Vec<u8>>, CryptoError> {
+    if deks.is_empty() {
+        return Err(CryptoError::TenantKeyMissing);
+    }
+    if open(&deks[0], sealed).is_ok() {
+        return Ok(None);
+    }
+    for dek in &deks[1..] {
+        if let Ok(plain) = open(dek, sealed) {
+            return Ok(Some(seal(&deks[0], &plain)?));
+        }
+    }
+    Err(CryptoError::Decryption)
 }
 
 impl KeyProvider for EnvKeyProvider {
@@ -154,14 +230,19 @@ impl KeyProvider for EnvKeyProvider {
     }
 
     fn tenant_dek(&self, tenant: &monaca_types::TenantId) -> Option<[u8; 32]> {
-        let mut hasher = Sha256::new();
-        hasher.update(self.kek);
-        hasher.update(b"monaca:tenant-dek:v1");
-        hasher.update(tenant.uuid().as_bytes());
-        let digest = hasher.finalize();
-        let mut dek = [0u8; 32];
-        dek.copy_from_slice(&digest);
-        Some(dek)
+        Some(derive_tenant_dek(&self.kek, tenant))
+    }
+
+    fn tenant_deks(&self, tenant: &monaca_types::TenantId) -> Vec<[u8; 32]> {
+        let mut deks = vec![derive_tenant_dek(&self.kek, tenant)];
+        if let Some(previous) = self.previous.as_ref() {
+            deks.push(derive_tenant_dek(previous, tenant));
+        }
+        deks
+    }
+
+    fn previous_platform_kek(&self) -> Option<[u8; 32]> {
+        self.previous
     }
 }
 
@@ -249,6 +330,59 @@ mod tests {
     fn a_malformed_kek_is_refused() {
         assert!(EnvKeyProvider::from_hex("zz").is_err());
         assert!(EnvKeyProvider::from_hex("aabb").is_err());
+    }
+
+    #[test]
+    fn a_rotation_opens_with_either_key_and_rewraps_once() {
+        let current = EnvKeyProvider::from_hex(&"ab".repeat(32)).expect("provider");
+        let previous = EnvKeyProvider::from_hex(&"cd".repeat(32)).expect("provider");
+        let tenant = TenantId::new();
+
+        // Seal under the retiring key, then read it through a provider that keeps both.
+        let old_dek = previous.tenant_dek(&tenant).expect("dek");
+        let sealed = seal(&old_dek, b"connector secret").expect("seals");
+        let rotating =
+            EnvKeyProvider::from_hex_with_previous(&"ab".repeat(32), Some(&"cd".repeat(32)))
+                .expect("rotation provider");
+        assert_eq!(
+            open_any(&rotating.tenant_deks(&tenant), &sealed).expect("opens"),
+            b"connector secret"
+        );
+
+        // The first re-wrap moves it to the current key; the second run is a no-op.
+        let rewrapped = rewrap(&rotating.tenant_deks(&tenant), &sealed)
+            .expect("rewraps")
+            .expect("was under the previous key");
+        assert_eq!(
+            open(&current.tenant_dek(&tenant).expect("dek"), &rewrapped).expect("opens"),
+            b"connector secret"
+        );
+        assert_eq!(rewrap(&rotating.tenant_deks(&tenant), &rewrapped), Ok(None));
+
+        // Without the previous key, the migrated value still opens and the old one does not.
+        let only_current = EnvKeyProvider::from_hex(&"ab".repeat(32)).expect("provider");
+        assert!(open(&only_current.tenant_dek(&tenant).expect("dek"), &rewrapped).is_ok());
+        assert_eq!(
+            open(&only_current.tenant_dek(&tenant).expect("dek"), &sealed),
+            Err(CryptoError::Decryption)
+        );
+    }
+
+    #[test]
+    fn an_unknown_ciphertext_is_not_rewrapped() {
+        let provider =
+            EnvKeyProvider::from_hex_with_previous(&"ab".repeat(32), Some(&"cd".repeat(32)))
+                .expect("provider");
+        let tenant = TenantId::new();
+        let deks = provider.tenant_deks(&tenant);
+        let foreign = seal(&[9u8; 32], b"someone else's key").expect("seals");
+        assert_eq!(rewrap(&deks, &foreign), Err(CryptoError::Decryption));
+    }
+
+    #[test]
+    fn the_previous_key_must_differ_from_the_current_one() {
+        let hex = "ab".repeat(32);
+        assert!(EnvKeyProvider::from_hex_with_previous(&hex, Some(&hex)).is_err());
     }
 
     #[test]

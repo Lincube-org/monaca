@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use monaca_audit::AuditEvent;
-use monaca_crypto::{Argon2Params, EnvKeyProvider, KeyProvider, SigningKeyPair, open, seal};
+use monaca_crypto::{Argon2Params, EnvKeyProvider, KeyProvider, SigningKeyPair, seal};
 use monaca_oidc::Interaction as InteractionRequest;
 use monaca_store::{InteractionRow, OrgRow, Store, TenantRow};
 use monaca_types::{Clock, KeyId, OrgCtx, SystemClock};
@@ -68,8 +68,11 @@ impl AppState {
     pub fn new(store: Store, config: Config) -> Result<Arc<Self>, anyhow::Error> {
         // `Config::validate` has already checked the shape; the error here names the variable
         // without ever printing the value.
-        let keys = EnvKeyProvider::from_hex(&config.kek_hex)
-            .map_err(|err| anyhow::anyhow!("MONACA_KEK/MONACA_DEV_KEK: {err}"))?;
+        let keys = EnvKeyProvider::from_hex_with_previous(
+            &config.kek_hex,
+            config.previous_kek_hex.as_deref(),
+        )
+        .map_err(|err| anyhow::anyhow!("MONACA_KEK/MONACA_DEV_KEK: {err}"))?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -196,6 +199,21 @@ impl AppState {
             .ok_or_else(|| ApiError::internal("tenant DEK missing"))
     }
 
+    /// Open a sealed tenant value with the current KEK, or the retiring one during a rotation.
+    pub fn open_tenant(&self, tenant: &TenantRow, sealed: &[u8]) -> Result<Vec<u8>, ApiError> {
+        self.open_tenant_id(&tenant.tenant_id(), sealed)
+    }
+
+    /// The same for a caller that has the id but not the row (the mailer and the webhook relay).
+    pub fn open_tenant_id(
+        &self,
+        tenant_id: &monaca_types::TenantId,
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, ApiError> {
+        monaca_crypto::open_any(&self.keys.tenant_deks(tenant_id), sealed)
+            .map_err(|err| ApiError::internal(format!("sealed value: {err}")))
+    }
+
     /// An org by slug, or the configured default when the slug is empty.
     pub async fn org(&self, tenant: &TenantRow, slug: Option<&str>) -> Result<OrgRow, ApiError> {
         let slug = slug
@@ -210,18 +228,15 @@ impl AppState {
             return Ok(key);
         }
 
-        let dek = self
-            .keys
-            .tenant_dek(&tenant.tenant_id())
-            .ok_or_else(|| ApiError::internal("tenant DEK missing"))?;
-
         let rows = self.store.signing_keys(tenant).await?;
         let key = if let Some(row) = rows.first() {
-            let der = monaca_crypto::open(&dek, &row.private_enc)
+            let der = self
+                .open_tenant(tenant, &row.private_enc)
                 .map_err(|err| ApiError::internal(format!("signing key: {err}")))?;
             SigningKeyPair::from_pkcs8_der(KeyId::from_uuid(row.id), der)
                 .map_err(|err| ApiError::internal(format!("signing key: {err}")))?
         } else {
+            let dek = self.tenant_dek(tenant)?;
             let kid = KeyId::new();
             let generated = SigningKeyPair::generate(kid)
                 .map_err(|err| ApiError::internal(format!("key generation: {err}")))?;
@@ -575,14 +590,7 @@ impl AppState {
                 return None;
             }
         };
-        let dek = match self.tenant_dek(tenant) {
-            Ok(dek) => dek,
-            Err(err) => {
-                tracing::warn!(%err, "could not derive the TOTP enrollment DEK");
-                return None;
-            }
-        };
-        match open(&dek, &sealed) {
+        match self.open_tenant(tenant, &sealed) {
             Ok(secret) => Some(secret),
             Err(err) => {
                 tracing::warn!(%err, "could not open a pending TOTP enrollment");

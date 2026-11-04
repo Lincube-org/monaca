@@ -18,7 +18,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
-use monaca_crypto::{open, seal};
+use monaca_crypto::seal;
 use monaca_oidc::is_absolute_http_url;
 use monaca_store::{AccountRow, SsoConnectorRow, TenantRow};
 use monaca_types::{AccountId, EventId, TypedId};
@@ -385,7 +385,8 @@ pub async fn sso_callback(
         ));
     };
 
-    let secret = open(&state.tenant_dek(&tenant)?, &connector.client_secret_enc)
+    let secret = state
+        .open_tenant(&tenant, &connector.client_secret_enc)
         .map_err(ApiError::internal)?;
     let secret = String::from_utf8(secret).map_err(ApiError::internal)?;
     let redirect_uri = callback_url(&state, &tenant.slug, &connector_id);

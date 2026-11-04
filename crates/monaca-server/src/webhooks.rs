@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac};
 use monaca_audit::{AuditDecision, AuditEvent, AuditSubject};
-use monaca_crypto::{KeyProvider, generate_challenge, open, seal};
+use monaca_crypto::{generate_challenge, seal};
 use monaca_oidc::is_absolute_http_url;
 use monaca_store::{Store, WebhookDeliveryRow, WebhookRow};
 use monaca_types::{EventId, TenantId, TypedId, WebhookDeliveryId, WebhookId};
@@ -401,13 +401,9 @@ pub async fn dispatch(
     if hooks.is_empty() {
         return;
     }
-    let Some(dek) = state.keys.tenant_dek(&tenant_id) else {
-        tracing::warn!("tenant DEK missing; skipping webhook deliveries");
-        return;
-    };
-
     for hook in hooks {
-        let secret = match open(&dek, &hook.secret_enc)
+        let secret = match state
+            .open_tenant_id(&tenant_id, &hook.secret_enc)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
         {

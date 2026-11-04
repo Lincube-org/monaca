@@ -68,6 +68,10 @@ pub struct Config {
     /// explicit; outside `prod` it falls back to `MONACA_DEV_KEK` and then to a public constant.
     /// Never log this value.
     pub kek_hex: String,
+    /// The KEK being retired during a rotation (`MONACA_KEK_PREVIOUS`). New writes use `kek_hex`;
+    /// reads try the current key first and this one second until `monaca-server rewrap` has moved
+    /// every sealed value. `None` means no rotation is in progress.
+    pub previous_kek_hex: Option<String>,
     /// Whether `MONACA_DEV_KEK` was supplied; `prod` refuses it.
     pub dev_kek_supplied: bool,
     /// A dev/CI-only siteverify endpoint that replaces the provider's documented URL
@@ -252,6 +256,7 @@ impl Config {
             ),
             production,
             kek_hex,
+            previous_kek_hex: env("MONACA_KEK_PREVIOUS"),
             dev_kek_supplied,
             captcha_siteverify_url: matches!(environment.as_str(), "dev" | "ci")
                 .then(|| env("MONACA_CAPTCHA_SITEVERIFY_URL"))
@@ -331,6 +336,11 @@ impl Config {
         } else if let Err(err) = monaca_crypto::EnvKeyProvider::from_hex(&self.kek_hex) {
             // `err` reports the shape (`not hex`, `wrong length`), never the value.
             problems.push(format!("MONACA_KEK is invalid: {err}"));
+        }
+        if let Some(previous) = self.previous_kek_hex.as_deref()
+            && let Err(err) = monaca_crypto::EnvKeyProvider::from_hex(previous)
+        {
+            problems.push(format!("MONACA_KEK_PREVIOUS is invalid: {err}"));
         }
         if self.internal_secret.is_empty() {
             problems.push(
@@ -452,6 +462,7 @@ mod tests {
             bootstrap_admin_password: DEV_ADMIN_PASSWORD.into(),
             production: false,
             kek_hex: "11".repeat(32),
+            previous_kek_hex: None,
             dev_kek_supplied: false,
             captcha_siteverify_url: None,
             social_provider_base_url: None,

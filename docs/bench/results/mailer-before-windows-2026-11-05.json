@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "generated_at": "2026-11-04T21:16:41.494Z",
+    "fixture": "scale-all-connectors",
+    "tenants": 400,
+    "binary": "C:\\git\\sso\\monaca\\.monaca\\bin\\monaca-server-batch-f.exe",
+    "version": "monaca-server 0.0.0",
+    "slow_tenant": null,
+    "host": {
+      "platform": "win32",
+      "release": "10.0.26200",
+      "arch": "x64",
+      "cpu": "Intel(R) Core(TM) Ultra 5 226V",
+      "memory_gb": 15.6
+    },
+    "pg_source": "embedded"
+  },
+  "queued_at": "2026-11-04T21:14:41.371Z",
+  "delivered": 400,
+  "missing": 0,
+  "delivery_latency_ms": {
+    "p50": 58621,
+    "p99": 117461,
+    "max": 119991,
+    "count": 400
+  },
+  "first_pass_ms": 120084,
+  "tick_seconds_max": null,
+  "mailer_ticks_total": null,
+  "mailer_tenants_last": null,
+  "connections_peak": 129,
+  "sample_count": 549
+}

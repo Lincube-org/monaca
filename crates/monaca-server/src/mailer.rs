@@ -10,11 +10,11 @@
 //! bounces; the server only owns the HTTP call and the attempt counter.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use monaca_crypto::{KeyProvider, open};
 use monaca_store::{EmailConnectorRow, OutboxMailRow, TenantRow};
 use serde_json::{Value, json};
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
@@ -22,6 +22,19 @@ use crate::state::AppState;
 
 /// How often a worker looks for new mail.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long one tick may keep *starting* tenant visits. Visits already running finish within one
+/// [`DELIVERY_TIMEOUT`], so a tick is bounded by this plus that timeout, instead of by the tenant
+/// count.
+const TICK_BUDGET: Duration = Duration::from_secs(5);
+
+/// Tenant visits in flight at once. Each visit may open one tenant pool, so the connection budget
+/// gains at most this many pools over the request path (§6.3).
+const TENANT_CONCURRENCY: usize = 8;
+
+/// The longest one provider call may take. The shared client has a 10 s timeout; the mailer's own
+/// calls are tighter so a hanging provider cannot hold a worker for the whole tick.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Rows claimed per tenant per tick. Bounded so one backlog cannot starve other tenants.
 const BATCH: i64 = 20;
@@ -38,38 +51,77 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut cursor = 0usize;
         loop {
             ticker.tick().await;
-            deliver_pending(&state).await;
+            let started = Instant::now();
+            let visited = deliver_pending(&state, &mut cursor).await;
+            state.metrics.record_mailer_tick(started.elapsed(), visited);
         }
     });
 }
 
-/// One pass over the active tenants that have a connector.
+/// One pass over the tenants that have a connector.
 ///
-/// The control-plane index keeps this to the tenants the mailer can actually deliver for. Reading
-/// every active tenant and opening its database just to discover `email_connector` is absent was
-/// the dominant cost at 198/400 tenants, and it also churned the tenant-pool cache.
-async fn deliver_pending(state: &Arc<AppState>) {
+/// The cursor makes a partial pass resumable: when the tick budget runs out, the next tick starts
+/// at the first tenant this pass did not visit, so a tenant cannot be skipped forever because it
+/// sorts late. Tenants are visited with [`TENANT_CONCURRENCY`] workers; a slow provider occupies
+/// one worker, not the tick.
+async fn deliver_pending(state: &Arc<AppState>, cursor: &mut usize) -> usize {
     let tenants = match state.store.tenants_with_email_connector().await {
         Ok(tenants) => tenants,
         Err(err) => {
             tracing::warn!(%err, "mailer could not list indexed tenants");
-            return;
+            return 0;
         }
     };
+    if tenants.is_empty() {
+        *cursor = 0;
+        return 0;
+    }
 
-    for tenant in tenants {
-        if let Err(err) = deliver_tenant(state, &tenant).await {
-            tracing::warn!(%err, tenant = %tenant.slug, "mailer skipped a tenant");
+    let len = tenants.len();
+    let start = *cursor % len;
+    let deadline = Instant::now() + TICK_BUDGET;
+    let mut tasks = JoinSet::new();
+    let mut started = 0usize;
+
+    while started < len && Instant::now() < deadline {
+        if tasks.len() >= TENANT_CONCURRENCY
+            && let Some(result) = tasks.join_next().await
+        {
+            log_join(result);
         }
+        let tenant = tenants[(start + started) % len].clone();
+        let state = Arc::clone(state);
+        tasks.spawn(async move { deliver_tenant(&state, &tenant, deadline).await });
+        started += 1;
+    }
+
+    *cursor = (start + started) % len;
+    while let Some(result) = tasks.join_next().await {
+        log_join(result);
+    }
+    started
+}
+
+fn log_join(result: Result<Result<(), monaca_store::StoreError>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::warn!(%err, "mailer skipped a tenant"),
+        Err(err) => tracing::warn!(%err, "mailer task did not finish"),
     }
 }
 
-/// Deliver the tenant's claimable rows, one request at a time.
+/// Deliver up to [`BATCH`] rows for one tenant, one request at a time.
+///
+/// A row is claimed immediately before its send, not in a batch: a row claimed and then skipped
+/// because the deadline arrived would consume an attempt without a provider call and could reach
+/// [`MAX_ATTEMPTS`] without ever being tried.
 async fn deliver_tenant(
     state: &Arc<AppState>,
     tenant: &TenantRow,
+    deadline: Instant,
 ) -> Result<(), monaca_store::StoreError> {
     let Some(connector) = state.store.email_connector(tenant).await? else {
         return Ok(());
@@ -85,20 +137,30 @@ async fn deliver_tenant(
         }
     };
 
-    let rows = state
-        .store
-        .outbox_claim_mail(tenant, BATCH, MAX_ATTEMPTS)
-        .await?;
-    for row in rows {
+    for _ in 0..BATCH {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let rows = state
+            .store
+            .outbox_claim_mail(tenant, 1, MAX_ATTEMPTS)
+            .await?;
+        let Some(row) = rows.into_iter().next() else {
+            break;
+        };
         match deliver_one(state, tenant, &connector, secret.as_deref(), &row).await {
             Ok(status) => match state.store.outbox_mark_published(tenant, row.id).await {
-                Ok(()) => tracing::info!(
-                    tenant = %tenant.slug,
-                    outbox_id = %row.id,
-                    attempts = row.attempts,
-                    %status,
-                    "mail delivered"
-                ),
+                Ok(()) => {
+                    let age_ms = (state.now() - row.created_at).whole_milliseconds().max(0);
+                    tracing::info!(
+                        tenant = %tenant.slug,
+                        outbox_id = %row.id,
+                        attempts = row.attempts,
+                        age_ms,
+                        %status,
+                        "mail delivered"
+                    );
+                }
                 Err(err) => {
                     // The provider already accepted it. Leaving the row unpublished can duplicate
                     // the mail on the next tick; the payload carries its id so a receiver can drop it.
@@ -131,11 +193,9 @@ fn open_secret(
     let Some(sealed) = connector.secret_enc.as_deref() else {
         return Ok(None);
     };
-    let dek = state
-        .keys
-        .tenant_dek(&tenant.tenant_id())
-        .ok_or_else(|| "tenant DEK missing".to_owned())?;
-    let opened = open(&dek, sealed).map_err(|err| err.to_string())?;
+    let opened = state
+        .open_tenant_id(&tenant.tenant_id(), sealed)
+        .map_err(|err| err.to_string())?;
     let secret =
         String::from_utf8(opened).map_err(|_| "the stored secret is not UTF-8".to_owned())?;
     Ok(Some(secret))
@@ -155,6 +215,7 @@ async fn deliver_one(
         request = request.bearer_auth(secret);
     }
     let response = request
+        .timeout(DELIVERY_TIMEOUT)
         .send()
         .await
         .map_err(|err| format!("request failed: {err}"))?;

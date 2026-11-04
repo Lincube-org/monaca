@@ -585,6 +585,84 @@ fresh database (68 steps, all pass; the four skips are the `/mcp/demo` steps and
 restart/multi-instance steps that need environment this local shell does not export). CI is not
 run in this batch because the branch was not pushed.
 
+## Batch G — poller budget and KEK rotation
+
+Batch G bounds the mailer tick and makes the KEK rotatable. Both changes are on the mailer and
+sealed-data paths; no request-path semantics change.
+
+### Mailer budget
+
+The poller keeps its 5 s interval, but a tick now stops *starting* tenant visits after a 5 s
+budget, runs up to 8 visits concurrently, claims each outbox row immediately before its send, and
+carries a round-robin cursor across ticks so a tenant that sorts late cannot be skipped forever.
+Each provider call has its own 5 s timeout (the shared client's 10 s would let one hung provider
+hold a worker for two ticks). A row claimed before the deadline is always attempted, so a
+deadline cannot burn an attempt without a provider call; an in-flight visit finishes at most one
+pool acquisition (10 s) plus one delivery timeout (5 s) after the budget.
+
+Fixture: the 400-tenant all-connector scale fixture, one queued mail per tenant, embedded
+PostgreSQL with durability off, same Windows host. `bun scripts/bench/mailer.ts`; reports are
+`docs/bench/results/mailer-before-windows-2026-11-05.json` and
+`docs/bench/results/mailer-after-windows-2026-11-05.json`.
+
+| metric | before (sequential loop) | after (8 workers, 5 s budget) |
+|---|---:|---:|
+| longest tick | 120.1 s | 7.4 s |
+| delivery latency P50 | 58.6 s | 46.2 s |
+| delivery latency P99 | 117.5 s | 144.1 s |
+| delivery latency max | 120.0 s | 149.3 s |
+| connections peak | 129 | 124 |
+| delivered | 400 / 400 | 400 / 400 |
+
+The tick is now bounded independently of the tenant count; the sweep is not, because every tenant
+still pays a pool open. The shared pool cache holds 64 pools while the fixture indexes 400 tenants,
+so a sweep re-opens roughly 336 pools, and that cost dominates both binaries. P50 improved; P99
+regressed by 23%, which is the honest cost of spreading the same connect work over many small
+ticks instead of one long pass. A 16-worker experiment was worse (P99 214.8 s, tick 15.6 s,
+381/400 delivered inside 240 s) and is not the configuration kept.
+
+Failure path: holding one tenant's provider for 30 s (four times the 300 s cap used in the first
+pass) kept the longest tick at 11.9 s; the other tenants continued and the held tenant's row was
+retried rather than blocking a worker beyond one timeout. The remaining way to improve the sweep
+is a poller with its own warm pool cache (the separate-process option), which is the next step
+when the connector set outgrows the shared cache.
+
+The connection budget is `(MONACA_TENANT_POOL_CACHE + 8) × MONACA_TENANT_POOL_SIZE + headroom`;
+`deploy/README.md` and `compose.dev.yml` carry the formula (360 tenant connections at the
+defaults).
+
+### KEK rotation
+
+The KEK derives each tenant DEK by SHA-256, so a rotation re-seals values rather than re-wrapping
+a stored DEK. No schema change was needed and none was made: the key reference is **trial
+decryption, current key first and the retiring key second**, not a stored key id. AES-GCM's
+authentication tag makes a wrong key fail rather than return other plaintext, and two keys is a
+bounded, offline-only cost.
+
+`MONACA_KEK_PREVIOUS` keeps the retiring key configured; `monaca-server rewrap` walks every
+sealed column (signing keys, `credentials` rows of kind `totp`/`passkey`, pending TOTP
+enrollments, social/SSO/email connector secrets, webhooks, the CAPTCHA secret, pending social
+state verifiers) plus the control-plane `clusters` DSNs. Each row is opened with either key and
+re-sealed under the current one with a compare-and-swap on its previous bytes. A value that
+already opens with the current key is skipped, so an interrupted run resumes by being run again;
+a value a concurrent writer replaced is skipped, not overwritten; a value that opens with neither
+key is reported by table and row and makes the command exit non-zero.
+
+The drill (`scripts/verify-kek-rotation.ts`, wired into the e2e job) creates an account, a TOTP
+factor and an email connector under key A, restarts with key B current and A previous, runs
+`rewrap`, then restarts with only B. It passed 14 checks: a management token is minted (signing
+key), the account still signs in, a locally computed TOTP code completes the flow and mints
+tokens (TOTP seed), the mailer delivers a password-reset mail with the connector's bearer secret
+(connector secret), and the connector row is readable. `rewrap` moved 5 values (3 tenant + 2
+cluster DSNs) with 0 failures; a second run is a no-op by construction.
+
+### Verification
+
+`cargo test -p monaca-crypto -p monaca-store` (51 + 19 tests, including the rotation and
+single-flight tests), `bun run typecheck`, the local KEK drill (14/14), and the mailer experiments
+above. The pushed Batch F commit's CI is the last full run; Batch G's CI is observed after the
+push and reported with the run number.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

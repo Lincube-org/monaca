@@ -566,6 +566,8 @@ pub struct OutboxMailRow {
     pub payload: Value,
     /// How many delivery attempts this row has now seen, including this claim.
     pub attempts: i32,
+    /// When the mail was enqueued, for the delivery-latency signal.
+    pub created_at: OffsetDateTime,
 }
 
 /// A client in `tenant.clients`.
@@ -5427,7 +5429,7 @@ impl Store {
              SET attempts = o.attempts + 1
              FROM claimed
              WHERE o.id = claimed.id
-             RETURNING o.id, o.payload, o.attempts",
+             RETURNING o.id, o.payload, o.attempts, o.created_at",
         )
         .bind(limit)
         .bind(max_attempts)

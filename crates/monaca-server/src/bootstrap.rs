@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use monaca_crypto::{KeyProvider, hash_password, seal};
+use monaca_crypto::{hash_password, seal};
 use monaca_store::Store;
 use monaca_types::AccountId;
 

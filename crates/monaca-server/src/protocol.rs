@@ -10,8 +10,8 @@ use monaca_agent::{Permission, attenuate};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::{
     DEFAULT_CODE_DIGITS, assertion_user_verified, generate_challenge, generate_numeric_code,
-    generate_totp_secret, hash_password, hash_secret, normalize_backup_code, open, seal,
-    totp_base32, totp_otpauth_url, verify_assertion, verify_password, verify_secret, verify_totp,
+    generate_totp_secret, hash_password, hash_secret, normalize_backup_code, seal, totp_base32,
+    totp_otpauth_url, verify_assertion, verify_password, verify_secret, verify_totp,
 };
 use monaca_oidc::{
     AccessTokenClaims, AuthorizeParams, DiscoveryDocument, DpopProof, GrantType, IdTokenClaims,
@@ -2303,8 +2303,8 @@ pub async fn mfa_verify(
             else {
                 return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
             };
-            let dek = state.tenant_dek(&tenant)?;
-            let secret = open(&dek, &sealed)
+            let secret = state
+                .open_tenant(&tenant, &sealed)
                 .map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
 
             if !verify_totp(&secret, &body.code, state.now()) {
@@ -2585,8 +2585,8 @@ fn verify_passkey_assertion(
     challenge: &[u8],
     rp: &crate::passkey::RelyingParty,
 ) -> Result<Option<u64>, ApiError> {
-    let dek = state.tenant_dek(tenant)?;
-    let public_key = open(&dek, &row.secret_enc)
+    let public_key = state
+        .open_tenant(tenant, &row.secret_enc)
         .map_err(|err| ApiError::internal(format!("passkey public key: {err}")))?;
 
     let Ok(sign_count) = verify_assertion(

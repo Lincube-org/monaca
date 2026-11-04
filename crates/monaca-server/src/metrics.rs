@@ -67,6 +67,10 @@ pub struct Metrics {
     rejections: Mutex<HashMap<RejectionKey, u64>>,
     revoked: Mutex<HashMap<&'static str, u64>>,
     rendered: AtomicU64,
+    mailer_ticks: AtomicU64,
+    mailer_last_tick_micros: AtomicU64,
+    mailer_max_tick_micros: AtomicU64,
+    mailer_tenants_last: AtomicU64,
 }
 
 impl Metrics {
@@ -231,6 +235,44 @@ impl Metrics {
 
         out
     }
+
+    /// Record one mailer tick. `visited` is how many tenants this pass started on.
+    pub fn record_mailer_tick(&self, elapsed: Duration, visited: usize) {
+        let micros = elapsed.as_micros() as u64;
+        self.mailer_ticks.fetch_add(1, Ordering::Relaxed);
+        self.mailer_last_tick_micros
+            .store(micros, Ordering::Relaxed);
+        self.mailer_max_tick_micros
+            .fetch_max(micros, Ordering::Relaxed);
+        self.mailer_tenants_last
+            .store(visited as u64, Ordering::Relaxed);
+    }
+
+    /// The mailer tick section of `/metrics`.
+    pub fn mailer_stats_text(&self) -> String {
+        let ticks = self.mailer_ticks.load(Ordering::Relaxed);
+        let last = self.mailer_last_tick_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let max = self.mailer_max_tick_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let tenants = self.mailer_tenants_last.load(Ordering::Relaxed);
+        let mut out = String::with_capacity(512);
+        out.push_str(
+            "# HELP monaca_mailer_ticks_total Mailer passes over the connector tenants.\n",
+        );
+        out.push_str("# TYPE monaca_mailer_ticks_total counter\n");
+        out.push_str(&format!("monaca_mailer_ticks_total {ticks}\n"));
+        out.push_str("# HELP monaca_mailer_tick_seconds Duration of the last mailer tick.\n");
+        out.push_str("# TYPE monaca_mailer_tick_seconds gauge\n");
+        out.push_str(&format!("monaca_mailer_tick_seconds {last}\n"));
+        out.push_str("# HELP monaca_mailer_tick_seconds_max Longest mailer tick since start.\n");
+        out.push_str("# TYPE monaca_mailer_tick_seconds_max gauge\n");
+        out.push_str(&format!("monaca_mailer_tick_seconds_max {max}\n"));
+        out.push_str(
+            "# HELP monaca_mailer_tenants_last Tenants started by the last mailer tick.\n",
+        );
+        out.push_str("# TYPE monaca_mailer_tenants_last gauge\n");
+        out.push_str(&format!("monaca_mailer_tenants_last {tenants}\n"));
+        out
+    }
 }
 
 /// Append the tenant-pool cache counters to the request metrics (§6.4).
@@ -383,10 +425,8 @@ pub async fn middleware(
 pub async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut body = state.metrics.render();
     body.push_str(&pool_stats_text(&state.store.pool_stats()));
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        body,
-    )
+    body.push_str(&state.metrics.mailer_stats_text());
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
 
 #[cfg(test)]

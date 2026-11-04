@@ -97,6 +97,23 @@ remainder. The hot and mixed hit rates are the cache-retention signals; the mixe
 arbitrary eviction policy loses the working set. `mailer_ticks`, `connector_queries` and
 `index_queries` count the poller's statements during the phase.
 
+## Mailer budget
+
+`bun scripts/bench/mailer.ts` measures the delivery loop against the all-connector fixture. It
+starts the same embedded cluster, queues one mail per connector tenant, starts the binary named by
+`MONACA_SERVER_BIN`, and records the longest tick, the enqueue-to-send latency (P50/P99/max), the
+`pg_stat_activity` peak and the delivered count. Run it after
+`bun run bench --profile scale --only-pool --all-connectors` has built the fixture:
+
+```bash
+MONACA_SERVER_BIN=.monaca/bin/monaca-server bun scripts/bench/mailer.ts \
+  --out .monaca/reports/mailer-after.json
+```
+
+`--slow-tenant <slug>` makes the mock hold that tenant's delivery past the provider timeout, which
+proves one hung provider cannot hold the tick; `--timeout <secs>` caps the wait for the last mail.
+The fixture's bench tenants are activated for the run and returned to `provisioning` afterwards.
+
 ## Reading the report
 
 - `meta.fixtures` is the fixed data volume and `meta.pg.settings` the fixed PostgreSQL parameters.

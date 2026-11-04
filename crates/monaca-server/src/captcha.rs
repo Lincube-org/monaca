@@ -5,7 +5,6 @@
 //! siteverify endpoint before it looks at any credential. A token is single use at the provider,
 //! so a rejected sign-in makes the page solve a fresh challenge.
 
-use monaca_crypto::open;
 use monaca_store::{SignInExperienceRow, TenantRow};
 
 use crate::error::{ApiError, kinds};
@@ -83,7 +82,7 @@ pub async fn enforce(
         .captcha_secret_enc
         .as_deref()
         .ok_or_else(|| ApiError::internal("captcha is enabled without a secret"))?;
-    let secret = open(&state.tenant_dek(tenant)?, sealed).map_err(|err| {
+    let secret = state.open_tenant(tenant, sealed).map_err(|err| {
         ApiError::internal(format!("the CAPTCHA secret could not be opened: {err}"))
     })?;
     let secret = String::from_utf8(secret)
