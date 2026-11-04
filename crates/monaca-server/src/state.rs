@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::error::ApiError;
+use crate::rate_limit::RateLimiter;
 
 /// An interaction plus whether it has been redeemed.
 #[derive(Debug)]
@@ -76,6 +77,8 @@ pub struct AppState {
     /// The client webhook deliveries are posted with. One pool-backed client, so a tenant with
     /// many subscriptions does not open a new connection pool per event.
     pub http: reqwest::Client,
+    /// Per-endpoint request gates (§6.2).
+    pub rate_limit: RateLimiter,
 }
 
 impl AppState {
@@ -100,6 +103,7 @@ impl AppState {
             passkey_challenges: Mutex::new(HashMap::new()),
             signing: Mutex::new(HashMap::new()),
             http,
+            rate_limit: RateLimiter::default(),
         }))
     }
 
@@ -111,6 +115,38 @@ impl AppState {
     /// A tenant by slug.
     pub async fn tenant(&self, slug: &str) -> Result<TenantRow, ApiError> {
         Ok(self.store.tenant_by_slug(slug).await?)
+    }
+
+    /// Count one request against the tenant and client layers for `endpoint` (§6.2).
+    ///
+    /// The configuration is cached per tenant for [`crate::rate_limit::config_ttl_secs`] seconds;
+    /// a management write in this process invalidates it immediately.
+    pub async fn enforce_rate_limit(
+        &self,
+        tenant: &TenantRow,
+        endpoint: &str,
+        client: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let now = self.now();
+        let rows = match self.rate_limit.cached(tenant.id, now).await {
+            Some(rows) => rows,
+            None => {
+                let loaded = Arc::new(self.store.rate_limits(tenant).await?);
+                self.rate_limit
+                    .remember(tenant.id, Arc::clone(&loaded), now)
+                    .await;
+                loaded
+            }
+        };
+        self.rate_limit
+            .check(tenant.id, &rows, endpoint, client, now)
+            .await
+            .map_err(|rejection| ApiError::rate_limited(rejection.retry_after))
+    }
+
+    /// Drop the tenant's cached limit configuration and counters after a management write.
+    pub async fn invalidate_rate_limits(&self, tenant: &TenantRow) {
+        self.rate_limit.invalidate(tenant.id).await;
     }
 
     /// The tenant's data-encryption key, for sealing per-account secrets such as a TOTP seed.

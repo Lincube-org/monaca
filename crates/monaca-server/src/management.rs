@@ -4,6 +4,7 @@
 //! `monaca:admin`, and which carries no `act` claim (§6.2). A resource outside the caller's tenant
 //! is a 404, never a 403.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Json;
@@ -14,7 +15,7 @@ use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditS
 use monaca_crypto::{hash_password, seal};
 use monaca_oidc::{is_absolute_http_url, valid_scope};
 use monaca_store::{
-    AccountRow, AgentKeyRow, AgentRow, BrandingRow, GrantRow, RoleRow, SessionRow,
+    AccountRow, AgentKeyRow, AgentRow, BrandingRow, GrantRow, RateLimitRow, RoleRow, SessionRow,
     SignInExperienceRow, SignInGuardrailsPatch, TenantRow,
 };
 use monaca_types::{
@@ -226,6 +227,7 @@ pub async fn authorize_admin(
                 "the account is not a tenant admin",
             ));
         }
+        state.enforce_rate_limit(&tenant, "management", None).await?;
         return Ok((
             tenant,
             AdminPrincipal {
@@ -246,6 +248,9 @@ pub async fn authorize_admin(
         .client_by_id(&tenant, client_id.uuid())
         .await?
         .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the client is gone"))?;
+    state
+        .enforce_rate_limit(&tenant, "management", Some(client.client_id.as_str()))
+        .await?;
     Ok((
         tenant,
         AdminPrincipal {
@@ -2552,6 +2557,119 @@ fn validate_public_jwk(jwk: &Value) -> Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+/// One configured layer in `PATCH /v1/rate-limits` — §6.2.
+#[derive(Debug, Deserialize)]
+pub struct RateLimitItem {
+    /// `authorize` | `token` | `userinfo` | `management`.
+    pub endpoint: String,
+    /// The protocol client id for a per-client layer; absent for the tenant-wide layer.
+    pub client_id: Option<String>,
+    /// Requests allowed per window.
+    pub limit: i32,
+    /// Window length in seconds.
+    pub window_secs: i32,
+}
+
+/// `PATCH /v1/rate-limits` body.
+#[derive(Debug, Deserialize)]
+pub struct RateLimitsPatch {
+    /// The complete replacement set. An empty list restores the built-in defaults.
+    pub items: Vec<RateLimitItem>,
+}
+
+/// `GET /v1/rate-limits` — the effective defaults plus every configured row.
+pub async fn get_rate_limits(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let rows = state.store.rate_limits(&tenant).await?;
+    Ok(Json(rate_limits_json(&rows)))
+}
+
+/// `PATCH /v1/rate-limits` — replace the tenant's whole gate configuration.
+pub async fn update_rate_limits(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<RateLimitsPatch>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    let mut rows = Vec::with_capacity(body.items.len());
+    for item in body.items {
+        if !crate::rate_limit::ENDPOINTS.contains(&item.endpoint.as_str()) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "endpoint must be authorize, token, userinfo or management",
+            ));
+        }
+        if !(1..=1_000_000).contains(&item.limit) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "limit must be between 1 and 1000000",
+            ));
+        }
+        if !(1..=86_400).contains(&item.window_secs) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "window_secs must be between 1 and 86400",
+            ));
+        }
+        if let Some(client) = item.client_id.as_deref()
+            && state
+                .store
+                .client_by_client_id(&tenant, client)
+                .await?
+                .is_none()
+        {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                format!("unknown client `{client}`"),
+            ));
+        }
+        if !seen.insert((item.endpoint.clone(), item.client_id.clone())) {
+            return Err(ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "the same endpoint and client_id appears twice",
+            ));
+        }
+        rows.push((
+            item.endpoint,
+            item.client_id,
+            item.limit,
+            item.window_secs,
+        ));
+    }
+
+    state.store.replace_rate_limits(&tenant, &rows).await?;
+    state.invalidate_rate_limits(&tenant).await;
+    let saved = state.store.rate_limits(&tenant).await?;
+    Ok(Json(rate_limits_json(&saved)))
+}
+
+fn rate_limits_json(rows: &[RateLimitRow]) -> Value {
+    json!({
+        "defaults": crate::rate_limit::defaults()
+            .into_iter()
+            .map(|(endpoint, limit, window_secs)| json!({
+                "endpoint": endpoint,
+                "limit": limit,
+                "window_secs": window_secs,
+            }))
+            .collect::<Vec<_>>(),
+        "items": rows
+            .iter()
+            .map(|row| json!({
+                "endpoint": row.endpoint,
+                "client_id": row.client_id,
+                "limit": row.limit_count,
+                "window_secs": row.window_secs,
+            }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// RFC 7638 thumbprint: SHA-256 hex of the canonical `{crv,kty,x,y}` object.

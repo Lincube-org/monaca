@@ -608,6 +608,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "MONACA_UNAUTHORIZED on /v1 while the second token still answers 200, and revoking an unknown token " +
       "is 200 without disclosing anything",
   },
+  {
+    step: "61",
+    title: "rate limits",
+    assertion:
+      "GET /v1/rate-limits reports the four built-in defaults; an unknown endpoint, a zero limit, a window " +
+      "outside 1–86400 and an unknown client_id are 400; a per-client token row at 2 lets two client_credentials " +
+      "requests through and answers the third 429 MONACA_TOO_MANY_ATTEMPTS with Retry-After; a tenant-wide " +
+      "authorize row at 1 lets one authorize through and refuses the next with the same shape; items:[] restores " +
+      "the defaults and a token request succeeds again",
+  },
 ];
 
 interface StepResult {
@@ -6683,6 +6693,154 @@ async function revocationFlow(base: string, adminSecret: string): Promise<StepRe
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: two tokens → both open /v1 → revoke A → A is 401 → B still 200 → unknown is 200`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 61 — configurable tenant/client/endpoint gates (§6.2).
+ *
+ * A limit that is only stored but never enforced would pass a "config saved" check. This step
+ * trips both layers and requires the 429 + `Retry-After` answer, then clears the configuration and
+ * proves the same request succeeds again.
+ */
+async function rateLimitFlow(
+  base: string,
+  adminToken: string,
+  adminSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const basic = btoa(`${ADMIN_CLIENT_ID}:${adminSecret}`);
+  const runId = Date.now().toString(36);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const patch = (items: unknown[]): Promise<HttpResult> =>
+    call(`${base}/v1/rate-limits`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ items }),
+    });
+  const mint = (): Promise<HttpResult> =>
+    tokenCall(base, { grant_type: "client_credentials", scope: "monaca:admin" }, basic);
+  const authorize = async (tag: string): Promise<HttpResult> => {
+    const verifier = `rl-${tag}-${runId}-${"q".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const url = `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid",
+      state: `rl-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+    return call(url, { redirect: "manual" });
+  };
+  const retryAfter = (result: HttpResult): number | undefined => {
+    const raw = result.headers.get("retry-after");
+    if (raw === null) return undefined;
+    const value = Number(raw);
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+  };
+  const limited = (result: HttpResult): boolean =>
+    result.status === 429 &&
+    (result.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+      "MONACA_TOO_MANY_ATTEMPTS" &&
+    retryAfter(result) !== undefined;
+
+  try {
+    const read = await call(`${base}/v1/rate-limits`, { headers });
+    const defaults = (read.body as { defaults?: { endpoint?: string }[] } | undefined)?.defaults ?? [];
+    checks.push([
+      "GET /v1/rate-limits reports the four built-in defaults",
+      read.status === 200 &&
+        defaults.length === 4 &&
+        ["authorize", "token", "userinfo", "management"].every((endpoint) =>
+          defaults.some((item) => item.endpoint === endpoint),
+        ) &&
+        ((read.body as { items?: unknown[] } | undefined)?.items ?? []).length === 0,
+    ]);
+
+    const badEndpoint = await patch([{ endpoint: "bogus", limit: 5, window_secs: 60 }]);
+    const badLimit = await patch([{ endpoint: "token", limit: 0, window_secs: 60 }]);
+    const badWindow = await patch([{ endpoint: "token", limit: 5, window_secs: 86_401 }]);
+    const badClient = await patch([
+      { endpoint: "token", client_id: "no-such-client", limit: 5, window_secs: 60 },
+    ]);
+    checks.push([
+      "invalid endpoint, limit, window and client are 400",
+      badEndpoint.status === 400 &&
+        badLimit.status === 400 &&
+        badWindow.status === 400 &&
+        badClient.status === 400,
+    ]);
+
+    const clientRow = await patch([
+      { endpoint: "token", client_id: ADMIN_CLIENT_ID, limit: 2, window_secs: 60 },
+    ]);
+    checks.push([
+      "a per-client token row is stored and echoed",
+      clientRow.status === 200 &&
+        ((clientRow.body as { items?: { client_id?: unknown; limit?: unknown }[] } | undefined)
+          ?.items ?? []).some(
+          (item) => item.client_id === ADMIN_CLIENT_ID && item.limit === 2,
+        ),
+    ]);
+
+    const first = await mint();
+    const second = await mint();
+    const third = await mint();
+    checks.push([
+      "two token requests pass the per-client layer and the third is limited",
+      first.status === 200 && second.status === 200 && limited(third),
+    ]);
+    checks.push([
+      "the limit carries MONACA_TOO_MANY_ATTEMPTS and Retry-After",
+      limited(third),
+    ]);
+
+    const tenantRow = await patch([{ endpoint: "authorize", limit: 1, window_secs: 60 }]);
+    const firstAuthorize = await authorize("first");
+    const secondAuthorize = await authorize("second");
+    checks.push([
+      "a tenant-wide authorize row is stored",
+      tenantRow.status === 200 &&
+        ((tenantRow.body as { items?: { client_id?: unknown }[] } | undefined)?.items ?? []).some(
+          (item) => item.client_id === null,
+        ),
+    ]);
+    checks.push([
+      "one authorize passes the tenant layer and the next is limited",
+      firstAuthorize.status === 302 && limited(secondAuthorize),
+    ]);
+
+    const cleared = await patch([]);
+    const after = await mint();
+    checks.push([
+      "items:[] clears the overrides and a token request succeeds again",
+      cleared.status === 200 &&
+        ((cleared.body as { items?: unknown[] } | undefined)?.items ?? []).length === 0 &&
+        after.status === 200,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "61",
+    title: "rate limits",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: defaults → four 400s → client token limit 2 → third 429+Retry-After → tenant authorize limit 1 → second 429 → cleared`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -13695,6 +13853,7 @@ async function main(): Promise<number> {
   push(await capCaptchaFlow(base, adminToken));
   push(await socialProvidersFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await revocationFlow(base, parsed.adminSecret));
+  push(await rateLimitFlow(base, adminToken, parsed.adminSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

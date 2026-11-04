@@ -911,6 +911,21 @@ pub(crate) fn unique_conflict(err: sqlx::Error, entity: &'static str) -> StoreEr
     StoreError::Database(err.to_string())
 }
 
+/// One configured rate-limit layer (§6.2).
+#[derive(Debug, Clone, FromRow)]
+pub struct RateLimitRow {
+    /// Row id.
+    pub id: Uuid,
+    /// `authorize` | `token` | `userinfo` | `management`.
+    pub endpoint: String,
+    /// The protocol client id for a per-client layer; `None` for the tenant-wide layer.
+    pub client_id: Option<String>,
+    /// Requests allowed per window.
+    pub limit_count: i32,
+    /// Window length in seconds.
+    pub window_secs: i32,
+}
+
 impl Store {
     // ---------------------------------------------------------------- accounts
 
@@ -5041,6 +5056,51 @@ impl Store {
         .execute(&mut *conn)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // --------------------------------------------------------------- rate limits
+
+    /// Every configured rate-limit row for the tenant.
+    pub async fn rate_limits(&self, tenant: &TenantRow) -> Result<Vec<RateLimitRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, RateLimitRow>(
+            "SELECT id, endpoint, client_id, limit_count, window_secs
+             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// Replace the tenant's whole rate-limit configuration.
+    ///
+    /// The caller validates every entry first; the delete-and-insert is one transaction so a
+    /// reader never sees a half-replaced set.
+    pub async fn replace_rate_limits(
+        &self,
+        tenant: &TenantRow,
+        rows: &[(String, Option<String>, i32, i32)],
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM tenant.rate_limits")
+            .execute(&mut *tx)
+            .await?;
+        for (endpoint, client_id, limit_count, window_secs) in rows {
+            sqlx::query(
+                "INSERT INTO tenant.rate_limits
+                   (id, endpoint, client_id, limit_count, window_secs)
+                 VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(endpoint)
+            .bind(client_id)
+            .bind(limit_count)
+            .bind(window_secs)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     // -------------------------------------------------------------------- audit

@@ -264,6 +264,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "social provider presets and linking policy (M1)",
         include_str!("../migrations/tenant_45.sql"),
     ),
+    (
+        46,
+        "per-endpoint tenant and client rate limits (M1)",
+        include_str!("../migrations/tenant_46.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

@@ -27,6 +27,7 @@ mod org_roles;
 mod orgs;
 mod passkey;
 mod protocol;
+mod rate_limit;
 mod resources;
 mod routes;
 mod session;

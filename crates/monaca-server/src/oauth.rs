@@ -59,6 +59,9 @@ pub async fn userinfo(
         ));
     }
 
+    // Access tokens carry no client id, so this endpoint has the tenant-wide layer only.
+    state.enforce_rate_limit(&tenant, "userinfo", None).await?;
+
     // RFC 9449 §7.1: a token bound with `cnf.jkt` is only usable with a proof for the same key,
     // and the proof's `ath` must hash this very token.
     let bound = claims

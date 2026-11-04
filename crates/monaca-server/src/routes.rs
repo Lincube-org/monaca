@@ -441,6 +441,11 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             get(crate::copy::get_sign_in_copy).patch(crate::copy::update_sign_in_copy),
         )
         .route(
+            "/v1/rate-limits",
+            get(crate::management::get_rate_limits)
+                .patch(crate::management::update_rate_limits),
+        )
+        .route(
             "/v1/email-templates",
             get(crate::email_templates::list_email_templates),
         )

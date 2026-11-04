@@ -35,8 +35,8 @@ pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
     BrandingRow, ClientRow, ConsentRow, EmailConnectorRow, EmailTemplateRow, GrantRow,
-    LoginFailureRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow, RefreshRow,
-    RoleRow, SessionRow,
+    LoginFailureRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow, RateLimitRow,
+    RefreshRow, RoleRow, SessionRow,
     SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow, SocialConnectorRow,
     SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow,
     VerificationRow, WebhookDeliveryRow, WebhookRow,

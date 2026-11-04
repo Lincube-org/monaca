@@ -165,6 +165,9 @@ pub async fn authorize(
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::problem(kinds::INVALID_REQUEST, "`client_id` is required"))?;
+    state
+        .enforce_rate_limit(&tenant, "authorize", Some(client_id))
+        .await?;
     let client = state
         .store
         .client_by_client_id(&tenant, client_id)
@@ -3443,6 +3446,12 @@ pub async fn token(
         .map(|(id, _)| id.clone())
         .or_else(|| request.client_id.clone())
         .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidRequest, "client_id is required"))?;
+
+    // Count before authentication: a client that keeps guessing a secret is still a client, and
+    // the tenant-wide layer has to bound it. The client layer is keyed by the claimed id.
+    state
+        .enforce_rate_limit(&tenant, "token", Some(client_id.as_str()))
+        .await?;
 
     let endpoint = state.config.token_endpoint(&tenant.slug);
 

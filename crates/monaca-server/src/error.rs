@@ -281,6 +281,11 @@ pub enum ApiError {
         /// A short explanation.
         detail: String,
     },
+    /// A per-endpoint request gate (§6.2), answered with `Retry-After`.
+    RateLimited {
+        /// Whole seconds until the current window ends.
+        retry_after: u64,
+    },
 }
 
 impl ApiError {
@@ -319,6 +324,11 @@ impl ApiError {
             detail: detail.into(),
         }
     }
+
+    /// A rate-limit rejection; `retry_after` is whole seconds.
+    pub fn rate_limited(retry_after: u64) -> Self {
+        ApiError::RateLimited { retry_after }
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -328,6 +338,9 @@ impl std::fmt::Display for ApiError {
             ApiError::Token { code, detail } => write!(f, "{}: {detail}", code.as_str()),
             ApiError::Bearer { code, detail, .. } => write!(f, "{code}: {detail}"),
             ApiError::Interaction(err) => write!(f, "{err}"),
+            ApiError::RateLimited { retry_after } => {
+                write!(f, "too_many_attempts: retry after {retry_after}s")
+            }
         }
     }
 }
@@ -419,6 +432,22 @@ impl IntoResponse for ApiError {
                     response
                         .headers_mut()
                         .insert(header::WWW_AUTHENTICATE, value);
+                }
+                response
+            }
+            ApiError::RateLimited { retry_after } => {
+                let problem = Problem::new(
+                    kinds::TOO_MANY_ATTEMPTS,
+                    format!("rate limit exceeded; retry in {retry_after} s"),
+                );
+                let mut response = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::CONTENT_TYPE, "application/problem+json")],
+                    Json(problem),
+                )
+                    .into_response();
+                if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+                    response.headers_mut().insert(header::RETRY_AFTER, value);
                 }
                 response
             }
