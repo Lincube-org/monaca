@@ -161,7 +161,7 @@ semantics or is outside M0:
   that, so it is a separate decision, not a silent optimization.
 * `token` and `flow` are expensive because of Argon2 client-secret and password verification.
   Weakening or caching that is a security-policy change; the absolute cost (23 rps at one process
-  on Windows, 47 rps on the Linux runner) is acceptable for M0.
+  on Windows, 53 rps on the Linux runner) is acceptable for M0.
 * `authorize` pays one `DELETE … WHERE expires_at <= now()` per request. Moving it to a periodic
   cleanup would save one of seven queries; not worth a new background task in M0.
 * The 198-tenant pool degradation is the mailer sweep plus the 64-pool cap. Fixing it changes
