@@ -4,7 +4,7 @@
 //! the tenant signing key's wire id (`key_…`, §5.2), which is also the `kid` in the JWKS.
 
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header,
 };
 use monaca_types::{KeyId, TypedId};
 use serde_json::Value;
@@ -275,6 +275,7 @@ fn malformed(err: &jsonwebtoken::errors::Error) -> CryptoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::encode;
     use serde_json::json;
 
     fn pair() -> SigningKeyPair {
