@@ -429,6 +429,33 @@ jobs:
           # is the path a deployment uses to upgrade schemas provisioned before a migration.
           .monaca/bin/monaca-server migrate
 
+      # §10.7: remote-deploy.sh refuses to migrate without a dump, so the dump and the restore
+      # are exercised here. The runner's pg_dump is not guaranteed to match a v18 server, so the
+      # same postgres:18 container that serves the job runs both client commands.
+      - name: Stage 0b — backup and restore drill
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter ancestor=postgres:18 --format '{{.ID}}' | head -n 1)"
+          if [ -z "$cid" ]; then
+            echo "::error::the postgres:18 service container was not found"
+            exit 1
+          fi
+          mkdir -p .monaca/backups
+          bash deploy/backup.sh --container "$cid" --db monaca_control --db-user postgres \
+            --out .monaca/backups/monaca_control.dump
+          bash deploy/restore-drill.sh --container "$cid" --db-user postgres \
+            --dump .monaca/backups/monaca_control.dump \
+            --target-db monaca_control_drill --recreate
+          # The restore is only proven if the seed rows made it back: a schema-only dump would
+          # also produce a non-empty file and an empty tenants table.
+          tenants="$(docker exec -i "$cid" psql -U postgres -d monaca_control_drill -tAc \
+            'SELECT count(*) FROM tenants' | tr -d '[:space:]')"
+          if ! printf '%s' "$tenants" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::the restored control database has no tenants (got '$tenants')"
+            exit 1
+          fi
+          echo "restore drill: $tenants tenant row(s) survived the round trip"
+
       - name: Stage 0 — start the server and wait for /healthz
         run: |
           mkdir -p .monaca/reports
@@ -461,6 +488,100 @@ jobs:
           bun run e2e:skeleton --base-url http://127.0.0.1:8081 \
             --admin-secret "$MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET" \
             --console-secret "$MONACA_CONSOLE_CLIENT_SECRET"
+
+      # §2.2/§6.3: prod must refuse to start without its secrets, and the plaintext outbox reader
+      # must not exist in prod. The KEK here is valid hex but not the CI dev KEK; nothing on this
+      # route decrypts anything, so the mismatch is irrelevant to the checks below.
+      - name: Stage 2 — prod refusals and /internal/mail
+        run: |
+          set -euo pipefail
+          base=(
+            MONACA_ENV=prod
+            MONACA_KEK=00000000000000000000000000000000000000000000000000000000000000ff
+            MONACA_INTERNAL_SECRET=prod-internal-secret
+            MONACA_BOOTSTRAP_ADMIN_PASSWORD=prod-admin-password
+            MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET=prod-admin-client-secret
+            MONACA_CONSOLE_CLIENT_SECRET=prod-console-client-secret
+          )
+
+          # Each case removes exactly one variable from the complete set and expects a non-zero
+          # exit whose text names that variable.
+          run_refusal() {
+            missing="$1"
+            command="$2"
+            args=()
+            for kv in "${base[@]}"; do
+              if [ "${kv%%=*}" = "$missing" ]; then continue; fi
+              args+=("$kv")
+            done
+            log=".monaca/reports/prod-refuse-$missing.log"
+            set +e
+            env -u MONACA_DEV_KEK -u "$missing" "${args[@]}" \
+              .monaca/bin/monaca-server "$command" > "$log" 2>&1
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "::error::prod $command started without $missing"
+              cat "$log"
+              exit 1
+            fi
+            if ! grep -q "$missing" "$log"; then
+              echo "::error::the refusal for $missing does not name the variable"
+              cat "$log"
+              exit 1
+            fi
+            echo "OK: prod $command refused without $missing (exit $status)"
+          }
+
+          # The seed password is a bootstrap requirement, not a serve requirement: a restart of an
+          # already-provisioned deployment must not depend on it (contract §2.2).
+          run_refusal MONACA_BOOTSTRAP_ADMIN_PASSWORD bootstrap
+          run_refusal MONACA_KEK serve
+          run_refusal MONACA_INTERNAL_SECRET serve
+
+          env -u MONACA_DEV_KEK "${base[@]}" \
+            MONACA_SERVER_ADDR=127.0.0.1:8082 MONACA_LOG_LEVEL=warn \
+            .monaca/bin/monaca-server serve > .monaca/prod-server.log 2>&1 &
+          echo $! > .monaca/prod-server.pid
+          trap 'kill "$(cat .monaca/prod-server.pid)" 2>/dev/null || true' EXIT
+
+          started=0
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8082/healthz >/dev/null 2>&1; then
+              started=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$started" != "1" ]; then
+            echo "::error::the prod server never answered /healthz"
+            tail -n 200 .monaca/prod-server.log
+            exit 1
+          fi
+
+          mail_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'X-Monaca-Internal-Secret: prod-internal-secret' \
+            'http://127.0.0.1:8082/internal/mail?tenant=demo&to=admin@demo.localhost')"
+          if [ "$mail_code" != "404" ]; then
+            echo "::error::/internal/mail must not exist in prod (got $mail_code)"
+            exit 1
+          fi
+          echo "OK: /internal/mail is absent in prod (404)"
+
+          health_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'X-Monaca-Internal-Secret: prod-internal-secret' \
+            http://127.0.0.1:8082/internal/health)"
+          if [ "$health_code" != "200" ]; then
+            echo "::error::/internal/health with the explicit secret should be 200 (got $health_code)"
+            exit 1
+          fi
+          unauth_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:8082/internal/health)"
+          if [ "$unauth_code" != "401" ]; then
+            echo "::error::/internal/health without the secret should be 401 (got $unauth_code)"
+            exit 1
+          fi
+          echo "OK: the other /internal routes keep their authentication"
 
       - name: Stop the server
         if: always()

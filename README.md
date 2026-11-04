@@ -44,6 +44,21 @@ on the hosted page. `create_new_only` cannot create a second account with an add
 already taken, because `accounts.primary_email` is unique per tenant; it therefore refuses that
 case with `409 MONACA_SOCIAL_EMAIL_TAKEN` instead of weakening the identity model.
 
+## Production configuration
+
+`MONACA_ENV=prod` removes every credential default. The server refuses to start unless
+`MONACA_KEK` (32 bytes as 64 hex characters) and `MONACA_INTERNAL_SECRET` are explicit and are not
+the documented dev defaults; `MONACA_DEV_KEK` is refused. `monaca-server bootstrap` additionally
+requires `MONACA_BOOTSTRAP_ADMIN_PASSWORD`, `MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET` and
+`MONACA_CONSOLE_CLIENT_SECRET`, but a `serve` restart does not: the seeds are read only when the
+seeded rows do not exist, and an existing password or client secret is never overwritten.
+
+The plaintext outbox reader `/internal/mail` is mounted only in dev/CI; in prod the route answers
+404. **The KEK cannot be rotated in M0** — it derives every tenant DEK, so changing it makes
+existing sealed signing keys and account secrets unreadable. Backups, the restore drill and the
+RPO/RTO limits are in [docs/contracts/m0.md](docs/contracts/m0.md) §10.7 and
+[deploy/README.md](deploy/README.md).
+
 ## Prerequisites
 
 | need | why |
