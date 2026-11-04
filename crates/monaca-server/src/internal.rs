@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use monaca_audit::AuditEvent;
 use monaca_store::topics;
@@ -51,6 +52,22 @@ fn const_eq(left: &[u8], right: &[u8]) -> bool {
         diff |= a ^ b;
     }
     diff == 0
+}
+
+/// Authenticate every `/internal/*` request **before** the handler's extractors run.
+///
+/// Without this layer Axum would deserialize `Json<AuditBody>` first, so an unauthenticated POST
+/// with a malformed body would answer `422` instead of `401` — an oracle for the route's shape.
+/// The per-handler `require_secret` checks stay as defence in depth.
+pub async fn require_secret_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(err) = require_secret(&state, request.headers()) {
+        return err.into_response();
+    }
+    next.run(request).await
 }
 
 /// `POST /internal/audit`.

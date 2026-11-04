@@ -120,6 +120,70 @@ pub fn verify_jws_with_audience(
     verify_inner(token, jwks, expected_typ, Some(audience))
 }
 
+/// Verify a provider-issued ID token signed with **RS256**.
+///
+/// This is deliberately separate from [`verify_jws`]: the server's own tokens stay ES256-only, and
+/// accepting RS256 there would widen the algorithm-confusion surface. The header algorithm is
+/// checked against a one-entry whitelist before any key is selected, so `none` and MAC algorithms
+/// (`HS256`/`HS384`/`HS512`) are rejected even when a caller supplies a matching key.
+///
+/// Claim policy (issuer, audience, nonce, `iat`) belongs to the provider flow; this function only
+/// enforces the signature, `kid`, `typ`, and `exp`.
+pub fn verify_rs256_jws(
+    token: &str,
+    jwks: &[Value],
+    expected_typ: Option<&str>,
+) -> Result<Value, CryptoError> {
+    let header = decode_header(token).map_err(|err| malformed(&err))?;
+    if header.alg != Algorithm::RS256 {
+        return Err(CryptoError::BadSignature(format!(
+            "alg is {:?}, only RS256 is accepted for provider ID tokens",
+            header.alg
+        )));
+    }
+    if let Some(expected) = expected_typ
+        && header.typ.as_deref() != Some(expected)
+    {
+        return Err(CryptoError::Claims(format!(
+            "typ `{:?}` is not `{expected}`",
+            header.typ
+        )));
+    }
+
+    let kid = header
+        .kid
+        .as_deref()
+        .filter(|kid| !kid.is_empty())
+        .ok_or_else(|| CryptoError::BadSignature("token header has no `kid`".into()))?;
+
+    let jwk = jwks
+        .iter()
+        .find(|jwk| jwk.get("kid").and_then(Value::as_str) == Some(kid))
+        .ok_or_else(|| CryptoError::BadSignature(format!("kid `{kid}` is not in the key set")))?;
+    if let Some(alg) = jwk.get("alg").and_then(Value::as_str)
+        && alg != "RS256"
+    {
+        return Err(CryptoError::BadSignature(format!(
+            "the key named by `{kid}` is not an RS256 key"
+        )));
+    }
+
+    let key = DecodingKey::from_jwk(
+        &serde_json::from_value(jwk.clone())
+            .map_err(|err| CryptoError::KeyMaterial(format!("unusable JWK: {err}")))?,
+    )
+    .map_err(|err| CryptoError::KeyMaterial(format!("unusable JWK: {err}")))?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_aud = false;
+    validation.validate_exp = true;
+    validation.leeway = 60;
+    validation.set_required_spec_claims(&["exp"]);
+
+    let data = decode::<Value>(token, &key, &validation).map_err(|err| classify(&err))?;
+    Ok(data.claims)
+}
+
 fn verify_inner(
     token: &str,
     jwks: &[Value],
@@ -249,6 +313,39 @@ mod tests {
             .expect("signs");
         let error = verify_jws(&token, &[other.public_jwk().clone()], "at+jwt")
             .expect_err("must not verify");
+        assert!(matches!(error, CryptoError::BadSignature(_)));
+    }
+
+    fn segmented(header: &Value, payload: &Value) -> String {
+        use data_encoding::BASE64URL_NOPAD;
+        let encode = |value: &Value| {
+            let bytes = serde_json::to_vec(value).expect("serializes");
+            BASE64URL_NOPAD.encode(&bytes)
+        };
+        format!("{}.{}.", encode(header), encode(payload))
+    }
+
+    #[test]
+    fn the_rs256_verifier_rejects_alg_none() {
+        let token = segmented(
+            &json!({"alg": "none", "typ": "JWT", "kid": "kid-1"}),
+            &json!({"exp": 4_102_444_800i64}),
+        );
+        let error = verify_rs256_jws(&token, &[], Some("JWT")).expect_err("must refuse");
+        assert!(matches!(error, CryptoError::BadSignature(_)));
+    }
+
+    #[test]
+    fn the_rs256_verifier_rejects_an_ec_token_and_an_unknown_kid() {
+        let key = pair();
+        let token = key
+            .sign("JWT", &json!({"exp": 4_102_444_800i64}))
+            .expect("signs");
+        assert!(verify_rs256_jws(&token, &[key.public_jwk().clone()], Some("JWT")).is_err());
+
+        let header = json!({"alg": "RS256", "typ": "JWT", "kid": "not-in-the-set"});
+        let token = segmented(&header, &json!({"exp": 4_102_444_800i64}));
+        let error = verify_rs256_jws(&token, &[], Some("JWT")).expect_err("must refuse");
         assert!(matches!(error, CryptoError::BadSignature(_)));
     }
 

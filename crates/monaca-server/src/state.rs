@@ -14,13 +14,23 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::error::ApiError;
+use crate::error::{ApiError, kinds};
 use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
 
 /// Upper bound on the decoded signing keys kept in memory. One entry is a few kilobytes and the
 /// cache is a speed-up, not a source of truth, so evicting the oldest loaded tenant is safe.
 const SIGNING_CACHE_CAP: usize = 256;
+
+/// How long Google's JWKS is reused before a scheduled refresh. An unknown `kid` forces a refresh
+/// immediately, which is the rotation path that matters.
+const GOOGLE_JWKS_TTL_SECS: i64 = 3_600;
+
+/// One fetched copy of Google's signing keys.
+struct GoogleJwksCache {
+    keys: Arc<Vec<Value>>,
+    fetched_at: time::OffsetDateTime,
+}
 
 /// Everything a handler needs.
 pub struct AppState {
@@ -45,6 +55,8 @@ pub struct AppState {
     pub rate_limit: RateLimiter,
     /// Prometheus text metrics (§6.4).
     pub metrics: Metrics,
+    /// Google's signing keys. Provider-global, so one cache serves every tenant connector.
+    google_jwks: Mutex<Option<GoogleJwksCache>>,
 }
 
 impl AppState {
@@ -68,6 +80,7 @@ impl AppState {
             http,
             rate_limit: RateLimiter::default(),
             metrics: Metrics::default(),
+            google_jwks: Mutex::new(None),
         }))
     }
 
@@ -209,6 +222,78 @@ impl AppState {
                 .collect());
         }
         Ok(rows.into_iter().map(|row| row.public_jwk).collect())
+    }
+
+    /// Google's signing keys, with a one-hour cache and an immediate refresh when `force_refresh`
+    /// is set (the unknown-`kid` rotation path).
+    ///
+    /// A failed fetch does not discard a usable stale copy: providers do occasionally have short
+    /// outages, and the alternative is refusing every Google sign-in. A caller that forced a
+    /// refresh still verifies against the stale set, so an unknown `kid` remains refused.
+    pub async fn google_jwks(&self, force_refresh: bool) -> Result<Arc<Vec<Value>>, ApiError> {
+        let now = self.now();
+        let mut cache = self.google_jwks.lock().await;
+        if !force_refresh
+            && let Some(entry) = cache.as_ref()
+            && now - entry.fetched_at < time::Duration::seconds(GOOGLE_JWKS_TTL_SECS)
+        {
+            return Ok(Arc::clone(&entry.keys));
+        }
+
+        let url = self.config.google_jwks_url();
+        let fetched = async {
+            let response = self
+                .http
+                .get(&url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(|err| {
+                    tracing::warn!(%err, "Google JWKS could not be fetched");
+                    "request failed"
+                })?;
+            if !response.status().is_success() {
+                tracing::warn!(status = %response.status(), "Google JWKS refused");
+                return Err("non-success status");
+            }
+            let document: Value = response.json().await.map_err(|err| {
+                tracing::warn!(%err, "Google JWKS is not JSON");
+                "invalid JSON"
+            })?;
+            let keys = document
+                .get("keys")
+                .and_then(Value::as_array)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|key| key.get("kid").and_then(Value::as_str).is_some())
+                        .cloned()
+                        .collect::<Vec<Value>>()
+                })
+                .filter(|keys| !keys.is_empty())
+                .ok_or("no usable keys")?;
+            Ok::<Arc<Vec<Value>>, &'static str>(Arc::new(keys))
+        }
+        .await;
+
+        match fetched {
+            Ok(keys) => {
+                cache.replace(GoogleJwksCache {
+                    keys: Arc::clone(&keys),
+                    fetched_at: now,
+                });
+                Ok(keys)
+            }
+            Err(reason) => {
+                if let Some(entry) = cache.as_ref() {
+                    tracing::warn!(reason, "using the stale Google JWKS");
+                    return Ok(Arc::clone(&entry.keys));
+                }
+                Err(ApiError::problem(
+                    kinds::SOCIAL_PROVIDER_ERROR,
+                    "Google's signing keys could not be fetched",
+                ))
+            }
+        }
     }
 
     /// Store a freshly minted interaction and its expiry.

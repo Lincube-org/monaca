@@ -26,7 +26,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
-use monaca_crypto::{decode_base64url, encode_base64url, generate_challenge, open, seal};
+use monaca_crypto::{
+    decode_unverified, encode_base64url, generate_challenge, open, seal, verify_rs256_jws,
+};
 use monaca_oidc::is_absolute_http_url;
 use monaca_store::{AccountRow, SocialConnectorRow, StoreError, TenantRow};
 use monaca_types::{AccountId, EventId, TypedId};
@@ -53,6 +55,17 @@ const PROVIDER_TIMEOUT_SECS: u64 = 10;
 
 /// GitHub's email list, the only place that marks an address primary and verified.
 const GITHUB_EMAILS_URL: &str = "https://api.github.com/user/emails";
+
+/// Google accepts both the `https://` and the bare issuer in its ID tokens.
+const GOOGLE_ISSUERS: &[&str] = &["https://accounts.google.com", "accounts.google.com"];
+
+/// An ID token older than this is refused even if its `exp` is still ahead: the code exchange
+/// happens seconds after the provider minted it, and the state itself expires in ten minutes.
+const GOOGLE_ID_TOKEN_MAX_AGE_SECS: i64 = 900;
+
+/// Binds the one-time `state` to the browser that started the flow, so a callback URL copied to
+/// another browser cannot complete the interaction (login CSRF).
+const SOCIAL_STATE_COOKIE: &str = "monaca_social_state";
 
 /// The built-in endpoint, scope and nonce mapping for a provider.
 struct ProviderPreset {
@@ -605,6 +618,16 @@ pub async fn connector_callback(
             "the state is malformed",
         ));
     };
+    // The state is stored server-side, but that alone does not prove this browser started the
+    // flow: a callback URL copied to another browser must also carry the cookie minted at start.
+    let cookie_state = state_cookie(&headers).and_then(|raw| Uuid::parse_str(&raw).ok());
+    if cookie_state != Some(state_id) {
+        audit_failed(&state, &tenant, &connector_id, "state_invalid").await;
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the state does not belong to this browser",
+        ));
+    }
     let Some(pending) = state.store.take_social_state(&tenant, state_id).await? else {
         audit_failed(&state, &tenant, &connector_id, "state_invalid").await;
         return Err(ApiError::problem(
@@ -864,6 +887,9 @@ pub async fn social_link_details(
     else {
         return Err(ApiError::not_found("connector"));
     };
+    if !connector.enabled {
+        return Err(ApiError::not_found("connector"));
+    }
     Ok(Json(json!({
         "connector_id": connector.connector_id,
         "display_name": connector.display_name,
@@ -897,6 +923,10 @@ pub async fn confirm_social_link(
     else {
         return Err(ApiError::not_found("connector"));
     };
+    if !connector.enabled {
+        audit_failed(&state, &tenant, &pending.connector, "connector_disabled").await;
+        return Err(ApiError::not_found("connector"));
+    }
     let interaction = state
         .peek_interaction(&tenant, &pending.interaction_id)
         .await
@@ -1274,6 +1304,9 @@ async fn exchange_and_read(
         return Err(provider_error("the provider returned no access token"));
     };
 
+    // Google's identity comes from the signed ID token, not from userinfo. The token is verified
+    // against Google's JWKS before any claim is used; the nonce binds it to the state this server
+    // minted. GitHub and generic connectors keep the userinfo path below.
     if connector.provider == "google" {
         let Some(expected) = nonce else {
             return Err(provider_error("the state carries no nonce"));
@@ -1281,10 +1314,8 @@ async fn exchange_and_read(
         let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
             return Err(provider_error("the provider returned no id_token"));
         };
-        if id_token_nonce(id_token).as_deref() != Some(expected) {
-            tracing::warn!(connector = %connector.connector_id, "id_token nonce mismatch");
-            return Err(provider_error("the provider's nonce did not match"));
-        }
+        let claims = google_id_token_claims(state, connector, id_token, expected).await?;
+        return google_user(&claims);
     }
 
     let mut userinfo = client
@@ -1316,21 +1347,6 @@ async fn exchange_and_read(
             let emails_url = github_emails_url(state);
             github_user(&client, access_token, &document, &emails_url).await
         }
-        "google" => Ok(SocialUser {
-            subject: required_subject(&document)?,
-            email: document
-                .get("email")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            email_verified: document
-                .get("email_verified")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            name: document
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }),
         _ => Ok(SocialUser {
             subject: required_subject(&document)?,
             email: document
@@ -1415,12 +1431,97 @@ async fn github_user(
     })
 }
 
-/// The nonce carried by an id_token, without trusting its claims for identity.
-fn id_token_nonce(id_token: &str) -> Option<String> {
-    let payload = id_token.split('.').nth(1)?;
-    let bytes = decode_base64url(payload).ok()?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value.get("nonce")?.as_str().map(str::to_owned)
+/// Verify Google's ID token and enforce the claims that bind it to this exchange.
+///
+/// The signature is checked against Google's JWKS with an RS256-only whitelist. An unknown `kid`
+/// forces one refresh, which is how a provider key rotation becomes visible without waiting for
+/// the hour-long cache TTL. `iss`, `aud`, `iat`, `exp` (checked by the verifier with 60 s leeway)
+/// and `nonce` are all required; `email_verified` is carried into [`SocialUser`] and decides
+/// whether an unlinked identity may attach to an existing account.
+async fn google_id_token_claims(
+    state: &AppState,
+    connector: &SocialConnectorRow,
+    id_token: &str,
+    expected_nonce: &str,
+) -> Result<Value, ApiError> {
+    let (header, _) = decode_unverified(id_token).map_err(|err| {
+        tracing::warn!(%err, connector = %connector.connector_id, "Google id_token is malformed");
+        provider_error("the provider's identity token is not valid")
+    })?;
+    let kid = header
+        .get("kid")
+        .and_then(Value::as_str)
+        .filter(|kid| !kid.is_empty())
+        .ok_or_else(|| {
+            tracing::warn!(connector = %connector.connector_id, "Google id_token has no kid");
+            provider_error("the provider's identity token is not valid")
+        })?;
+
+    let mut keys = state.google_jwks(false).await?;
+    if !keys
+        .iter()
+        .any(|key| key.get("kid").and_then(Value::as_str) == Some(kid))
+    {
+        tracing::info!(connector = %connector.connector_id, %kid, "refreshing Google JWKS for an unknown kid");
+        keys = state.google_jwks(true).await?;
+    }
+
+    let claims = verify_rs256_jws(id_token, &keys, Some("JWT")).map_err(|err| {
+        tracing::warn!(%err, connector = %connector.connector_id, "Google id_token did not verify");
+        provider_error("the provider's identity token is not valid")
+    })?;
+
+    let issuer = claims.get("iss").and_then(Value::as_str).unwrap_or_default();
+    if !GOOGLE_ISSUERS.contains(&issuer) {
+        tracing::warn!(connector = %connector.connector_id, "Google id_token issuer mismatch");
+        return Err(provider_error("the provider's identity token is not valid"));
+    }
+    let audience = &claims["aud"];
+    let audience_matches = match audience {
+        Value::String(value) => value == &connector.client_id,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value.as_str() == Some(connector.client_id.as_str())),
+        _ => false,
+    };
+    if !audience_matches {
+        tracing::warn!(connector = %connector.connector_id, "Google id_token audience mismatch");
+        return Err(provider_error("the provider's identity token is not valid"));
+    }
+
+    let now = state.now().unix_timestamp();
+    let issued_at = claims.get("iat").and_then(Value::as_i64).ok_or_else(|| {
+        tracing::warn!(connector = %connector.connector_id, "Google id_token has no iat");
+        provider_error("the provider's identity token is not valid")
+    })?;
+    if issued_at > now + 60 || issued_at < now - GOOGLE_ID_TOKEN_MAX_AGE_SECS {
+        tracing::warn!(connector = %connector.connector_id, "Google id_token iat is outside the window");
+        return Err(provider_error("the provider's identity token is not valid"));
+    }
+    if claims.get("nonce").and_then(Value::as_str) != Some(expected_nonce) {
+        tracing::warn!(connector = %connector.connector_id, "Google id_token nonce mismatch");
+        return Err(provider_error("the provider's nonce did not match"));
+    }
+
+    Ok(claims)
+}
+
+/// Google's identity fields from the verified ID token. `email_verified` is only true when Google
+/// asserted the boolean `true`; a linked subject still signs in, but an unlinked one needs a
+/// verified address before it can attach to an account.
+fn google_user(claims: &Value) -> Result<SocialUser, ApiError> {
+    Ok(SocialUser {
+        subject: required_subject(claims)?,
+        email: claims
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        email_verified: claims
+            .get("email_verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        name: claims.get("name").and_then(Value::as_str).map(str::to_owned),
+    })
 }
 
 fn required_subject(document: &Value) -> Result<String, ApiError> {
@@ -1521,6 +1622,20 @@ fn callback_url(state: &AppState, tenant_slug: &str, connector_id: &str) -> Stri
     )
 }
 
+/// The social-state cookie from the request, if present.
+fn state_cookie(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        if name == SOCIAL_STATE_COOKIE {
+            return Some(value.trim().to_owned());
+        }
+    }
+    None
+}
+
 /// Send the browser to the provider with the `state` this server just minted.
 fn provider_redirect(
     state: &AppState,
@@ -1553,10 +1668,23 @@ fn provider_redirect(
         .iter()
         .map(|(key, value)| (*key, value.as_str()))
         .collect();
-    found(&crate::protocol::append_query(
+    let mut response = found(&crate::protocol::append_query(
         &connector.authorize_url,
         &borrowed,
-    ))
+    ));
+    let secure = if crate::session::secure_origin(&state.config) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "{SOCIAL_STATE_COOKIE}={state_value}; Path=/t/{tenant_slug}/connectors/{}; HttpOnly; SameSite=Lax; Max-Age={SOCIAL_STATE_TTL_SECS}{secure}",
+        connector.connector_id
+    );
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
 }
 
 /// Where the hosted page asks the visitor to confirm a link.

@@ -595,6 +595,28 @@ jobs:
           fi
           echo "OK: the other /internal routes keep their authentication"
 
+          # The layer must authenticate before a handler's JSON extractor: a malformed body
+          # without the secret is 401, never 422. Check every mounted route, not just health.
+          for path in \
+            "/internal/audit?tenant=demo" \
+            "/internal/tenants/demo/jwks" \
+            "/internal/tenants/demo/issuer" \
+            "/internal/health"; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:8082${path}")"
+            if [ "$code" != "401" ]; then
+              echo "::error::${path} without the secret should be 401 (got $code)"
+              exit 1
+            fi
+          done
+          audit_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' -d '{}' \
+            http://127.0.0.1:8082/internal/audit)"
+          if [ "$audit_code" != "401" ]; then
+            echo "::error::POST /internal/audit with a malformed body should be 401 (got $audit_code)"
+            exit 1
+          fi
+          echo "OK: every /internal route authenticates before parsing its body"
+
       - name: Stop the server
         if: always()
         run: |

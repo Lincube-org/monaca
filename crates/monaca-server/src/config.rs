@@ -161,6 +161,14 @@ impl Config {
         }
     }
 
+    /// Google's signing keys, or the dev/CI mock's sibling path.
+    pub fn google_jwks_url(&self) -> String {
+        match self.social_provider_base_url.as_deref() {
+            Some(base) => format!("{}/google/jwks", base.trim_end_matches('/')),
+            None => "https://www.googleapis.com/oauth2/v3/certs".to_owned(),
+        }
+    }
+
     /// The issuer for a tenant slug.
     pub fn issuer(&self, tenant: &str) -> String {
         format!("{}/t/{tenant}", self.public_base_url)

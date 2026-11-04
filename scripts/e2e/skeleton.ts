@@ -597,9 +597,12 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "auto_link_verified_email attaches a verified email to an existing account while an unverified one is " +
       "403 MONACA_SOCIAL_UNLINKED; confirm_link parks on the hosted page, exposes the pending link, links on confirm " +
       "and rejects a replay; create_new_only refuses an existing email with 409 MONACA_SOCIAL_EMAIL_TAKEN and creates " +
-      "when the address is free; a Google callback validates the id_token nonce and a mismatch is " +
-      "502 MONACA_SOCIAL_PROVIDER_ERROR; disabling a connector removes it from the public list and makes its " +
-      "authorize 404; social_sign_in.succeeded/failed and social_identity.linked are on the tenant audit chain",
+      "when the address is free; a callback without the state cookie, with another browser's cookie or replayed " +
+      "is 400; a Google callback verifies the RS256 id_token against the JWKS, refreshes an unknown kid, and rejects " +
+      "alg=none, a forged signature, wrong aud/iss, expiry, an unknown kid and a mismatched nonce as " +
+      "502 MONACA_SOCIAL_PROVIDER_ERROR, while email_verified=false is 403 MONACA_SOCIAL_UNLINKED; disabling a " +
+      "connector removes it from the public list and makes its authorize 404; social_sign_in.succeeded/failed and " +
+      "social_identity.linked are on the tenant audit chain",
   },
   {
     step: "60",
@@ -3259,7 +3262,10 @@ async function socialFlow(
       redirect: "manual",
     });
     const startLocation = start.headers.get("location") ?? "";
-    if (start.status !== 302 || startLocation === "") {
+    const stateCookie =
+      /monaca_social_state=([0-9a-f-]{36})/.exec(start.headers.get("set-cookie") ?? "")?.[1] ??
+      "";
+    if (start.status !== 302 || startLocation === "" || stateCookie === "") {
       detail = `account link start → ${start.status} ${text(start.body)}`;
       return undefined;
     }
@@ -3269,7 +3275,13 @@ async function socialFlow(
       detail = `provider authorize → ${atProvider.status}`;
       return undefined;
     }
-    const callback = await call(callbackUrl, { headers: cookie, redirect: "manual" });
+    const cookieHeader = [cookie.cookie, `monaca_social_state=${stateCookie}`]
+      .filter((value): value is string => value !== undefined && value !== "")
+      .join("; ");
+    const callback = await call(callbackUrl, {
+      headers: cookieHeader === "" ? {} : { cookie: cookieHeader },
+      redirect: "manual",
+    });
     return { callbackUrl, callback, finalLocation: callback.headers.get("location") ?? "" };
   };
 
@@ -3284,7 +3296,11 @@ async function socialFlow(
       { redirect: "manual" },
     );
     const startLocation = authorize.headers.get("location") ?? "";
-    if (authorize.status !== 302 || startLocation === "") {
+    const stateCookie =
+      /monaca_social_state=([0-9a-f-]{36})/.exec(
+        authorize.headers.get("set-cookie") ?? "",
+      )?.[1] ?? "";
+    if (authorize.status !== 302 || startLocation === "" || stateCookie === "") {
       detail = `connector authorize → ${authorize.status} ${text(authorize.body)}`;
       return undefined;
     }
@@ -3294,8 +3310,16 @@ async function socialFlow(
       detail = `provider authorize → ${atProvider.status}`;
       return undefined;
     }
-    const callback = await call(callbackUrl, { redirect: "manual" });
-    return { verifier: started.verifier, callback, callbackUrl, redirectTo: callback.headers.get("location") ?? "" };
+    const callback = await call(callbackUrl, {
+      headers: { cookie: `monaca_social_state=${stateCookie}` },
+      redirect: "manual",
+    });
+    return {
+      verifier: started.verifier,
+      callback,
+      callbackUrl,
+      redirectTo: callback.headers.get("location") ?? "",
+    };
   };
 
   try {
@@ -5965,9 +5989,59 @@ async function socialProvidersFlow(
       name: string;
       challenge?: string;
       nonce?: string;
+      keyId?: string;
+      id_token?: string;
     }
   >();
   const consumed = new Set<string>();
+
+  interface GoogleSigningKey {
+    kid: string;
+    privateKey: CryptoKey;
+    publicJwk: Record<string, unknown>;
+  }
+
+  const makeGoogleKey = async (kid: string): Promise<GoogleSigningKey> => {
+    const pair = (await crypto.subtle.generateKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair;
+    const publicJwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as Record<
+      string,
+      unknown
+    >;
+    return {
+      kid,
+      privateKey: pair.privateKey,
+      publicJwk: { ...publicJwk, kid, alg: "RS256", use: "sig" },
+    };
+  };
+
+  const googleKeys: GoogleSigningKey[] = [await makeGoogleKey("google-key-1")];
+  // A key the JWKS never publishes: used for a forged signature and an unknown-kid token.
+  const rogueKey = await makeGoogleKey("rogue-key");
+  const signGoogleToken = async (
+    key: GoogleSigningKey,
+    headerKid: string,
+    claims: Record<string, unknown>,
+  ): Promise<string> => {
+    const header = base64UrlJson({ alg: "RS256", kid: headerKid, typ: "JWT" });
+    const payload = base64UrlJson(claims);
+    const signature = new Uint8Array(
+      await crypto.subtle.sign(
+        "RSASSA-PKCS1-v1_5",
+        key.privateKey,
+        new TextEncoder().encode(`${header}.${payload}`),
+      ),
+    );
+    return `${header}.${payload}.${base64Url(signature)}`;
+  };
 
   const fail = (why: string): StepResult => ({
     step: "59",
@@ -6047,7 +6121,13 @@ async function socialProvidersFlow(
     connector: string,
     tag: string,
   ): Promise<
-    | { interaction: string; verifier: string; location: string; params: URLSearchParams }
+    | {
+        interaction: string;
+        verifier: string;
+        location: string;
+        params: URLSearchParams;
+        cookie: string;
+      }
     | undefined
   > => {
     const started = await begin(tag);
@@ -6057,11 +6137,14 @@ async function socialProvidersFlow(
       { redirect: "manual" },
     );
     const location = authorize.headers.get("location") ?? "";
-    if (authorize.status !== 302 || location === "") {
+    const cookie =
+      /monaca_social_state=([0-9a-f-]{36})/.exec(authorize.headers.get("set-cookie") ?? "")?.[1] ??
+      "";
+    if (authorize.status !== 302 || location === "" || cookie === "") {
       detail = `connector authorize → ${authorize.status} ${text(authorize.body)}`;
       return undefined;
     }
-    return { ...started, location, params: new URL(location).searchParams };
+    return { ...started, location, params: new URL(location).searchParams, cookie };
   };
 
   const register = async (
@@ -6074,19 +6157,31 @@ async function socialProvidersFlow(
       name: string;
       challenge?: string;
       nonce?: string;
+      keyId?: string;
+      id_token?: string;
     },
   ): Promise<void> => {
     profiles.set(code, profile);
   };
 
-  const callback = (start: { location: string }, code: string): Promise<HttpResult> => {
+  const callback = (
+    start: { location: string; cookie?: string },
+    code: string,
+  ): Promise<HttpResult> => {
     const params = new URL(start.location).searchParams;
     const state = params.get("state") ?? "";
     const redirect = params.get("redirect_uri") ?? "";
     if (state === "" || redirect === "") {
       throw new Error("the provider redirect carried no callback URL");
     }
-    return call(`${redirect}?${new URLSearchParams({ state, code })}`, { redirect: "manual" });
+    const headers: Record<string, string> = {};
+    if (start.cookie !== undefined && start.cookie !== "") {
+      headers.cookie = `monaca_social_state=${start.cookie}`;
+    }
+    return call(`${redirect}?${new URLSearchParams({ state, code })}`, {
+      redirect: "manual",
+      headers,
+    });
   };
 
   const accountsFor = async (email: string): Promise<{ id?: string; count: number }> => {
@@ -6168,16 +6263,36 @@ async function socialProvidersFlow(
           }
           consumed.add(code);
           if (profile.provider === "google") {
-            const payload = base64Url(
-              new TextEncoder().encode(JSON.stringify({ nonce: profile.nonce ?? "" })),
-            );
+            const clientId = String(form.get("client_id") ?? "");
+            const now = Math.floor(Date.now() / 1000);
+            const claims: Record<string, unknown> = {
+              iss: "https://accounts.google.com",
+              aud: clientId,
+              sub: profile.subject,
+              email: profile.email,
+              email_verified: profile.verified,
+              name: profile.name,
+              nonce: profile.nonce ?? "",
+              iat: now,
+              exp: now + 3_600,
+            };
+            const key =
+              googleKeys.find((candidate) => candidate.kid === profile.keyId) ??
+              googleKeys[0];
+            if (key === undefined) return new Response("no Google key", { status: 500 });
+            const idToken =
+              profile.id_token ?? (await signGoogleToken(key, key.kid, claims));
             return Response.json({
               access_token: `go-${code}`,
-              id_token: `eyJhbGciOiJub25lIn0.${payload}.`,
+              id_token: idToken,
               token_type: "Bearer",
             });
           }
           return Response.json({ access_token: `gh-${code}`, token_type: "bearer" });
+        }
+
+        if (request.method === "GET" && url.pathname === "/google/jwks") {
+          return Response.json({ keys: googleKeys.map((key) => key.publicJwk) });
         }
 
         const bearer = request.headers.get("authorization")?.replace(/^Bearer /i, "") ?? "";
@@ -6262,11 +6377,12 @@ async function socialProvidersFlow(
     const ghStart = await startFlow(connectorIds[0]!, "gh-start");
     if (ghStart === undefined) return fail(detail);
     checks.push([
-      "the GitHub redirect carries state, S256 PKCE and the fixed read:user user:email scopes",
+      "the GitHub redirect carries state, S256 PKCE, the fixed scopes and the state cookie",
       ghStart.params.get("state") !== null &&
         ghStart.params.get("code_challenge") !== null &&
         ghStart.params.get("code_challenge_method") === "S256" &&
-        ghStart.params.get("scope") === "read:user user:email",
+        ghStart.params.get("scope") === "read:user user:email" &&
+        ghStart.cookie !== "",
     ]);
 
     const goStart = await startFlow(connectorIds[4]!, "go-start");
@@ -6304,11 +6420,34 @@ async function socialProvidersFlow(
       name: "Social New",
       challenge: ghStart.params.get("code_challenge") ?? undefined,
     });
+    const noCookieUrl = `${ghStart.params.get("redirect_uri")}?${new URLSearchParams({
+      state: ghStart.params.get("state") ?? "",
+      code: newCode,
+    })}`;
+    const noCookie = await call(noCookieUrl, { redirect: "manual" });
+    checks.push([
+      "a callback without the state cookie is 400 and audited state_invalid",
+      noCookie.status === 400 &&
+        (noCookie.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_INVALID_REQUEST" &&
+        (await auditEvents("social_sign_in.failed")).some(
+          (payload) => payload.connector_id === connectorIds[0] && payload.reason === "state_invalid",
+        ),
+    ]);
+
     const firstCallback = await callback(ghStart, newCode);
     const firstRedirect = firstCallback.headers.get("location") ?? "";
     if (firstCallback.status !== 302 || firstRedirect === "") {
       detail = `first social callback → ${firstCallback.status} ${text(firstCallback.body)}`;
     }
+    const replayed = await callback(ghStart, newCode);
+    checks.push([
+      "replaying the same callback is 400 and audited state_invalid",
+      replayed.status === 400 &&
+        (await auditEvents("social_sign_in.failed")).some(
+          (payload) => payload.connector_id === connectorIds[0] && payload.reason === "state_invalid",
+        ),
+    ]);
     const firstToken =
       firstCallback.status === 302 && firstRedirect !== ""
         ? await exchange(firstRedirect, ghStart.verifier)
@@ -6336,6 +6475,14 @@ async function socialProvidersFlow(
       name: "Social New",
       challenge: repeatStart.params.get("code_challenge") ?? undefined,
     });
+    const mismatchedBrowser = await callback(
+      { location: repeatStart.location, cookie: ghStart.cookie },
+      repeatCode,
+    );
+    checks.push([
+      "a callback carrying another browser's state cookie is 400",
+      mismatchedBrowser.status === 400,
+    ]);
     const repeatCallback = await callback(repeatStart, repeatCode);
     const repeatRedirect = repeatCallback.headers.get("location") ?? "";
     if (repeatCallback.status !== 302 || repeatRedirect === "") {
@@ -6581,6 +6728,131 @@ async function socialProvidersFlow(
         (await auditEvents("social_sign_in.failed")).some(
           (payload) => payload.connector_id === connectorIds[4] && payload.reason === "provider_error",
         ),
+    ]);
+
+    // --- Google id_token signature and claim negatives ------------------------------------------
+    const googleClientId = `${connectorIds[4]}-client`;
+    const googleIdToken = (
+      nonce: string,
+      overrides: Record<string, unknown> = {},
+      key = googleKeys[0]!,
+      headerKid = key.kid,
+    ): Promise<string> => {
+      const now = Math.floor(Date.now() / 1000);
+      return signGoogleToken(key, headerKid, {
+        iss: "https://accounts.google.com",
+        aud: googleClientId,
+        sub: `google-neg-${runId}`,
+        email: `social59-google-neg-${runId}@example.test`,
+        email_verified: true,
+        name: "Google Negative",
+        nonce,
+        iat: now,
+        exp: now + 3_600,
+        ...overrides,
+      });
+    };
+    const googleRejected = async (
+      tag: string,
+      makeToken: (nonce: string) => Promise<string>,
+      expected = 502,
+    ): Promise<boolean> => {
+      const start = await startFlow(connectorIds[4]!, tag);
+      if (start === undefined) return false;
+      const nonce = start.params.get("nonce") ?? "";
+      const code = `code-${tag}-${runId}`;
+      await register(code, {
+        provider: "google",
+        subject: `google-${tag}-${runId}`,
+        email: `social59-${tag}-${runId}@example.test`,
+        verified: true,
+        name: "Google Negative",
+        challenge: start.params.get("code_challenge") ?? undefined,
+        nonce,
+        id_token: await makeToken(nonce),
+      });
+      const response = await callback(start, code);
+      return response.status === expected;
+    };
+
+    checks.push([
+      "a Google id_token with alg=none is rejected",
+      await googleRejected("go-none", (nonce) => {
+        const header = base64UrlJson({ alg: "none", typ: "JWT" });
+        return Promise.resolve(`${header}.${base64UrlJson({ nonce })}.`);
+      }),
+    ]);
+    checks.push([
+      "a Google id_token with a forged signature is rejected",
+      await googleRejected("go-forged", (nonce) =>
+        googleIdToken(nonce, {}, rogueKey, googleKeys[0]!.kid),
+      ),
+    ]);
+    checks.push([
+      "a Google id_token with a wrong aud is rejected",
+      await googleRejected("go-aud", (nonce) => googleIdToken(nonce, { aud: "another-client" })),
+    ]);
+    checks.push([
+      "a Google id_token with a wrong iss is rejected",
+      await googleRejected("go-iss", (nonce) => googleIdToken(nonce, { iss: "https://evil.example" })),
+    ]);
+    checks.push([
+      "an expired Google id_token is rejected",
+      await googleRejected("go-exp", (nonce) => {
+        const now = Math.floor(Date.now() / 1000);
+        return googleIdToken(nonce, { iat: now - 3_600, exp: now - 10 });
+      }),
+    ]);
+    checks.push([
+      "a Google id_token with an unknown kid is rejected",
+      await googleRejected("go-kid", (nonce) => googleIdToken(nonce, {}, rogueKey, "rogue-kid")),
+    ]);
+    checks.push([
+      "a Google id_token with a mismatched nonce is rejected",
+      await googleRejected("go-nonce", (nonce) =>
+        googleIdToken(nonce === "" ? "missing" : `${nonce}-other`),
+      ),
+    ]);
+    checks.push([
+      "an unverified Google email cannot auto-link",
+      await googleRejected(
+        "go-unverified",
+        (nonce) =>
+          googleIdToken(nonce, {
+            email: `social59-google-unverified-${runId}@example.test`,
+            email_verified: false,
+          }),
+        403,
+      ),
+    ]);
+
+    // --- a new Google key appears after the cache was filled: unknown kid → refresh → success ---
+    googleKeys.push(await makeGoogleKey("google-key-2"));
+    const rotatedEmail = `social59-google-rotated-${runId}@example.test`;
+    const rotatedStart = await startFlow(connectorIds[4]!, "google-rotated");
+    if (rotatedStart === undefined) return fail(detail);
+    const rotatedCode = `code-go-rotated-${runId}`;
+    await register(rotatedCode, {
+      provider: "google",
+      subject: `google-rotated-${runId}`,
+      email: rotatedEmail,
+      verified: true,
+      name: "Google Rotated",
+      challenge: rotatedStart.params.get("code_challenge") ?? undefined,
+      nonce: rotatedStart.params.get("nonce") ?? undefined,
+      keyId: "google-key-2",
+    });
+    const rotatedCallback = await callback(rotatedStart, rotatedCode);
+    const rotatedRedirect = rotatedCallback.headers.get("location") ?? "";
+    const rotatedToken =
+      rotatedCallback.status === 302 && rotatedRedirect !== ""
+        ? await exchange(rotatedRedirect, rotatedStart.verifier)
+        : undefined;
+    checks.push([
+      "a rotated Google kid is refreshed and signs in",
+      rotatedCallback.status === 302 &&
+        rotatedToken?.status === 200 &&
+        (await accountsFor(rotatedEmail)).count === 1,
     ]);
 
     // --- disabling a connector -------------------------------------------------------------------
