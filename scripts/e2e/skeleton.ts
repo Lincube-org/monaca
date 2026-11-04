@@ -572,6 +572,19 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "remembered refresh token; consent.granted events record scopes, remember, mode and interaction id for " +
       "both silent and interactive decisions",
   },
+  {
+    step: "58",
+    title: "Cap proof-of-work CAPTCHA",
+    assertion:
+      "PATCH /v1/sign-in-experience stores provider=cap with an instance base URL, site key and sealed secret " +
+      "and returns secret_set=true without echoing the secret; enabling cap without a base URL and a relative, " +
+      "credentialed or over-500-character base URL are 400; the server posts JSON (secret, response) to " +
+      "{base}/{site_key}/siteverify exactly as Cap Standalone documents, a token the local mock rejects with " +
+      "its real 4xx answer is 400 MONACA_CAPTCHA_FAILED, and a minted {site_key}:id:secret token completes the " +
+      "sign-in; the same token replayed is 400 because siteverify consumes it once; two wrong passwords with " +
+      "fresh tokens count, the next correct attempt is 429 MONACA_ACCOUNT_LOCKED and is audited as " +
+      "interaction.sign_in.failed with reason account_locked",
+  },
 ];
 
 interface StepResult {
@@ -5491,6 +5504,356 @@ async function captchaFlow(base: string, adminToken: string): Promise<StepResult
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: hCaptcha stored without its secret → missing/rejected/accepted token → verify reachable → wrong count cleared → two wrong lock and audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 58: Cap proof-of-work CAPTCHA.
+ *
+ * Cap Standalone documents `POST {instance}/{site_key}/siteverify` with a JSON body
+ * (`secret`, `response`) and a single-use `{site_key}:{id}:{secret}` token; a rejected token is
+ * a 4xx `{"success":false}`. `MONACA_CAPTCHA_SITEVERIFY_URL` replaces the instance base in dev/CI
+ * only, so the server still composes the site-key path. The mock below follows that protocol
+ * rather than the form-based shape the earlier providers use, and records each request so the
+ * step can prove the path, content type, body and one-time consumption.
+ */
+async function capCaptchaFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const mockPort = Number(process.env.MONACA_CAPTCHA_MOCK_PORT ?? 38100);
+  const email = `cap-captcha-${runId}@demo.localhost`;
+  const password = `pw-${runId}-cap-captcha`;
+  const siteKey = `cap-site-${runId}`;
+  const secret = `cap-secret-${runId}`;
+  const instanceBase = `http://127.0.0.1:${mockPort}`;
+  const minted = new Set<string>();
+  const consumed = new Set<string>();
+  const calls: { path: string; secret: string; response: string; contentType: string }[] = [];
+  let mock: ReturnType<typeof Bun.serve> | undefined;
+  const fail = (why: string): StepResult => ({
+    step: "58",
+    title: "Cap proof-of-work CAPTCHA",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+
+  const hex = (length: number): string =>
+    Array.from({ length }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  /** A token in Cap's real `{site_key}:{id}:{secret}` shape. */
+  const mint = (): string => {
+    const token = `${siteKey}:${hex(16)}:${hex(30)}`;
+    minted.add(token);
+    return token;
+  };
+
+  /** A fresh authorize → interaction id, as the browser would open. */
+  const begin = async (tag: string): Promise<string | undefined> => {
+    const verifier = `cap58-${tag}-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const response = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: "http://localhost:5173/bff/callback",
+        scope: "openid profile email",
+        state: `st-cap58-${tag}-${runId}`,
+        nonce: `n-cap58-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status}`;
+      return undefined;
+    }
+    return encodeURIComponent(interaction);
+  };
+
+  const signIn = (interaction: string, body: Record<string, unknown>): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/interaction/${interaction}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const patch = (body: Record<string, unknown>): Promise<HttpResult> =>
+    call(`${base}/v1/sign-in-experience`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Cap CAPTCHA flow", password }),
+    });
+    const accountId = (created.body as { id?: unknown } | undefined)?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const [noBase, relative, credentialed, longBase] = await Promise.all([
+      patch({ captcha: { enabled: true, provider: "cap", site_key: siteKey, secret } }),
+      patch({ captcha: { provider: "cap", base_url: "cap.example.com", site_key: siteKey, secret } }),
+      patch({
+        captcha: {
+          provider: "cap",
+          base_url: "https://user:pass@cap.example.com",
+          site_key: siteKey,
+          secret,
+        },
+      }),
+      patch({
+        captcha: {
+          provider: "cap",
+          base_url: `https://cap.example.com/${"x".repeat(500)}`,
+          site_key: siteKey,
+          secret,
+        },
+      }),
+    ]);
+    checks.push([
+      "enabling cap without a base URL, and relative, credentialed or over-500-character base URLs, are 400",
+      noBase.status === 400 &&
+        relative.status === 400 &&
+        credentialed.status === 400 &&
+        longBase.status === 400,
+    ]);
+
+    mock = Bun.serve({
+      port: mockPort,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (request.method !== "POST" || !url.pathname.endsWith(`/${siteKey}/siteverify`)) {
+          return new Response("not found", { status: 404 });
+        }
+        let body: { secret?: unknown; response?: unknown };
+        try {
+          body = (await request.json()) as { secret?: unknown; response?: unknown };
+        } catch {
+          return Response.json(
+            { success: false, error: "Missing required parameters" },
+            { status: 400 },
+          );
+        }
+        const postedSecret = typeof body.secret === "string" ? body.secret : "";
+        const token = typeof body.response === "string" ? body.response : "";
+        calls.push({
+          path: url.pathname,
+          secret: postedSecret,
+          response: token,
+          contentType: request.headers.get("content-type") ?? "",
+        });
+        if (token.split(":").length !== 3) {
+          return Response.json(
+            { success: false, error: "Missing required parameters" },
+            { status: 400 },
+          );
+        }
+        if (!token.startsWith(`${siteKey}:`)) {
+          return Response.json(
+            { success: false, error: "Invalid site key or secret" },
+            { status: 404 },
+          );
+        }
+        if (postedSecret !== secret) {
+          return Response.json(
+            { success: false, error: "Invalid site key or secret" },
+            { status: 403 },
+          );
+        }
+        if (consumed.has(token) || !minted.has(token)) {
+          return Response.json({ success: false, error: "Token not found" }, { status: 404 });
+        }
+        consumed.add(token);
+        return Response.json({ success: true });
+      },
+    });
+
+    const configured = await patch({
+      captcha: {
+        enabled: true,
+        provider: "cap",
+        base_url: instanceBase,
+        site_key: siteKey,
+        secret,
+        on_sign_in: true,
+        on_sign_up: false,
+        on_password_reset: false,
+      },
+      login_lockout_threshold: 2,
+      login_lockout_duration_secs: 60,
+    });
+    const configuredJson = configured.body as
+      | {
+          captcha?: {
+            enabled?: unknown;
+            provider?: unknown;
+            site_key?: unknown;
+            base_url?: unknown;
+            secret_set?: unknown;
+          };
+          login_lockout_threshold?: unknown;
+        }
+      | undefined;
+    checks.push([
+      "PATCH stores provider=cap with its base URL and reports secret_set without echoing the secret",
+      configured.status === 200 &&
+        configuredJson?.captcha?.enabled === true &&
+        configuredJson?.captcha?.provider === "cap" &&
+        configuredJson?.captcha?.site_key === siteKey &&
+        configuredJson?.captcha?.base_url === instanceBase &&
+        configuredJson?.captcha?.secret_set === true &&
+        configuredJson?.login_lockout_threshold === 2 &&
+        !JSON.stringify(configuredJson).includes(secret),
+    ]);
+
+    const first = await begin("responses");
+    if (first === undefined) return fail(detail);
+    const noToken = await signIn(first, { identifier: email, password });
+    checks.push([
+      "sign-in without a token is 400 MONACA_CAPTCHA_FAILED",
+      noToken.status === 400 &&
+        (noToken.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_CAPTCHA_FAILED",
+    ]);
+
+    const rejected = await signIn(first, {
+      identifier: email,
+      password,
+      captcha_token: "e2e-cap-invalid",
+    });
+    const rejectedCall = calls.find((entry) => entry.response === "e2e-cap-invalid");
+    checks.push([
+      "the server posts JSON to the site-key path and a token the provider rejects is the same 400",
+      rejected.status === 400 &&
+        (rejected.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_CAPTCHA_FAILED" &&
+        rejectedCall?.secret === secret &&
+        rejectedCall?.contentType.includes("application/json") === true &&
+        rejectedCall?.path.endsWith(`/${siteKey}/siteverify`) === true,
+    ]);
+
+    const validToken = mint();
+    const accepted = await signIn(first, {
+      identifier: email,
+      password,
+      captcha_token: validToken,
+    });
+    checks.push([
+      "a token the provider accepts completes the sign-in",
+      accepted.status === 200 &&
+        (accepted.body as { redirect_to?: unknown } | undefined)?.redirect_to !== undefined &&
+        consumed.has(validToken),
+    ]);
+
+    const replay = await begin("replay");
+    if (replay === undefined) return fail(detail);
+    const replayed = await signIn(replay, {
+      identifier: email,
+      password,
+      captcha_token: validToken,
+    });
+    checks.push([
+      "the same token replayed is refused because siteverify consumes it once",
+      replayed.status === 400 &&
+        (replayed.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_CAPTCHA_FAILED",
+    ]);
+
+    // Two wrong passwords count, then the next attempt is locked (§6.1 lockout).
+    const lock = await begin("lock");
+    if (lock === undefined) return fail(detail);
+    const wrongOne = await signIn(lock, {
+      identifier: email,
+      password: `${password}-wrong`,
+      captcha_token: mint(),
+    });
+    const wrongTwo = await signIn(lock, {
+      identifier: email,
+      password: `${password}-wrong`,
+      captcha_token: mint(),
+    });
+    const locked = await signIn(lock, {
+      identifier: email,
+      password,
+      captcha_token: mint(),
+    });
+    checks.push([
+      "two wrong passwords lock the identifier, and the next attempt is 429 MONACA_ACCOUNT_LOCKED",
+      wrongOne.status === 401 && wrongTwo.status === 401 &&
+        locked.status === 429 &&
+        (locked.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_ACCOUNT_LOCKED",
+    ]);
+
+    const audit = await call(
+      `${base}/v1/orgs/${ORG}/audit?${new URLSearchParams({ action: "interaction.sign_in.failed", limit: "50" })}`,
+      { headers },
+    );
+    const events =
+      (
+        audit.body as
+          | { items?: { payload?: { email?: unknown; reason?: unknown } }[] }
+          | undefined
+      )?.items ?? [];
+    checks.push([
+      "the lock is audited as interaction.sign_in.failed with reason account_locked",
+      audit.status === 200 &&
+        events.some(
+          (event) => event.payload?.email === email && event.payload?.reason === "account_locked",
+        ),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await patch({
+      captcha: {
+        enabled: false,
+        provider: "turnstile",
+        site_key: "",
+        base_url: "",
+        secret: "",
+        on_sign_in: true,
+        on_sign_up: true,
+        on_password_reset: true,
+      },
+      login_lockout_threshold: 0,
+      login_lockout_duration_secs: 900,
+    });
+    mock?.stop(true);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "58",
+    title: "Cap proof-of-work CAPTCHA",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: base URL validation → JSON site-key siteverify → rejected and accepted tokens → one-time replay → lock and audit`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -12500,6 +12863,7 @@ async function main(): Promise<number> {
   push(await consentSemanticsFlow(base, adminToken, parsed.internalSecret));
   push(await emailConnectorFlow(base, adminToken, parsed.internalSecret));
   push(await usernamePolicyFlow(base, adminToken));
+  push(await capCaptchaFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
