@@ -124,8 +124,10 @@ export interface SignInExperience {
   /** The tenant's CAPTCHA provider and which entrances demand a token. */
   captcha: {
     enabled: boolean;
-    provider: "turnstile" | "recaptcha" | "hcaptcha";
+    provider: "turnstile" | "recaptcha" | "hcaptcha" | "cap";
     site_key: string | null;
+    /** The Cap instance base URL; `null` for the other providers. */
+    base_url: string | null;
     on_sign_in: boolean;
     on_sign_up: boolean;
     on_password_reset: boolean;

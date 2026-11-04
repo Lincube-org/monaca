@@ -353,6 +353,8 @@ const captchaWidget = ref<InstanceType<typeof CaptchaField> | null>(null);
 const captchaRequired = computed(() => {
   const captcha = captchaSettings.value;
   if (!captcha?.enabled || !captcha.site_key || awaitingCode.value) return false;
+  // Cap also needs its instance URL; without one the widget cannot fetch a challenge.
+  if (captcha.provider === "cap" && !captcha.base_url) return false;
   switch (mode.value) {
     case "password":
     case "code":
@@ -1783,6 +1785,7 @@ async function cancel(): Promise<void> {
               ref="captchaWidget"
               :provider="captchaSettings.provider"
               :site-key="captchaSettings.site_key"
+              :base-url="captchaSettings.base_url"
               @update:token="captchaToken = $event"
             />
 

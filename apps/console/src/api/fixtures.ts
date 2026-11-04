@@ -481,6 +481,7 @@ export function seedSignInExperience(): SignInExperience {
       enabled: false,
       provider: "turnstile",
       site_key: null,
+      base_url: null,
       secret_set: false,
       on_sign_in: true,
       on_sign_up: true,

@@ -327,8 +327,10 @@ export interface SignInExperience {
  */
 export interface CaptchaSettings {
   enabled: boolean;
-  provider: "turnstile" | "recaptcha" | "hcaptcha";
+  provider: "turnstile" | "recaptcha" | "hcaptcha" | "cap";
   site_key: string | null;
+  /** The Cap instance base URL; `null` for the other providers. */
+  base_url: string | null;
   /** Whether a secret is stored; the value itself is never returned. */
   secret_set: boolean;
   /** Whether password sign-in demands a token. */
@@ -647,8 +649,10 @@ export interface UpdateSignInExperienceRequest {
 /** The write-only half of the CAPTCHA settings: an empty key or secret clears it. */
 export interface CaptchaPatch {
   enabled?: boolean;
-  provider?: "turnstile" | "recaptcha" | "hcaptcha";
+  provider?: "turnstile" | "recaptcha" | "hcaptcha" | "cap";
   site_key?: string;
+  /** The Cap instance base URL; an empty string clears it. */
+  base_url?: string;
   secret?: string;
   on_sign_in?: boolean;
   on_sign_up?: boolean;

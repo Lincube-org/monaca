@@ -112,8 +112,9 @@ const signUpProfileName = ref(true);
 const signUpProfileAvatar = ref(false);
 /** CAPTCHA settings; the secret is write-only, so "stored" is the only state the page can read. */
 const captchaEnabled = ref(false);
-const captchaProvider = ref<"turnstile" | "recaptcha" | "hcaptcha">("turnstile");
+const captchaProvider = ref<"turnstile" | "recaptcha" | "hcaptcha" | "cap">("turnstile");
 const captchaSiteKey = ref("");
+const captchaBaseUrl = ref("");
 const captchaSecret = ref("");
 const clearCaptchaSecret = ref(false);
 const captchaSecretSet = ref(false);
@@ -248,8 +249,9 @@ interface SwitchForm {
   signUpProfileFields: ("name" | "avatar")[];
   branding: Branding;
   captchaEnabled: boolean;
-  captchaProvider: "turnstile" | "recaptcha" | "hcaptcha";
+  captchaProvider: "turnstile" | "recaptcha" | "hcaptcha" | "cap";
   captchaSiteKey: string;
+  captchaBaseUrl: string;
   captchaSecret: string;
   clearCaptchaSecret: boolean;
   captchaOnSignIn: boolean;
@@ -291,6 +293,7 @@ function formValues(): SwitchForm {
     captchaEnabled: captchaEnabled.value,
     captchaProvider: captchaProvider.value,
     captchaSiteKey: captchaSiteKey.value.trim(),
+    captchaBaseUrl: captchaBaseUrl.value.trim(),
     captchaSecret: captchaSecret.value.trim(),
     clearCaptchaSecret: clearCaptchaSecret.value,
     captchaOnSignIn: captchaOnSignIn.value,
@@ -333,6 +336,7 @@ function sameSwitches(value: SignInExperience, form: SwitchForm): boolean {
     value.captcha.enabled === form.captchaEnabled &&
     value.captcha.provider === form.captchaProvider &&
     (value.captcha.site_key ?? "") === form.captchaSiteKey &&
+    (value.captcha.base_url ?? "") === form.captchaBaseUrl &&
     form.captchaSecret === "" &&
     !form.clearCaptchaSecret &&
     value.captcha.on_sign_in === form.captchaOnSignIn &&
@@ -387,6 +391,7 @@ function adopt(value: SignInExperience): void {
   captchaEnabled.value = value.captcha.enabled;
   captchaProvider.value = value.captcha.provider;
   captchaSiteKey.value = value.captcha.site_key ?? "";
+  captchaBaseUrl.value = value.captcha.base_url ?? "";
   captchaSecret.value = "";
   clearCaptchaSecret.value = false;
   captchaSecretSet.value = value.captcha.secret_set;
@@ -451,6 +456,7 @@ watch(
     captchaEnabled,
     captchaProvider,
     captchaSiteKey,
+    captchaBaseUrl,
     captchaSecret,
     clearCaptchaSecret,
     captchaOnSignIn,
@@ -488,11 +494,18 @@ const noFirstFactor = computed(() => !password.value && !emailCode.value);
  * a key longer than the endpoint accepts. A stored secret satisfies the requirement without the page
  * ever reading it.
  */
-const captchaIssue = computed<"siteKey" | "siteKeyLength" | "secret" | null>(() => {
+const captchaIssue = computed<"siteKey" | "siteKeyLength" | "baseUrl" | "secret" | null>(() => {
   if ([...captchaSiteKey.value.trim()].length > 200) return "siteKeyLength";
   if ([...captchaSecret.value.trim()].length > 500) return "secret";
+  const baseUrl = captchaBaseUrl.value.trim();
+  if ([...baseUrl].length > 500) return "baseUrl";
+  if (baseUrl !== "") {
+    const authority = baseUrl.split("://")[1]?.split(/[/?#]/)[0] ?? "";
+    if (!/^https?:\/\/[^\s]+$/.test(baseUrl) || authority.includes("@")) return "baseUrl";
+  }
   if (captchaEnabled.value) {
     if (captchaSiteKey.value.trim() === "") return "siteKey";
+    if (captchaProvider.value === "cap" && baseUrl === "") return "baseUrl";
     const usesStoredSecret = captchaSecretSet.value && !clearCaptchaSecret.value;
     if (captchaSecret.value.trim() === "" && !usesStoredSecret) return "secret";
   }
@@ -680,9 +693,11 @@ async function save(): Promise<void> {
     formError.value =
       captchaIssue.value === "siteKeyLength"
         ? t("signInExperience.invalidCaptchaSiteKey")
-        : captchaIssue.value === "secret"
-          ? t("signInExperience.invalidCaptchaSecret")
-          : t("signInExperience.invalidCaptcha");
+        : captchaIssue.value === "baseUrl"
+          ? t("signInExperience.invalidCaptchaBaseUrl")
+          : captchaIssue.value === "secret"
+            ? t("signInExperience.invalidCaptchaSecret")
+            : t("signInExperience.invalidCaptcha");
     return;
   }
   if (lockoutIssue.value !== null) {
@@ -774,6 +789,7 @@ async function save(): Promise<void> {
     captchaEnabled.value !== base.captcha.enabled ||
     captchaProvider.value !== base.captcha.provider ||
     captchaSiteKey.value.trim() !== (base.captcha.site_key ?? "") ||
+    captchaBaseUrl.value.trim() !== (base.captcha.base_url ?? "") ||
     captchaSecret.value.trim() !== "" ||
     clearCaptchaSecret.value ||
     captchaOnSignIn.value !== base.captcha.on_sign_in ||
@@ -784,6 +800,7 @@ async function save(): Promise<void> {
       enabled: captchaEnabled.value,
       provider: captchaProvider.value,
       site_key: captchaSiteKey.value.trim(),
+      base_url: captchaBaseUrl.value.trim(),
       on_sign_in: captchaOnSignIn.value,
       on_sign_up: captchaOnSignUp.value,
       on_password_reset: captchaOnPasswordReset.value,
@@ -1720,6 +1737,22 @@ function formatStamp(at: string): string {
                 v-if="captchaEnabled || captchaSecretSet"
                 class="flex flex-col gap-3 border-t border-rule pt-4"
               >
+                <div v-if="captchaProvider === 'cap'" class="flex flex-col gap-1.5">
+                  <Label for="captcha-base-url">{{ t('signInExperience.captchaBaseUrl') }}</Label>
+                  <Input
+                    id="captcha-base-url"
+                    v-model="captchaBaseUrl"
+                    :invalid="captchaIssue === 'baseUrl'"
+                    :disabled="update.isPending.value"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="https://cap.example.com"
+                    class="mono-data text-[12.5px]"
+                  />
+                  <p class="text-[11.5px] leading-snug text-ink-faint">
+                    {{ t('signInExperience.captchaBaseUrlHint') }}
+                  </p>
+                </div>
                 <div class="grid grid-cols-2 gap-3">
                   <div class="flex flex-col gap-1.5">
                     <Label for="captcha-provider">{{ t('signInExperience.captchaProvider') }}</Label>
@@ -1727,11 +1760,12 @@ function formatStamp(at: string): string {
                       id="captcha-provider"
                       :model-value="captchaProvider"
                       :disabled="update.isPending.value"
-                      @update:model-value="(value: string) => (captchaProvider = value === 'recaptcha' ? 'recaptcha' : value === 'hcaptcha' ? 'hcaptcha' : 'turnstile')"
+                      @update:model-value="(value: string) => (captchaProvider = value === 'cap' ? 'cap' : value === 'recaptcha' ? 'recaptcha' : value === 'hcaptcha' ? 'hcaptcha' : 'turnstile')"
                     >
                       <option value="turnstile">{{ t('signInExperience.captchaProviderTurnstile') }}</option>
                       <option value="recaptcha">{{ t('signInExperience.captchaProviderRecaptcha') }}</option>
                       <option value="hcaptcha">{{ t('signInExperience.captchaProviderHcaptcha') }}</option>
+                      <option value="cap">{{ t('signInExperience.captchaProviderCap') }}</option>
                     </NativeSelect>
                   </div>
                   <div class="flex flex-col gap-1.5">

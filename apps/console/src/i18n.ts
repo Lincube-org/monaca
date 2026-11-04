@@ -653,6 +653,10 @@ export const messages = {
     captchaProviderTurnstile: "Cloudflare Turnstile",
     captchaProviderRecaptcha: "Google reCAPTCHA",
     captchaProviderHcaptcha: "hCaptcha",
+    captchaProviderCap: "Cap (proof of work)",
+    captchaBaseUrl: "Cap instance URL",
+    captchaBaseUrlHint:
+      "The public base URL of the self-hosted Cap instance. The site key is appended for both the widget and siteverify; credentials are not allowed.",
     captchaSiteKey: "Site key",
     captchaSiteKeyHint: "The public key the widget renders with.",
     captchaSecret: "Secret key",
@@ -671,6 +675,8 @@ export const messages = {
       "Enabling the CAPTCHA needs a site key and a stored secret. Alternatively, switch it off.",
     invalidCaptchaSiteKey: "The CAPTCHA site key must be at most 200 characters.",
     invalidCaptchaSecret: "The CAPTCHA secret must be at most 500 characters.",
+    invalidCaptchaBaseUrl:
+      "The Cap instance URL must be an absolute http(s) URL without credentials, at most 500 characters.",
     lockout: "Login failure lockout",
     lockoutHint:
       "Counted per submitted identifier, only for an active account that has a password. A successful sign-in clears the count.",

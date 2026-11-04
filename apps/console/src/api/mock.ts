@@ -1431,9 +1431,10 @@ class MockStore {
         captcha.provider !== undefined &&
         captcha.provider !== "turnstile" &&
         captcha.provider !== "recaptcha" &&
-        captcha.provider !== "hcaptcha"
+        captcha.provider !== "hcaptcha" &&
+        captcha.provider !== "cap"
       ) {
-        throw new ApiError("captcha.provider must be turnstile, recaptcha or hcaptcha", {
+        throw new ApiError("captcha.provider must be turnstile, recaptcha, hcaptcha or cap", {
           status: 400,
           code: "MONACA_INVALID_REQUEST",
         });
@@ -1443,6 +1444,16 @@ class MockStore {
           status: 400,
           code: "MONACA_INVALID_REQUEST",
         });
+      }
+      if (captcha.base_url !== undefined && captcha.base_url.trim() !== "") {
+        const url = captcha.base_url.trim();
+        const authority = url.split("://")[1]?.split(/[/?#]/)[0] ?? "";
+        if (!/^https?:\/\/[^\s]+$/.test(url) || authority.includes("@") || url.length > 500) {
+          throw new ApiError(
+            "captcha.base_url must be an absolute http(s) URL of at most 500 characters without credentials",
+            { status: 400, code: "MONACA_INVALID_REQUEST" },
+          );
+        }
       }
       if (captcha.secret !== undefined && captcha.secret.trim().length > 500) {
         throw new ApiError("captcha.secret must be at most 500 characters", {
@@ -1527,6 +1538,9 @@ class MockStore {
       ...(body.captcha?.site_key === undefined
         ? {}
         : { site_key: body.captcha.site_key.trim() || null }),
+      ...(body.captcha?.base_url === undefined
+        ? {}
+        : { base_url: body.captcha.base_url.trim() || null }),
       ...(body.captcha?.secret === undefined
         ? {}
         : { secret_set: body.captcha.secret.trim().length > 0 }),
@@ -1538,6 +1552,12 @@ class MockStore {
     };
     if (captcha.enabled && (captcha.site_key === null || !captcha.secret_set)) {
       throw new ApiError("captcha.enabled requires a site key and a secret", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (captcha.enabled && captcha.provider === "cap" && captcha.base_url === null) {
+      throw new ApiError("captcha.enabled with cap requires a base URL", {
         status: 400,
         code: "MONACA_INVALID_REQUEST",
       });
