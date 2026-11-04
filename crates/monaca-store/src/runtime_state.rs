@@ -11,7 +11,7 @@ use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Store, StoreError, TenantRow};
+use crate::{Store, StoreError, TenantRow, q};
 
 const INTERACTION_COLUMNS: &str = "payload, consumed, signed_in_account, session_id, mfa_account, \
                                    mfa_enrollment, mfa_satisfied, mfa_attempts, expires_at";
@@ -71,9 +71,9 @@ impl Store {
         id: &str,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "SELECT {INTERACTION_COLUMNS} FROM tenant.interactions WHERE id = $1"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&pool)
         .await?)
@@ -86,11 +86,11 @@ impl Store {
         id: &str,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions SET consumed = true
              WHERE id = $1 AND consumed = false AND expires_at > now()
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&pool)
         .await?)
@@ -105,12 +105,12 @@ impl Store {
         session_id: Uuid,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions
              SET signed_in_account = $2, session_id = $3
              WHERE id = $1 AND consumed = false AND expires_at > now()
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .bind(account)
         .bind(session_id)
@@ -125,12 +125,12 @@ impl Store {
         id: &str,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions SET consumed = true
              WHERE id = $1 AND consumed = false AND expires_at > now()
                AND signed_in_account IS NOT NULL
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&pool)
         .await?)
@@ -144,13 +144,13 @@ impl Store {
         account: Uuid,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions
              SET mfa_attempts = CASE WHEN mfa_account IS DISTINCT FROM $2 THEN 0 ELSE mfa_attempts END,
                  mfa_account = $2, mfa_enrollment = NULL
              WHERE id = $1 AND consumed = false AND expires_at > now()
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .bind(account)
         .fetch_optional(&pool)
@@ -165,12 +165,12 @@ impl Store {
         account: Uuid,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions
              SET mfa_account = NULL, mfa_enrollment = $2, mfa_satisfied = false
              WHERE id = $1 AND consumed = false AND expires_at > now()
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .bind(account)
         .fetch_optional(&pool)
@@ -184,12 +184,12 @@ impl Store {
         id: &str,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions
              SET mfa_account = NULL, mfa_attempts = 0
              WHERE id = $1 AND consumed = false AND expires_at > now()
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&pool)
         .await?)
@@ -202,12 +202,12 @@ impl Store {
         id: &str,
     ) -> Result<Option<InteractionRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, InteractionRow>(&format!(
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
             "UPDATE tenant.interactions
              SET mfa_account = NULL, mfa_enrollment = NULL, mfa_attempts = 0, mfa_satisfied = true
              WHERE id = $1 AND consumed = false AND expires_at > now()
              RETURNING {INTERACTION_COLUMNS}"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&pool)
         .await?)
