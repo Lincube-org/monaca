@@ -207,19 +207,22 @@ impl Config {
             );
         }
 
-        let mut problems = Vec::new();
+        let mut problems: Vec<String> = Vec::new();
         if self.kek_hex.is_empty() {
-            problems.push("MONACA_KEK is not set (must be 32 bytes, 64 hex characters)");
+            problems.push(
+                "MONACA_KEK is not set (must be 32 bytes, 64 hex characters)".to_owned(),
+            );
         } else if let Err(err) = monaca_crypto::EnvKeyProvider::from_hex(&self.kek_hex) {
             // `err` reports the shape (`not hex`, `wrong length`), never the value.
             problems.push(format!("MONACA_KEK is invalid: {err}"));
         }
         if self.internal_secret.is_empty() {
             problems.push(
-                "MONACA_INTERNAL_SECRET is not set (X-Monaca-Internal-Secret for /internal/*)",
+                "MONACA_INTERNAL_SECRET is not set (X-Monaca-Internal-Secret for /internal/*)"
+                    .to_owned(),
             );
         } else if self.internal_secret == DEV_INTERNAL_SECRET {
-            problems.push("MONACA_INTERNAL_SECRET must not be the dev default");
+            problems.push("MONACA_INTERNAL_SECRET must not be the dev default".to_owned());
         }
 
         reject("startup", problems)

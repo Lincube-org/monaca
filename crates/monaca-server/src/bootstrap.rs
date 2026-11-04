@@ -129,7 +129,9 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
         )
         .await?;
 
-    let admin_exists = seeded_clients.iter().any(|client_id| client_id == "monaca-admin");
+    let admin_exists = seeded_clients
+        .iter()
+        .any(|client_id| client_id == "monaca-admin");
     let admin_phc = if admin_exists {
         None
     } else {
