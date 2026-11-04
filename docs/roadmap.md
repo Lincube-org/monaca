@@ -621,11 +621,14 @@ regressed by 23%, which is the honest cost of spreading the same connect work ov
 ticks instead of one long pass. A 16-worker experiment was worse (P99 214.8 s, tick 15.6 s,
 381/400 delivered inside 240 s) and is not the configuration kept.
 
-Failure path: holding one tenant's provider for 30 s (four times the 300 s cap used in the first
-pass) kept the longest tick at 11.9 s; the other tenants continued and the held tenant's row was
-retried rather than blocking a worker beyond one timeout. The remaining way to improve the sweep
-is a poller with its own warm pool cache (the separate-process option), which is the next step
-when the connector set outgrows the shared cache.
+Failure path: holding one tenant's provider for 30 s kept the longest tick at 11.9–17.9 s across
+two runs (the block is one pool acquisition plus the 5 s provider timeout, not the 30 s hold), and
+the other tenants kept being visited while that row was retried and eventually abandoned at five
+attempts. Throughput is lower while a worker is held — 394 of 400 mails in 300 s in the cleaner
+run — because one of the eight slots is out of service; the budget bounds the tick, not the total
+sweep. The way to improve the sweep is a poller with its own warm pool cache (the
+separate-process option), which is the next step when the connector set outgrows the shared
+cache.
 
 The connection budget is `(MONACA_TENANT_POOL_CACHE + 8) × MONACA_TENANT_POOL_SIZE + headroom`;
 `deploy/README.md` and `compose.dev.yml` carry the formula (360 tenant connections at the
