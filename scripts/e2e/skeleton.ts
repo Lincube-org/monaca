@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describeNetError } from "../lib/net.ts";
+import { createMonacaClient } from "../../packages/sdk/src/index.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const REPORT = join(ROOT, ".monaca", "reports", "skeleton.json");
@@ -647,6 +648,14 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "series, the latency histogram, a positive monaca_rate_limit_rejections_total from this run and a positive " +
       "monaca_revoked_token_rejections_total{surface=\"management\"} from this run; the body contains no internal " +
       "secret",
+  },
+  {
+    step: "65",
+    title: "generated SDK against the real server",
+    assertion:
+      "the committed @monaca/sdk client, generated from spec/openapi.json, calls the running server: " +
+      "GET /healthz returns status ok, GET /v1/rate-limits returns the four defaults, and a typed PATCH " +
+      "of the same path restores an empty item list",
   },
 ];
 
@@ -7360,6 +7369,54 @@ async function metricsFlow(base: string, internalSecret: string): Promise<StepRe
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: text/plain → request series → histogram → rate-limit rejections → revoked token → no secret`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 65 — the committed SDK, generated from the contract, against the real server (§6.5).
+ */
+async function sdkFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const client = createMonacaClient({ baseUrl: base, token: adminToken });
+
+  try {
+    const health = await client.GET("/healthz");
+    checks.push([
+      "the generated client reads /healthz",
+      health.response.status === 200 && health.data?.status === "ok",
+    ]);
+
+    const limits = await client.GET("/v1/rate-limits");
+    checks.push([
+      "the typed client reads the rate-limit document",
+      limits.response.status === 200 &&
+        limits.data?.defaults.length === 4 &&
+        Array.isArray(limits.data?.items),
+    ]);
+
+    const cleared = await client.PATCH("/v1/rate-limits", { body: { items: [] } });
+    checks.push([
+      "the typed client writes the rate-limit document",
+      cleared.response.status === 200 &&
+        Array.isArray(cleared.data?.items) &&
+        cleared.data.items.length === 0,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "65",
+    title: "generated SDK against the real server",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: GET /healthz → GET /v1/rate-limits → PATCH /v1/rate-limits`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -14376,6 +14433,7 @@ async function main(): Promise<number> {
   push(await persistenceFlow(base, adminToken, parsed.consoleSecret));
   push(await sharedRateLimitFlow(base, adminToken, parsed.adminSecret));
   push(await metricsFlow(base, parsed.internalSecret));
+  push(await sdkFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

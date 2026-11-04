@@ -1,94 +1,1198 @@
 {
-  "openapi": "3.1.0",
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "description": "The `/healthz` body — §6.1.",
+        "properties": {
+          "status": {
+            "description": "Always `\"ok\"`; the endpoint does not answer otherwise.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "RateLimitDefaultView": {
+        "description": "A built-in default in the `/v1/rate-limits` document.",
+        "properties": {
+          "endpoint": {
+            "description": "The endpoint class.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Requests allowed per window.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "window_secs": {
+            "description": "Window length in seconds.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "endpoint",
+          "limit",
+          "window_secs"
+        ],
+        "type": "object"
+      },
+      "RateLimitItem": {
+        "description": "One configured layer in `PATCH /v1/rate-limits` — §6.2.",
+        "properties": {
+          "client_id": {
+            "description": "The protocol client id for a per-client layer; absent for the tenant-wide layer.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "description": "`authorize` | `token` | `userinfo` | `management`.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Requests allowed per window.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "window_secs": {
+            "description": "Window length in seconds.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "endpoint",
+          "limit",
+          "window_secs"
+        ],
+        "type": "object"
+      },
+      "RateLimitView": {
+        "description": "One configured row in the `/v1/rate-limits` document.",
+        "properties": {
+          "client_id": {
+            "description": "The protocol client id, or `null` for the tenant-wide layer.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "description": "The endpoint class.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Requests allowed per window.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "window_secs": {
+            "description": "Window length in seconds.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "endpoint",
+          "limit",
+          "window_secs"
+        ],
+        "type": "object"
+      },
+      "RateLimitsDocument": {
+        "description": "`GET`/`PATCH /v1/rate-limits` response — §6.2.",
+        "properties": {
+          "defaults": {
+            "description": "The built-in defaults, always present.",
+            "items": {
+              "$ref": "#/components/schemas/RateLimitDefaultView"
+            },
+            "type": "array"
+          },
+          "items": {
+            "description": "Every configured layer.",
+            "items": {
+              "$ref": "#/components/schemas/RateLimitView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "defaults",
+          "items"
+        ],
+        "type": "object"
+      },
+      "RateLimitsPatch": {
+        "description": "`PATCH /v1/rate-limits` body.",
+        "properties": {
+          "items": {
+            "description": "The complete replacement set. An empty list restores the built-in defaults.",
+            "items": {
+              "$ref": "#/components/schemas/RateLimitItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "VersionResponse": {
+        "description": "The `/version` body.",
+        "properties": {
+          "name": {
+            "description": "The binary's package name.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version it was built from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "type": "object"
+      }
+    }
+  },
   "info": {
-    "title": "Monaca",
-    "description": "Identity and access management for the AI-agent era.",
     "contact": {
       "name": "Monaca contributors"
     },
+    "description": "Identity and access management for the AI-agent era.",
     "license": {
-      "name": "Apache-2.0",
-      "identifier": "Apache-2.0"
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0"
     },
+    "title": "Monaca",
     "version": "0.0.0"
   },
+  "openapi": "3.1.0",
   "paths": {
     "/healthz": {
       "get": {
-        "tags": [
-          "meta"
-        ],
-        "summary": "Liveness",
         "description": "Always 200 with {\"status\":\"ok\"} while the process can serve.",
         "operationId": "healthz",
         "responses": {
           "200": {
-            "description": "The server is alive.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
                 }
               }
-            }
+            },
+            "description": "The server is alive."
           }
-        }
+        },
+        "summary": "Liveness",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Prometheus text exposition. Keep it off the public origin.",
+        "operationId": "scrape",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {}
+            },
+            "description": "Prometheus text."
+          }
+        },
+        "summary": "Prometheus metrics",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/t/{tenant}/.well-known/jwks.json": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant JWKS"
+      }
+    },
+    "/t/{tenant}/.well-known/openid-configuration": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant discovery"
+      }
+    },
+    "/t/{tenant}/connectors": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Public social connectors"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Interaction details"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/abort": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Abort an interaction"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/consent": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Consent"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-in": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Password sign-in"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-up": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-up"
+      }
+    },
+    "/t/{tenant}/oauth2/authorize": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Authorization request"
+      }
+    },
+    "/t/{tenant}/oauth2/end-session": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "End a session"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "End a session"
+      }
+    },
+    "/t/{tenant}/oauth2/introspect": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Token introspection"
+      }
+    },
+    "/t/{tenant}/oauth2/par": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Pushed authorization request"
+      }
+    },
+    "/t/{tenant}/oauth2/revoke": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Token revocation"
+      }
+    },
+    "/t/{tenant}/oauth2/token": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Token endpoint"
+      }
+    },
+    "/t/{tenant}/oauth2/userinfo": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "UserInfo"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "UserInfo"
+      }
+    },
+    "/t/{tenant}/sign-in-experience": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Public sign-in experience"
+      }
+    },
+    "/v1/accounts": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "List and create accounts"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "List and create accounts"
+      }
+    },
+    "/v1/accounts/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Read and update an account"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Read and update an account"
+      }
+    },
+    "/v1/accounts/{id}/mfa": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Remove the second factor"
+      }
+    },
+    "/v1/accounts/{id}/passkeys/{passkey}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Remove a passkey"
+      }
+    },
+    "/v1/accounts/{id}/roles/{role}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Assign or remove a role"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Assign or remove a role"
+      }
+    },
+    "/v1/accounts/{id}/security": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Account security summary"
+      }
+    },
+    "/v1/accounts/{id}/sessions": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Account sessions"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Account sessions"
+      }
+    },
+    "/v1/accounts/{id}/sessions/{session}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Revoke one session"
+      }
+    },
+    "/v1/clients": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "OAuth clients"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "OAuth clients"
+      }
+    },
+    "/v1/clients/{client}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One OAuth client"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One OAuth client"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One OAuth client"
+      }
+    },
+    "/v1/clients/{client}/secret": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Rotate a client secret"
+      }
+    },
+    "/v1/connectors": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Social connectors"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Social connectors"
+      }
+    },
+    "/v1/connectors/{connector}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One social connector"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One social connector"
+      }
+    },
+    "/v1/email-connector": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Delivery connector"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Delivery connector"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Delivery connector"
+      }
+    },
+    "/v1/email-templates": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Email templates"
+      }
+    },
+    "/v1/email-templates/{purpose}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One email template"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One email template"
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "List and create organizations"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "List and create organizations"
+      }
+    },
+    "/v1/orgs/{org}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Read and update an organization"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Read and update an organization"
+      }
+    },
+    "/v1/orgs/{org}/agents": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Agents"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Agents"
+      }
+    },
+    "/v1/orgs/{org}/agents/{agent}/keys": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Register an agent key"
+      }
+    },
+    "/v1/orgs/{org}/agents/{agent}/keys/{key}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Revoke an agent key"
+      }
+    },
+    "/v1/orgs/{org}/audit": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Audit events"
+      }
+    },
+    "/v1/orgs/{org}/audit/verify": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify an audit chain"
+      }
+    },
+    "/v1/orgs/{org}/email-domains": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Email domains"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Email domains"
+      }
+    },
+    "/v1/orgs/{org}/email-domains/{domain}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Remove an email domain"
+      }
+    },
+    "/v1/orgs/{org}/grants": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Grants"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Grants"
+      }
+    },
+    "/v1/orgs/{org}/grants/{grant}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Revoke a grant"
+      }
+    },
+    "/v1/orgs/{org}/invitations": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Invitations"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Invitations"
+      }
+    },
+    "/v1/orgs/{org}/invitations/{invitation}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Revoke an invitation"
+      }
+    },
+    "/v1/orgs/{org}/members": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Organization members"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Organization members"
+      }
+    },
+    "/v1/orgs/{org}/members/{account}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One member"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One member"
+      }
+    },
+    "/v1/orgs/{org}/members/{account}/roles": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Member role assignments"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Member role assignments"
+      }
+    },
+    "/v1/orgs/{org}/members/{account}/roles/{role}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Remove a member role"
+      }
+    },
+    "/v1/orgs/{org}/roles": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Organization roles"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Organization roles"
+      }
+    },
+    "/v1/orgs/{org}/roles/{role}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One organization role"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One organization role"
+      }
+    },
+    "/v1/rate-limits": {
+      "get": {
+        "description": "Returns the four built-in defaults and every configured tenant or client layer.",
+        "operationId": "get_rate_limits",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitsDocument"
+                }
+              }
+            },
+            "description": "The effective gates."
+          }
+        },
+        "summary": "Read the request gates",
+        "tags": [
+          "management"
+        ]
+      },
+      "patch": {
+        "description": "Replaces the complete set. An empty items list restores the built-in defaults.",
+        "operationId": "update_rate_limits",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RateLimitsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitsDocument"
+                }
+              }
+            },
+            "description": "The saved gates."
+          },
+          "400": {
+            "description": "An endpoint, limit, window or client id is invalid."
+          }
+        },
+        "summary": "Replace the request gates",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/resources": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "API resources"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "API resources"
+      }
+    },
+    "/v1/resources/{resource}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One API resource"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One API resource"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One API resource"
+      }
+    },
+    "/v1/roles": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant roles"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant roles"
+      }
+    },
+    "/v1/roles/{role}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One tenant role"
+      }
+    },
+    "/v1/sign-in-copy": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-in copy"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-in copy"
+      }
+    },
+    "/v1/sign-in-experience": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-in policy"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-in policy"
+      }
+    },
+    "/v1/sso-connectors": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SSO connectors"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SSO connectors"
+      }
+    },
+    "/v1/sso-connectors/{connector}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One SSO connector"
+      }
+    },
+    "/v1/webhooks": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Webhooks"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Webhooks"
+      }
+    },
+    "/v1/webhooks/{webhook}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One webhook"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One webhook"
+      }
+    },
+    "/v1/webhooks/{webhook}/deliveries": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Webhook deliveries"
+      }
+    },
+    "/v1/webhooks/{webhook}/secret": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Rotate a webhook secret"
       }
     },
     "/version": {
       "get": {
-        "tags": [
-          "meta"
-        ],
-        "summary": "Build version",
         "operationId": "version",
         "responses": {
           "200": {
-            "description": "The binary's name and version.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VersionResponse"
                 }
               }
-            }
+            },
+            "description": "The binary's name and version."
           }
-        }
-      }
-    }
-  },
-  "components": {
-    "schemas": {
-      "HealthResponse": {
-        "type": "object",
-        "description": "The `/healthz` body — §6.1.",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "status": {
-            "type": "string",
-            "description": "Always `\"ok\"`; the endpoint does not answer otherwise."
-          }
-        }
-      },
-      "VersionResponse": {
-        "type": "object",
-        "description": "The `/version` body.",
-        "required": [
-          "name",
-          "version"
-        ],
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "The binary's package name."
-          },
-          "version": {
-            "type": "string",
-            "description": "The version it was built from."
-          }
-        }
+        },
+        "summary": "Build version",
+        "tags": [
+          "meta"
+        ]
       }
     }
   }
