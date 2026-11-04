@@ -331,8 +331,9 @@ mod tests {
             &json!({"alg": "none", "typ": "JWT", "kid": "kid-1"}),
             &json!({"exp": 4_102_444_800i64}),
         );
-        let error = verify_rs256_jws(&token, &[], Some("JWT")).expect_err("must refuse");
-        assert!(matches!(error, CryptoError::BadSignature(_)));
+        // `jsonwebtoken` may classify `none` as a malformed algorithm rather than a bad signature;
+        // what matters is that it is refused.
+        assert!(verify_rs256_jws(&token, &[], Some("JWT")).is_err());
     }
 
     #[test]

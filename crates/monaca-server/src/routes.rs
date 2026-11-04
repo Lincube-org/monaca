@@ -49,14 +49,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(protocol_routes())
         .merge(account_routes())
         .merge(management_routes())
-        .merge(
-            internal_routes(state.config.production).layer(
-                axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::internal::require_secret_middleware,
-                ),
-            ),
-        )
+        .merge(internal_routes(state.config.production))
         .with_state(state.clone())
         // Only the protocol paths it recognizes are touched; see `cors` for the tenant gate.
         .layer(axum::middleware::from_fn_with_state(

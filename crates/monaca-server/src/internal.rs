@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use monaca_audit::AuditEvent;
 use monaca_store::topics;
@@ -54,29 +54,32 @@ fn const_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-/// Authenticate every `/internal/*` request **before** the handler's extractors run.
+/// Authenticate `/internal/*` **before** any path, query or JSON extractor runs.
 ///
-/// Without this layer Axum would deserialize `Json<AuditBody>` first, so an unauthenticated POST
-/// with a malformed body would answer `422` instead of `401` — an oracle for the route's shape.
-/// The per-handler `require_secret` checks stay as defence in depth.
-pub async fn require_secret_middleware(
-    State(state): State<Arc<AppState>>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if let Err(err) = require_secret(&state, request.headers()) {
-        return err.into_response();
+/// Every internal handler takes this as its first extractor. Axum runs parts extractors in
+/// argument order and the body extractor last, so an unauthenticated POST with a malformed body is
+/// `401`, not `422` — the route's shape stays hidden. A router-wide middleware would also wrap
+/// unrelated routes after the internal router is merged, which is why this is an extractor.
+pub struct InternalAuth;
+
+impl FromRequestParts<Arc<AppState>> for InternalAuth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        require_secret(state, &parts.headers)?;
+        Ok(Self)
     }
-    next.run(request).await
 }
 
 /// `POST /internal/audit`.
 pub async fn append_audit(
+    _auth: InternalAuth,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<AuditBody>,
 ) -> Result<Response, ApiError> {
-    require_secret(&state, &headers)?;
     let tenant = state.tenant(&body.tenant).await?;
     let org = state.store.org_by_slug(&tenant, &body.org).await?;
     let ctx = org.ctx(&tenant);
@@ -117,11 +120,10 @@ pub struct TenantAuditQuery {
 /// which has no management-API reader. The acceptance script proves those writes land here; a
 /// production deployment would surface the same rows through an admin view.
 pub async fn tenant_audit(
+    _auth: InternalAuth,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(query): Query<TenantAuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    require_secret(&state, &headers)?;
     let tenant = state.tenant(&query.tenant).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
 
@@ -156,22 +158,20 @@ pub async fn tenant_audit(
 
 /// `GET /internal/tenants/{slug}/jwks`.
 pub async fn tenant_jwks(
+    _auth: InternalAuth,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    require_secret(&state, &headers)?;
     let tenant = state.tenant(&slug).await?;
     Ok(Json(json!({ "keys": state.jwks(&tenant).await? })))
 }
 
 /// `GET /internal/tenants/{slug}/issuer`.
 pub async fn tenant_issuer(
+    _auth: InternalAuth,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    require_secret(&state, &headers)?;
     let tenant = state.tenant(&slug).await?;
     Ok(Json(json!({
         "issuer": tenant.issuer,
@@ -197,11 +197,10 @@ pub struct MailQuery {
 /// flow without an SMTP server. The payload contains the verification code in plaintext, so the
 /// route is mounted only when `MONACA_ENV` is not `prod` (`routes::internal_routes`).
 pub async fn latest_mail(
+    _auth: InternalAuth,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(query): Query<MailQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    require_secret(&state, &headers)?;
     let tenant = state.tenant(&query.tenant).await?;
     let payload = state
         .store
@@ -217,10 +216,9 @@ pub async fn latest_mail(
 
 /// `GET /internal/health`.
 pub async fn health(
+    _auth: InternalAuth,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    require_secret(&state, &headers)?;
     sqlx::query("SELECT 1")
         .execute(state.store.control())
         .await
