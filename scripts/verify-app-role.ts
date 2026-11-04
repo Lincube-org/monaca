@@ -44,6 +44,7 @@ const identifier = (value: string, what: string): string => {
 };
 const raw = (db: Bun.SQL, query: string, values?: unknown[]): Promise<unknown[]> =>
   (db as unknown as RawSql).unsafe(query, values);
+const literal = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 const withDatabase = (url: string, database: string): string => {
   const parsed = new URL(url);
   parsed.pathname = `/${database}`;
@@ -82,11 +83,10 @@ try {
   if (exists.length === 0) {
     await raw(
       admin,
-      `CREATE ROLE "${role}" LOGIN NOINHERIT PASSWORD $1`,
-      [appPassword],
+      `CREATE ROLE "${role}" LOGIN NOINHERIT PASSWORD ${literal(appPassword)}`,
     );
   }
-  await raw(admin, `ALTER ROLE "${role}" PASSWORD $1`, [appPassword]);
+  await raw(admin, `ALTER ROLE "${role}" PASSWORD ${literal(appPassword)}`);
   checks.push(["the app login exists", true]);
 
   const databases = new Bun.SQL(withDatabase(adminUrl, "postgres"));
