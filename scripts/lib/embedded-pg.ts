@@ -23,6 +23,12 @@ export interface EmbeddedPgOptions {
   /** Receives every PostgreSQL log line (initdb and server). Defaults to discarding them. */
   onLog?: (line: string) => void;
   /**
+   * Extra `postgres` flags, for a disposable benchmark cluster: `shared_preload_libraries`,
+   * `fsync=off`, and any other setting the run must record. They are appended after the fixed
+   * `listen_addresses` flag, so the later `-c` wins.
+   */
+  extraPostgresFlags?: string[];
+  /**
    * How long to wait for "ready to accept connections". Generous on purpose: after an unclean
    * shutdown PostgreSQL fsyncs the whole data directory before it starts (measured 55 s for a
    * small cluster on this machine), and that recovery is not a failure.
@@ -123,6 +129,7 @@ export async function startEmbeddedPg(opts: EmbeddedPgOptions): Promise<Embedded
   // system path that may not be writable, so the socket always goes under baseDir there.
   const postgresFlags = ["-c", "listen_addresses=127.0.0.1"];
   if (process.platform !== "win32") postgresFlags.push("-k", socketDir);
+  postgresFlags.push(...(opts.extraPostgresFlags ?? []));
 
   const pg = new EmbeddedPostgres({
     databaseDir: dataDir,
