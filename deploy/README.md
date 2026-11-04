@@ -156,9 +156,10 @@ host **loopback only**:
 Scrape it from a Prometheus on the host, or through your own network policy. Do not put it behind
 the public origin. `MONACA_METRICS_PORT` changes the host port; the container port stays 9090.
 The series are `monaca_http_requests_total`, `monaca_http_request_duration_seconds` (histogram),
-`monaca_rate_limit_rejections_total` and `monaca_revoked_token_rejections_total`. Metrics are per
-process: scrape every server instance and aggregate in Prometheus (`sum` for counters,
-`sum by (le)` for histogram buckets). A single instance's `/metrics` is not a deployment total.
+`monaca_rate_limit_rejections_total`, `monaca_revoked_token_rejections_total` and the tenant-pool
+cache counters. Metrics are per process: scrape every server instance and aggregate in Prometheus
+(`sum` for counters, `sum by (le)` for histogram buckets). A single instance's `/metrics` is not a
+deployment total.
 
 ## Operating
 

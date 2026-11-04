@@ -24,7 +24,8 @@ mod runtime_state;
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use monaca_types::{OrgCtx, OrgId, TenantId};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -195,12 +196,47 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+/// Tenant-pool cache counters. Read by the server's `/metrics` handler (§6.4); never a source of
+/// truth, so they are relaxed atomics that a long-lived process can update without contention.
+#[derive(Debug, Default)]
+pub struct PoolStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    lookup_nanos: AtomicU64,
+    connect_nanos: AtomicU64,
+}
+
+/// A point-in-time copy of [`PoolStats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolStatsSnapshot {
+    /// Lookups answered from the cache.
+    pub hits: u64,
+    /// Lookups that created a pool.
+    pub misses: u64,
+    /// Time spent in the cache lookup, including waiting for the map lock.
+    pub lookup_nanos: u64,
+    /// Time spent creating a pool and validating its first connection.
+    pub connect_nanos: u64,
+}
+
+impl PoolStats {
+    fn snapshot(&self) -> PoolStatsSnapshot {
+        PoolStatsSnapshot {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            lookup_nanos: self.lookup_nanos.load(Ordering::Relaxed),
+            connect_nanos: self.connect_nanos.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// The database handle: one control-plane pool, one provisioning pool, one pool per tenant.
 pub struct Store {
     control: PgPool,
     admin: PgPool,
     config: StoreConfig,
     tenants: Mutex<HashMap<String, PgPool>>,
+    stats: PoolStats,
 }
 
 impl Store {
@@ -223,12 +259,18 @@ impl Store {
             admin,
             config,
             tenants: Mutex::new(HashMap::new()),
+            stats: PoolStats::default(),
         })
     }
 
     /// The control-plane pool.
     pub fn control(&self) -> &PgPool {
         &self.control
+    }
+
+    /// Tenant-pool cache counters for `/metrics` (§6.4).
+    pub fn pool_stats(&self) -> PoolStatsSnapshot {
+        self.stats.snapshot()
     }
 
     /// The configuration this store was built with.
@@ -240,10 +282,20 @@ impl Store {
     pub async fn tenant_pool(&self, db_name: &str) -> Result<PgPool, StoreError> {
         validate_database_name(db_name)?;
 
+        let started = Instant::now();
         let mut pools = self.tenants.lock().await;
+        let lookup = started.elapsed();
         if let Some(pool) = pools.get(db_name) {
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .lookup_nanos
+                .fetch_add(lookup.as_nanos() as u64, Ordering::Relaxed);
             return Ok(pool.clone());
         }
+        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .lookup_nanos
+            .fetch_add(lookup.as_nanos() as u64, Ordering::Relaxed);
 
         let base = self
             .config
@@ -253,12 +305,17 @@ impl Store {
         let options = PgConnectOptions::from_str(base)
             .map_err(|err| StoreError::Database(format!("tenant pool URL: {err}")))?
             .database(db_name);
+        let connect_started = Instant::now();
         let pool = PgPoolOptions::new()
             .max_connections(self.config.tenant_pool_size)
             .acquire_timeout(Duration::from_secs(10))
             .idle_timeout(Duration::from_secs(300))
             .connect_with(options)
             .await?;
+        self.stats.connect_nanos.fetch_add(
+            connect_started.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
 
         // Evict the oldest entry when the cache is full. Pools are cheap to rebuild and the cap is
         // what keeps an unbounded tenant count from exhausting PostgreSQL's connection slots.
