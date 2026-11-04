@@ -140,10 +140,14 @@ pub fn rejection(
     window_secs: u32,
     now: OffsetDateTime,
 ) -> Option<Rejection> {
+    let window_end = window_start + time::Duration::seconds(i64::from(window_secs));
+    if now >= window_end {
+        // The counter resets in place at the next hit; this stale window is over.
+        return None;
+    }
     if count <= i64::from(limit) {
         return None;
     }
-    let window_end = window_start + time::Duration::seconds(i64::from(window_secs));
     Some(Rejection {
         retry_after: (window_end - now).whole_seconds().max(1) as u64,
     })
