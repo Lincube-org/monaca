@@ -140,11 +140,12 @@ interface Args {
   readonly pool: boolean;
   readonly onlyPool: boolean;
   readonly allConnectors: boolean;
+  readonly reuse: boolean;
 }
 
 function usage(): string {
   return `usage: bun scripts/bench/run.ts [--profile smoke|full|scale] [--out <path>] [--archive <path>]
-                                  [--no-app-role] [--no-pool] [--only-pool] [--all-connectors]
+                                  [--no-app-role] [--no-pool] [--only-pool] [--all-connectors] [--reuse]
 
   smoke  10 tenants, 50 accounts, 10 clients, 100 measured iterations
   full   200 tenants, 200 accounts, 20 clients, 1000 measured iterations
@@ -164,6 +165,7 @@ function parseArgs(argv: readonly string[]): Args {
   let pool = true;
   let onlyPool = false;
   let allConnectors = false;
+  let reuse = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? "";
@@ -203,6 +205,8 @@ function parseArgs(argv: readonly string[]): Args {
       allConnectors = true;
       onlyPool = true;
       appRole = false;
+    } else if (arg === "--reuse") {
+      reuse = true;
     } else {
       throw new Error(`unknown argument ${JSON.stringify(arg)}\n${usage()}`);
     }
@@ -216,6 +220,7 @@ function parseArgs(argv: readonly string[]): Args {
     pool,
     onlyPool,
     allConnectors,
+    reuse,
   };
 }
 
@@ -390,6 +395,15 @@ async function seedConnectors(
      ON CONFLICT (tenant_id) DO NOTHING`,
   );
   return rows.length;
+}
+
+/** The bench tenant slugs already in the control plane, for `--reuse` after a prior scale run. */
+async function existingExtras(control: Bun.SQL): Promise<string[]> {
+  const rows = (await raw(
+    control,
+    "SELECT slug FROM tenants WHERE slug LIKE 'bench-%' ORDER BY slug",
+  )) as { slug: string }[];
+  return rows.map((row) => row.slug);
 }
 
 async function mintAdmin(base: string): Promise<string> {
@@ -1078,7 +1092,12 @@ async function main(): Promise<number> {
         `${args.profile.iterations} iterations\n`,
     );
 
-    const extras = await migrateAndSeed(bin, pg, args.profile, env);
+    const extras = args.reuse
+      ? await existingExtras(control)
+      : await migrateAndSeed(bin, pg, args.profile, env);
+    if (args.reuse && extras.length === 0) {
+      throw new Error("--reuse found no bench tenants; run a scale profile once without it");
+    }
     const controlRow = (await raw(control, "SELECT db_name FROM tenants WHERE slug = $1", [TENANT])) as {
       db_name: string;
     }[];

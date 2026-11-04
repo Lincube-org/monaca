@@ -23,6 +23,14 @@ skips the request paths, ramp and app-pool passes; the `scale` profile uses it b
 only needs the tenant fixtures. They exist for debugging one section, not for producing comparable
 numbers.
 
+`--all-connectors` gives **every** tenant an enabled HTTP email connector, so the mailer's control
+query matches all 400 tenants and the index cannot narrow it; the pool sizes collapse to the single
+point `[400]`. This is the worst-case connection scenario, not an optimization target:
+`.monaca/reports/bench-scale-all-connectors.json` records the `activation_*_connections` peak.
+`--reuse` attaches to the tenant databases a prior `scale` run left in the embedded cluster (`bench-*`
+rows in `monaca_control`) instead of provisioning 400 databases again; combine it with
+`--profile scale --only-pool` so the fixture is defined by that earlier run.
+
 ## Compare two runs
 
 ```bash
