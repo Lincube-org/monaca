@@ -28,7 +28,7 @@ const PG_FLAGS = [
   "-c",
   "full_page_writes=off",
   "-c",
-  "max_connections=200",
+  "max_connections=500",
   "-c",
   "shared_buffers=256MB",
   "-c",

@@ -31,9 +31,10 @@ debugging one section, not for producing comparable numbers.
   by `bun run fetch:native`. The benchmark never compiles Rust.
 
 Fixed PostgreSQL parameters for every run (recorded in the report): `fsync=off`,
-`synchronous_commit=off`, `full_page_writes=off`, `max_connections=200`, `shared_buffers=256MB`,
+`synchronous_commit=off`, `full_page_writes=off`, `max_connections=500`, `shared_buffers=256MB`,
 `work_mem=8MB`. Durability is off because the cluster is thrown away; the numbers are comparative,
-not a production SLO.
+not a production SLO. The connection ceiling is deliberately above 200 so the 198-tenant pool
+phase can finish; the `connections` column still shows how many the fixture actually holds.
 
 ## What is measured
 
