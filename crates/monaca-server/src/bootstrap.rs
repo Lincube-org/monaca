@@ -11,10 +11,11 @@ use crate::state::AppState;
 /// Seed everything the walk-through needs. Idempotent.
 ///
 /// The seed credentials (`MONACA_BOOTSTRAP_ADMIN_PASSWORD`,
-/// `MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET`, `MONACA_CONSOLE_CLIENT_SECRET`) are read only when the
-/// corresponding row does not exist yet. Re-running on a populated database does not re-hash or
-/// overwrite an existing password or client secret; `create_client`'s conflict update changes the
-/// name and logout URIs only (§5.6).
+/// `MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET`, `MONACA_CONSOLE_CLIENT_SECRET`) never overwrite an
+/// existing row. The admin password is hashed only when the account is absent, and
+/// `create_client`'s conflict update changes the name and logout URIs only — the stored
+/// `secret_hash` is left alone (§5.6). Client secrets are hashed on every run because the
+/// insert that carries them must still satisfy the row's check constraint.
 pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
     let store = Arc::clone(&state.store);
     let config = Arc::clone(&state.config);
@@ -83,29 +84,17 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
     tx.commit().await?;
 
     // The two seeded clients. `create_client` refreshes the name and the redirect URIs on every
-    // run, but it never touches `secret_hash` on a conflict; a present client's secret is not
-    // re-hashed here.
-    let seeded_clients: Vec<String> = store
-        .clients(&demo)
-        .await?
-        .into_iter()
-        .map(|client| client.client_id)
-        .collect();
-    let console_exists = seeded_clients
-        .iter()
-        .any(|client_id| client_id == &config.console_client_id);
-    let console_phc = if console_exists {
-        None
-    } else {
-        Some(hash_password(config.console_client_secret.clone(), state.argon).await?)
-    };
+    // run, but its conflict update never touches `secret_hash`. The hash has to be supplied even
+    // when the row exists: the attempted insert must satisfy `clients_check` before the conflict
+    // is resolved.
+    let console_phc = hash_password(config.console_client_secret.clone(), state.argon).await?;
     store
         .create_client(
             &demo,
             &config.console_client_id,
             "Monaca Console",
             "confidential",
-            console_phc.as_deref(),
+            Some(&console_phc),
             "client_secret_basic",
             None,
             &[
@@ -129,21 +118,14 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
         )
         .await?;
 
-    let admin_exists = seeded_clients
-        .iter()
-        .any(|client_id| client_id == "monaca-admin");
-    let admin_phc = if admin_exists {
-        None
-    } else {
-        Some(hash_password(config.admin_client_secret.clone(), state.argon).await?)
-    };
+    let admin_phc = hash_password(config.admin_client_secret.clone(), state.argon).await?;
     store
         .create_client(
             &demo,
             "monaca-admin",
             "Monaca Automation",
             "confidential",
-            admin_phc.as_deref(),
+            Some(&admin_phc),
             "client_secret_basic",
             None,
             &["monaca:admin".into()],
