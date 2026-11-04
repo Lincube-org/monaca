@@ -43,6 +43,7 @@ import {
   type HttpResult,
   type LatencySummary,
   type Measurement,
+  type PoolDelta,
   type StatementStat,
   ROOT,
 } from "./harness.ts";
@@ -66,7 +67,7 @@ const CONTROL_BASE = `http://127.0.0.1:${CONTROL_PORT}`;
 const APP_BASE = `http://127.0.0.1:${APP_PORT}`;
 
 interface Profile {
-  readonly name: "smoke" | "full";
+  readonly name: "smoke" | "full" | "scale";
   readonly extraTenants: number;
   readonly accounts: number;
   readonly clients: number;
@@ -81,7 +82,7 @@ interface Profile {
   readonly poolSizes: readonly number[];
 }
 
-const PROFILES: Record<"smoke" | "full", Profile> = {
+const PROFILES: Record<"smoke" | "full" | "scale", Profile> = {
   smoke: {
     name: "smoke",
     extraTenants: 8,
@@ -110,7 +111,24 @@ const PROFILES: Record<"smoke" | "full", Profile> = {
     rampConcurrency: [1, 4, 16, 64],
     appRoleWarmup: 20,
     appRoleIterations: 300,
-    poolSizes: [50, 198],
+    poolSizes: [50, 100, 200],
+  },
+  // The scale curve is a pool-only profile: it provisions 400 tenant databases and measures
+  // 50/100/200/400 active tenants. Run it with `--only-pool`; accounts and clients are irrelevant.
+  scale: {
+    name: "scale",
+    extraTenants: 398,
+    accounts: 0,
+    clients: 0,
+    warmup: 10,
+    iterations: 100,
+    flowWarmup: 5,
+    flowIterations: 20,
+    rampRequests: 200,
+    rampConcurrency: [1, 4, 16, 64],
+    appRoleWarmup: 10,
+    appRoleIterations: 50,
+    poolSizes: [50, 100, 200, 400],
   },
 };
 
@@ -120,14 +138,17 @@ interface Args {
   readonly archive?: string;
   readonly appRole: boolean;
   readonly pool: boolean;
+  readonly onlyPool: boolean;
 }
 
 function usage(): string {
-  return `usage: bun scripts/bench/run.ts [--profile smoke|full] [--out <path>] [--archive <path>]
-                                  [--no-app-role] [--no-pool]
+  return `usage: bun scripts/bench/run.ts [--profile smoke|full|scale] [--out <path>] [--archive <path>]
+                                  [--no-app-role] [--no-pool] [--only-pool]
+
 
   smoke  10 tenants, 50 accounts, 10 clients, 100 measured iterations
   full   200 tenants, 200 accounts, 20 clients, 1000 measured iterations
+  scale  400 tenants, pool-only curve at 50/100/200/400 (use --only-pool)
 
 Environment:
   MONACA_BENCH_PG_URL   an external PostgreSQL admin URL (…/postgres); unset starts embedded PG
@@ -141,6 +162,7 @@ function parseArgs(argv: readonly string[]): Args {
   let archive: string | undefined;
   let appRole = true;
   let pool = true;
+  let onlyPool = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? "";
@@ -149,11 +171,15 @@ function parseArgs(argv: readonly string[]): Args {
       process.exit(0);
     } else if (arg === "--profile") {
       const value = argv[++i] ?? "";
-      if (value !== "smoke" && value !== "full") throw new Error(`unknown profile ${JSON.stringify(value)}`);
+      if (value !== "smoke" && value !== "full" && value !== "scale") {
+        throw new Error(`unknown profile ${JSON.stringify(value)}`);
+      }
       profile = PROFILES[value];
     } else if (arg.startsWith("--profile=")) {
       const value = arg.slice("--profile=".length);
-      if (value !== "smoke" && value !== "full") throw new Error(`unknown profile ${JSON.stringify(value)}`);
+      if (value !== "smoke" && value !== "full" && value !== "scale") {
+        throw new Error(`unknown profile ${JSON.stringify(value)}`);
+      }
       profile = PROFILES[value];
     } else if (arg === "--out") {
       out = argv[++i] ?? "";
@@ -169,6 +195,9 @@ function parseArgs(argv: readonly string[]): Args {
       appRole = false;
     } else if (arg === "--no-pool") {
       pool = false;
+    } else if (arg === "--only-pool") {
+      onlyPool = true;
+      appRole = false;
     } else {
       throw new Error(`unknown argument ${JSON.stringify(arg)}\n${usage()}`);
     }
@@ -180,7 +209,12 @@ function parseArgs(argv: readonly string[]): Args {
     archive,
     appRole,
     pool,
+    onlyPool,
   };
+}
+
+function sqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function extraSlug(index: number): string {
@@ -572,27 +606,97 @@ async function scenario(
   };
 }
 
+interface PhaseRun {
+  readonly latency: LatencySummary;
+  readonly errors: number;
+  readonly first_error: string;
+}
+
 interface PoolPhase {
   readonly tenants: number;
   readonly seconds: number;
-  readonly cold: LatencySummary;
-  readonly warm: LatencySummary;
-  readonly cold_pool: ReturnType<typeof poolDelta>;
-  readonly warm_pool: ReturnType<typeof poolDelta>;
+  readonly activation_seconds: number;
+  readonly activation_base_connections: number;
+  readonly activation_peak_connections: number;
+  readonly cold: PhaseRun;
+  readonly hot: PhaseRun;
+  readonly mixed: PhaseRun;
+  readonly cold_pool: PoolDelta;
+  readonly hot_pool: PoolDelta;
+  readonly mixed_pool: PoolDelta;
+  readonly connections_after_cold: number;
+  readonly connections_after_hot: number;
+  readonly connections_after_mixed: number;
+  readonly mailer_ticks: number;
+  readonly connector_queries: number;
+  readonly index_queries: number;
   readonly errors: number;
   readonly first_error: string;
-  readonly connections: number;
   readonly mailer_tick_possible: boolean;
 }
 
-async function setTenantState(
+function emptyPhaseRun(): PhaseRun {
+  return {
+    latency: summarise([]),
+    errors: 0,
+    first_error: "",
+  };
+}
+
+/** Read the current state for each slug so a phase can put the rows back exactly as it found them. */
+async function tenantStates(
   control: Bun.SQL,
   slugs: readonly string[],
-  state: "active" | "provisioning",
+): Promise<Map<string, string>> {
+  const states = new Map<string, string>();
+  if (slugs.length === 0) return states;
+  const rows = (await raw(
+    control,
+    `SELECT slug, state FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")})`,
+  )) as { slug: string; state: string }[];
+  for (const row of rows) states.set(row.slug, row.state);
+  return states;
+}
+
+async function restoreTenantStates(
+  control: Bun.SQL,
+  states: Map<string, string>,
 ): Promise<void> {
-  for (const slug of slugs) {
-    await raw(control, "UPDATE tenants SET state = $1, updated_at = now() WHERE slug = $2", [state, slug]);
+  const groups = new Map<string, string[]>();
+  for (const [slug, state] of states) {
+    const group = groups.get(state);
+    if (group === undefined) groups.set(state, [slug]);
+    else group.push(slug);
   }
+  for (const [state, slugs] of groups) {
+    await raw(
+      control,
+      `UPDATE tenants SET state = $1, updated_at = now()
+       WHERE slug IN (${slugs.map(sqlLiteral).join(",")})`,
+      [state],
+    );
+  }
+}
+
+async function activateTenants(control: Bun.SQL, slugs: readonly string[]): Promise<void> {
+  if (slugs.length === 0) return;
+  await raw(
+    control,
+    `UPDATE tenants SET state = 'active', updated_at = now()
+     WHERE slug IN (${slugs.map(sqlLiteral).join(",")})`,
+  );
+}
+
+async function connectionCount(control: Bun.SQL): Promise<number> {
+  const rows = (await raw(
+    control,
+    "SELECT count(*)::bigint AS count FROM pg_stat_activity WHERE datname LIKE 'mt_%'",
+  )) as { count: string }[];
+  return Number(rows[0]?.count ?? 0);
+}
+
+function emptyPoolDelta(): PoolDelta {
+  return { hits: 0, misses: 0, hit_rate: 0, lookup_avg_ms: 0, connect_avg_ms: 0 };
 }
 
 async function poolPhase(
@@ -602,50 +706,158 @@ async function poolPhase(
   control: Bun.SQL,
   slugs: readonly string[],
   size: number,
+  stats: { available: boolean; sql: Bun.SQL | undefined; reason: string },
 ): Promise<PoolPhase> {
   const subset = slugs.slice(0, size);
+  const previous = await tenantStates(control, subset);
   const server = await startServer(bin, base, env);
   // Let the mailer's immediately-ready first tick finish against only system/demo. The extras
   // stay provisioning until the phase starts, so their pools are not created by the poller.
   await Bun.sleep(1_200);
 
   try {
-    await setTenantState(control, subset, "active");
+    await activateTenants(control, subset);
+    if (stats.available && stats.sql !== undefined) await resetStatements(stats.sql);
+
+    // One mailer cycle after activation: the connection delta is the cost of the poller seeing N
+    // tenants. Sample every 500 ms for 6 s so a 5 s tick is inside the window.
+    const activationStart = performance.now();
+    const samples: number[] = [];
+    for (let i = 0; i < 13; i++) {
+      samples.push(await connectionCount(control));
+      await Bun.sleep(500);
+    }
+    const activationSeconds = (performance.now() - activationStart) / 1_000;
+    const baseConnections = samples[0] ?? 0;
+    const peakConnections = samples.reduce((max, value) => Math.max(max, value), 0);
+
     const before = poolCounters(await scrapeMetrics(base));
     const phaseStart = performance.now();
 
-    const coldRun = await sequential(subset.map((slug) => `${base}/t/${slug}/sign-in-experience`));
-    const afterCold = await scrapeMetrics(base);
+    const coldRun = await sequential(
+      subset.map((slug) => `${base}/t/${slug}/sign-in-experience`),
+    );
+    const afterColdCounters = poolCounters(await scrapeMetrics(base));
+    const connectionsAfterCold = await connectionCount(control);
 
-    const warmRun = await sequential(subset.map((slug) => `${base}/t/${slug}/sign-in-experience`));
-    const afterWarm = await scrapeMetrics(base);
+    // The warm-set pass: the first 50 tenants are a working set that fits the default cache. A
+    // repeat immediately after the cold sweep is the "does the cache retain the hot set" test.
+    const hotSet = subset.slice(0, Math.min(50, subset.length));
+    let hotRun = emptyPhaseRun();
+    let hotPool = emptyPoolDelta();
+    if (hotSet.length > 0) {
+      await sequential(hotSet.map((slug) => `${base}/t/${slug}/sign-in-experience`));
+      const hotBefore = poolCounters(await scrapeMetrics(base));
+      const repeats = Math.max(2, Math.ceil(100 / hotSet.length));
+      const hotUrls = Array.from({ length: repeats }, () =>
+        hotSet.map((slug) => `${base}/t/${slug}/sign-in-experience`),
+      ).flat();
+      const measured = await sequential(hotUrls);
+      hotRun = {
+        latency: summarise(measured.latencies),
+        errors: measured.errors,
+        first_error: measured.first_error,
+      };
+      hotPool = poolDelta(hotBefore, poolCounters(await scrapeMetrics(base)));
+    }
+    const connectionsAfterHot = await connectionCount(control);
+
+    // Mixed pass: alternate a hot tenant with a tenant from the cold remainder. LRU should keep
+    // the hot set through the churn; arbitrary eviction loses it. Only hot-request latency is
+    // reported; the churn requests are workload, not a measured path.
+    const churnSet = subset.slice(hotSet.length);
+    let mixedRun = emptyPhaseRun();
+    let mixedPool = emptyPoolDelta();
+    if (hotSet.length > 0 && churnSet.length > 0) {
+      const warmupPairs = Math.min(20, churnSet.length);
+      for (let i = 0; i < warmupPairs; i++) {
+        const hot = hotSet[i % hotSet.length];
+        const churn = churnSet[i % churnSet.length];
+        if (hot !== undefined) await request(`${base}/t/${hot}/sign-in-experience`);
+        if (churn !== undefined) await request(`${base}/t/${churn}/sign-in-experience`);
+      }
+      const mixedBefore = poolCounters(await scrapeMetrics(base));
+      const pairs = Math.max(100, hotSet.length * 2);
+      const latencies: number[] = [];
+      let errors = 0;
+      let firstError = "";
+      for (let i = 0; i < pairs; i++) {
+        const hot = hotSet[i % hotSet.length];
+        const churn = churnSet[i % churnSet.length];
+        if (hot !== undefined) {
+          const result = await request(`${base}/t/${hot}/sign-in-experience`);
+          latencies.push(result.ms);
+          if (result.status !== 200) {
+            errors += 1;
+            if (firstError === "") firstError = `${hot} answered ${result.status}`;
+          }
+        }
+        if (churn !== undefined) {
+          const result = await request(`${base}/t/${churn}/sign-in-experience`);
+          if (result.status !== 200) {
+            errors += 1;
+            if (firstError === "") firstError = `${churn} answered ${result.status}`;
+          }
+        }
+      }
+      mixedRun = {
+        latency: summarise(latencies),
+        errors,
+        first_error: firstError,
+      };
+      mixedPool = poolDelta(mixedBefore, poolCounters(await scrapeMetrics(base)));
+    }
+    const connectionsAfterMixed = await connectionCount(control);
     const seconds = (performance.now() - phaseStart) / 1_000;
 
-    const connections = (await raw(
-      control,
-      "SELECT count(*)::bigint AS count FROM pg_stat_activity WHERE datname LIKE 'mt_%'",
-    )) as { count: string }[];
+    const all =
+      stats.available && stats.sql !== undefined ? await statements(stats.sql) : [];
+    const activeListQueries = all
+      .filter((row) => {
+        if (row.query.includes("tenant_email_connectors")) return true;
+        const trimmed = row.query.trimStart();
+        return (
+          !trimmed.startsWith("UPDATE") &&
+          row.query.includes("FROM tenants") &&
+          row.query.includes("state =")
+        );
+      })
+      .reduce((sum, row) => sum + row.calls, 0);
+    const connectorQueries = all
+      .filter((row) => row.query.includes("tenant.email_connector"))
+      .reduce((sum, row) => sum + row.calls, 0);
+    const indexQueries = all
+      .filter((row) => row.query.includes("tenant_email_connectors"))
+      .reduce((sum, row) => sum + row.calls, 0);
 
-    await setTenantState(control, subset, "provisioning");
     return {
       tenants: subset.length,
       seconds: Math.round(seconds * 1_000) / 1_000,
-      cold: summarise(coldRun.latencies),
-      warm: summarise(warmRun.latencies),
-      cold_pool: poolDelta(before, poolCounters(afterCold), coldRun.latencies.length, warmRun.latencies.length),
-      warm_pool: poolDelta(
-        poolCounters(afterCold),
-        poolCounters(afterWarm),
-        coldRun.latencies.length,
-        warmRun.latencies.length,
-      ),
-      errors: coldRun.errors + warmRun.errors,
-      first_error: coldRun.first_error || warmRun.first_error,
-      connections: Number(connections[0]?.count ?? 0),
+      activation_seconds: Math.round(activationSeconds * 1_000) / 1_000,
+      activation_base_connections: baseConnections,
+      activation_peak_connections: peakConnections,
+      cold: {
+        latency: summarise(coldRun.latencies),
+        errors: coldRun.errors,
+        first_error: coldRun.first_error,
+      },
+      hot: hotRun,
+      mixed: mixedRun,
+      cold_pool: poolDelta(before, afterColdCounters),
+      hot_pool: hotPool,
+      mixed_pool: mixedPool,
+      connections_after_cold: connectionsAfterCold,
+      connections_after_hot: connectionsAfterHot,
+      connections_after_mixed: connectionsAfterMixed,
+      mailer_ticks: activeListQueries,
+      connector_queries: connectorQueries,
+      index_queries: indexQueries,
+      errors: coldRun.errors + hotRun.errors + mixedRun.errors,
+      first_error: coldRun.first_error || hotRun.first_error || mixedRun.first_error,
       mailer_tick_possible: seconds >= 4,
     };
   } finally {
-    await setTenantState(control, subset, "provisioning");
+    await restoreTenantStates(control, previous);
     await server.stop();
   }
 }
@@ -823,6 +1035,7 @@ async function main(): Promise<number> {
     const demoDb = controlRow[0]?.db_name;
     if (demoDb === undefined) throw new Error("bootstrap did not create the demo tenant");
 
+    if (!args.onlyPool) {
     const server = await startServer(bin, CONTROL_BASE, env);
     try {
       const version = await request(`${CONTROL_BASE}/version`);
@@ -980,26 +1193,31 @@ async function main(): Promise<number> {
     } finally {
       await server.stop();
     }
+    }
 
+    const allSlugs = [...extras, "system", "demo"];
     if (args.pool) {
       for (const size of args.profile.poolSizes) {
-        if (size > extras.length) continue;
-        pool.push(await poolPhase(bin, env, CONTROL_BASE, control, extras, size));
+        if (size > allSlugs.length) continue;
+        pool.push(
+          await poolPhase(bin, env, CONTROL_BASE, control, allSlugs, size, stats),
+        );
       }
-      process.stdout.write("\ntenant pool (cold then warm, one request per tenant)\n");
       process.stdout.write(
-        "  tenants  seconds  cold-p50  cold-p99  warm-p50  warm-p99  hits   misses hit-rate connect-avg  connections\n",
+        "\ntenant pool (cold sweep, hot set, then hot/cold churn)\n" +
+          "  tenants  sec   act-conn base→peak  coldP50/P99   hotP50/P99   hot-hit  mixedP50  mixed-hit  conns c/h/m   ticks  cred-q\n",
       );
       for (const phase of pool) {
         process.stdout.write(
-          `  ${String(phase.tenants).padStart(7)} ${phase.seconds.toFixed(2).padStart(8)} ` +
-            `${phase.cold.p50_ms.toFixed(2).padStart(9)} ${phase.cold.p99_ms.toFixed(2).padStart(9)} ` +
-            `${phase.warm.p50_ms.toFixed(2).padStart(9)} ${phase.warm.p99_ms.toFixed(2).padStart(9)} ` +
-            `${String(phase.cold_pool.misses + phase.warm_pool.misses).padStart(6)} ` +
-            `${String(phase.warm_pool.hits).padStart(7)} ` +
-            `${(phase.warm_pool.hit_rate * 100).toFixed(1).padStart(7)}% ` +
-            `${phase.warm_pool.connect_avg_ms.toFixed(3).padStart(10)}ms ` +
-            `${String(phase.connections).padStart(10)}\n`,
+          `  ${String(phase.tenants).padStart(7)} ${phase.seconds.toFixed(1).padStart(5)} ` +
+            `${String(phase.activation_base_connections).padStart(8)}→${String(phase.activation_peak_connections).padStart(3)} ` +
+            `${phase.cold.latency.p50_ms.toFixed(1).padStart(8)}/${phase.cold.latency.p99_ms.toFixed(1).padStart(7)} ` +
+            `${phase.hot.latency.p50_ms.toFixed(1).padStart(8)}/${phase.hot.latency.p99_ms.toFixed(1).padStart(7)} ` +
+            `${(phase.hot_pool.hit_rate * 100).toFixed(1).padStart(6)}% ` +
+            `${phase.mixed.latency.p50_ms.toFixed(1).padStart(9)} ` +
+            `${(phase.mixed_pool.hit_rate * 100).toFixed(1).padStart(8)}% ` +
+            `${String(phase.connections_after_cold).padStart(3)}/${String(phase.connections_after_hot).padStart(3)}/${String(phase.connections_after_mixed).padStart(3)} ` +
+            `${String(phase.mailer_ticks).padStart(7)} ${String(phase.connector_queries).padStart(7)}\n`,
         );
       }
     }

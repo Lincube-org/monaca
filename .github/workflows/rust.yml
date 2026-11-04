@@ -674,6 +674,20 @@ jobs:
           MONACA_BENCH_PG_URL: postgres://postgres:postgres@127.0.0.1:5440/postgres
         run: bun run bench --profile smoke --out .monaca/reports/bench-smoke.json
 
+      # Non-blocking: the committed smoke report is the reference, and a 20 % threshold absorbs
+      # runner noise in 100-iteration samples. The comparison is archived and summarized, but it
+      # never turns the build red.
+      - name: Compare with the committed smoke baseline
+        continue-on-error: true
+        run: |
+          bun run bench:compare \
+            --baseline docs/bench/results/smoke-ci-41820073251.json \
+            --candidate .monaca/reports/bench-smoke.json \
+            --threshold 20 --warn-only \
+            --out .monaca/reports/bench-comparison.json \
+            | tee .monaca/reports/bench-comparison.txt
+          cat .monaca/reports/bench-comparison.txt >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stop the benchmark PostgreSQL
         if: always()
         run: docker rm -f monaca-bench-pg || true
@@ -683,6 +697,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-report
-          path: .monaca/reports/bench-smoke.json
+          path: |
+            .monaca/reports/bench-smoke.json
+            .monaca/reports/bench-comparison.json
+            .monaca/reports/bench-comparison.txt
           if-no-files-found: warn
           retention-days: 30

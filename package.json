@@ -19,6 +19,7 @@
     "verify:ci": "bun scripts/verify-ci.ts",
     "e2e:skeleton": "bun scripts/e2e/skeleton.ts",
     "bench": "bun scripts/bench/run.ts",
+    "bench:compare": "bun scripts/bench/compare.ts",
     "typecheck": "bun run --filter '*' typecheck && tsc -p scripts/tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "build": "bun run --filter '!@monaca/core' build"

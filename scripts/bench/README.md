@@ -8,6 +8,7 @@ Repeatable latency/throughput baseline for the M0 request paths, and the source 
 ```bash
 bun run bench --profile smoke     # 10 tenants, 50 accounts, 10 clients, 100 iterations
 bun run bench --profile full      # 200 tenants, 200 accounts, 20 clients, 1000 iterations
+bun run bench --profile scale --only-pool   # 400 tenant DBs; pool curve at 50/100/200/400
 ```
 
 Both profiles create their fixtures from an empty database; nothing is reused from `bun run dev` or
@@ -17,8 +18,25 @@ measure database count, not per-tenant account volume. The report is
 `.monaca/reports/bench-<profile>.json`; pass
 `--archive docs/bench/results/<name>.json` to keep a copy in the repository.
 
-`--no-app-role` and `--no-pool` skip the app-pool comparison and tenant-pool phases. They exist for
-debugging one section, not for producing comparable numbers.
+`--no-app-role` and `--no-pool` skip the app-pool comparison and tenant-pool phases. `--only-pool`
+skips the request paths, ramp and app-pool passes; the `scale` profile uses it because the curve
+only needs the tenant fixtures. They exist for debugging one section, not for producing comparable
+numbers.
+
+## Compare two runs
+
+```bash
+bun run bench:compare --baseline docs/bench/results/old.json \
+  --candidate .monaca/reports/bench-full.json --threshold 15
+```
+
+The comparison covers scenario P50/P95/P99, throughput, error rate and queries per request, the
+rate-limit ramp, tenant-pool cold/hot/mixed latency, hit rates, activation connections and mailer
+queries, and the app-pool deltas. It prints a table and writes JSON; the exit code is 1 when a
+metric moves in the bad direction by more than the threshold. `--warn-only` always exits 0, which is
+what the CI `bench` job uses: the comparison is archived and summarized but never blocks a build.
+The committed smoke report is the CI baseline; it was produced before the capacity fixes, so a
+comparison against it also shows improvements.
 
 ## Where it runs
 
@@ -50,17 +68,22 @@ phase can finish; the `connections` column still shows how many the fixture actu
 | `management-revoked` | the same request with a token whose `jti` was revoked; expects `401` |
 | `flow` | authorize → interaction sign-in → authorization-code exchange as one operation |
 | `rate_limit_ramp` | `GET /v1/accounts?limit=1` at concurrency 1/4/16/64 against one tenant counter row |
-| `tenant_pool` | one public `sign-in-experience` request per tenant, cold then warm, at 50 and 198 tenants |
+| `tenant_pool` | a cold sweep, a 50-tenant hot set, and hot/cold churn at 50/100/200/400 tenants |
 | `app_role` | control pass, `monaca_app` pass, control pass again; the same four scenarios |
 
 Every scenario reports P50/P95/P99, throughput, error rate, and (when `pg_stat_statements` is
-available) queries per request with the statements grouped by pattern. The mailer's `active_tenants`
-and `email_connector` statements are excluded from the per-request count; they are background work,
+available) queries per request with the statements grouped by pattern. The mailer's tenant-list and
+`email_connector` statements are excluded from the per-request count; they are background work,
 not request work.
 
 The tenant-pool phase keeps the extra tenants `provisioning` until the phase starts, waits for the
-mailer's first tick, activates only the subset being probed, and deactivates it immediately after.
-The phase duration is recorded; if it reaches 4 s a mailer tick could have overlapped.
+mailer's first tick, activates the subset being probed, and restores every tenant's previous state
+afterwards. It samples `pg_stat_activity` for 6 s after activation (one mailer cycle) and records
+the base and peak connection count; then it runs the cold sweep, a hot set (the first 50 tenants,
+warmed then measured), and a mixed pass that alternates a hot tenant with a tenant from the cold
+remainder. The hot and mixed hit rates are the cache-retention signals; the mixed pass is where an
+arbitrary eviction policy loses the working set. `mailer_ticks`, `connector_queries` and
+`index_queries` count the poller's statements during the phase.
 
 ## Reading the report
 
@@ -68,9 +91,10 @@ The phase duration is recorded; if it reaches 4 s a mailer tick could have overl
 - `scenarios[].db.named` is what to follow for an optimization: `revocation_lookup`,
   `rate_limit_counter`, `interaction_state`, `tenant_lookup`, `signing_keys`, `account_lookup`.
 - `rate_limit_ramp` is the shared-counter knee: compare P99 and throughput as concurrency rises.
-- `tenant_pool[].warm_pool.hit_rate` and `connect_avg_ms` come from the
-  `monaca_tenant_pool_*` series on `/metrics`; `connections` is `pg_stat_activity` after the cold
-  pass.
+- `tenant_pool[].cold/hot/mixed` are the latency summaries; `hot_pool.hit_rate` and
+  `mixed_pool.hit_rate` come from the `monaca_tenant_pool_*` series on `/metrics`.
+  `activation_base_connections`/`activation_peak_connections` and the three
+  `connections_after_*` values are `pg_stat_activity` samples.
 - `app_role.comparison` is the app-pool delta against the mean of the two control passes.
 
 No latency threshold is asserted: results depend on the machine. The script exits non-zero only when

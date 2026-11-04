@@ -474,20 +474,15 @@ export async function scrapeMetrics(base: string): Promise<string> {
   return result.body;
 }
 
-export function poolDelta(
-  before: PoolCounters,
-  after: PoolCounters,
-  cold: number,
-  warm: number,
-): {
-  hits: number;
-  misses: number;
-  hit_rate: number;
-  lookup_avg_ms: number;
-  connect_avg_ms: number;
-  cold_requests: number;
-  warm_requests: number;
-} {
+export interface PoolDelta {
+  readonly hits: number;
+  readonly misses: number;
+  readonly hit_rate: number;
+  readonly lookup_avg_ms: number;
+  readonly connect_avg_ms: number;
+}
+
+export function poolDelta(before: PoolCounters, after: PoolCounters): PoolDelta {
   const hits = after.hits - before.hits;
   const misses = after.misses - before.misses;
   const lookups = hits + misses;
@@ -499,8 +494,6 @@ export function poolDelta(
     hit_rate: lookups === 0 ? 0 : round(hits / lookups),
     lookup_avg_ms: lookups === 0 ? 0 : round(lookupMs / lookups),
     connect_avg_ms: misses === 0 ? 0 : round(connectMs / misses),
-    cold_requests: cold,
-    warm_requests: warm,
   };
 }
 
