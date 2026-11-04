@@ -6,9 +6,66 @@
  * account centre is a browser navigation, so the page only needs the URL, not a JSON call.
  */
 
+import { InteractionError, type SignInResult } from "./interaction";
+
 export interface SocialConnector {
   connector_id: string;
   display_name: string;
+  /** `generic` | `github` | `google`; the page uses it only for presentation. */
+  provider?: "generic" | "github" | "google";
+}
+
+/** A pending "this provider identity wants to link to the account that owns the email" prompt. */
+export interface SocialLinkDetails {
+  connector_id: string;
+  display_name: string;
+  provider: "generic" | "github" | "google";
+  email: string;
+  expires_at: string;
+}
+
+/** Ask the server what a `social_link` token is about before showing the prompt. */
+export async function getSocialLink(
+  tenant: string,
+  token: string,
+): Promise<SocialLinkDetails> {
+  const response = await fetch(
+    `/t/${encodeURIComponent(tenant)}/social/link/${encodeURIComponent(token)}`,
+    { credentials: "same-origin", headers: { Accept: "application/json" } },
+  );
+  if (!response.ok) {
+    throw new InteractionError("MONACA_INVALID_REQUEST", "the link confirmation is no longer usable", {
+      status: response.status,
+    });
+  }
+  return (await response.json()) as SocialLinkDetails;
+}
+
+/** Confirm the link; the server answers with the same result shape a password sign-in uses. */
+export async function confirmSocialLink(
+  tenant: string,
+  token: string,
+): Promise<SignInResult> {
+  const response = await fetch(
+    `/t/${encodeURIComponent(tenant)}/social/link/${encodeURIComponent(token)}/confirm`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    },
+  );
+  const body = (await response.json().catch(() => null)) as
+    | (SignInResult & { monaca_error_code?: string })
+    | null;
+  if (!response.ok) {
+    throw new InteractionError("MONACA_INVALID_REQUEST", "the link could not be confirmed", {
+      status: response.status,
+      problem: {
+        title: body?.monaca_error_code ?? "MONACA_INVALID_REQUEST",
+      },
+    });
+  }
+  return body as SignInResult;
 }
 
 export async function listSocialConnectors(

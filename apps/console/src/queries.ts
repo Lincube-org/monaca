@@ -28,6 +28,7 @@ import type {
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
+  UpdateConnectorRequest,
   CreateTenantRoleRequest,
   CreateWebhookRequest,
   CreatedClient,
@@ -495,6 +496,17 @@ export function useCreateConnector() {
   const client = useQueryClient();
   return useMutation<Connector, Error, CreateConnectorRequest>({
     mutationFn: (body) => api.createConnector(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.connectors() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUpdateConnector() {
+  const client = useQueryClient();
+  return useMutation<Connector, Error, { connectorId: string; body: UpdateConnectorRequest }>({
+    mutationFn: ({ connectorId, body }) => api.updateConnector(connectorId, body),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.connectors() });
       invalidateTenantAudit(client);

@@ -390,7 +390,10 @@ export function seedConnectors(): Connector[] {
   return [
     {
       connector_id: "github",
+      provider: "github",
       display_name: "GitHub",
+      enabled: true,
+      link_policy: "auto_link_verified_email",
       authorize_url: "https://github.com/login/oauth/authorize",
       token_url: "https://github.com/login/oauth/access_token",
       userinfo_url: "https://api.github.com/user",
@@ -400,7 +403,10 @@ export function seedConnectors(): Connector[] {
     },
     {
       connector_id: "google",
+      provider: "google",
       display_name: "Google",
+      enabled: true,
+      link_policy: "auto_link_verified_email",
       authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
       token_url: "https://oauth2.googleapis.com/token",
       userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo",

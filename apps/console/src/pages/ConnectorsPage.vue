@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Button,
+  Checkbox,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -9,7 +10,7 @@ import {
   DialogTitle,
   Input,
   Label,
-  ScopeBadge,
+  NativeSelect,
   Table,
   TableBody,
   TableCell,
@@ -26,7 +27,12 @@ import type { Connector } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
-import { useConnectors, useCreateConnector, useDeleteConnector } from "@/queries";
+import {
+  useConnectors,
+  useCreateConnector,
+  useDeleteConnector,
+  useUpdateConnector,
+} from "@/queries";
 import { useUiStore } from "@/stores/ui";
 
 /**
@@ -40,6 +46,7 @@ const ui = useUiStore();
 
 const connectors = useConnectors();
 const createConnector = useCreateConnector();
+const updateConnector = useUpdateConnector();
 const deleteConnector = useDeleteConnector();
 
 const rows = computed(() => connectors.data.value?.items ?? []);
@@ -48,6 +55,10 @@ const rows = computed(() => connectors.data.value?.items ?? []);
 
 const createOpen = ref(false);
 const connectorId = ref("");
+const provider = ref<"generic" | "github" | "google">("github");
+const linkPolicy = ref<"auto_link_verified_email" | "confirm_link" | "create_new_only">(
+  "confirm_link",
+);
 const displayName = ref("");
 const authorizeUrl = ref("");
 const tokenUrl = ref("");
@@ -57,10 +68,40 @@ const clientSecret = ref("");
 const scopesText = ref("");
 const formError = ref<string | null>(null);
 
+/** The endpoints and scopes the server owns for a built-in provider. */
+const PROVIDER_PRESETS = {
+  github: {
+    authorize_url: "https://github.com/login/oauth/authorize",
+    token_url: "https://github.com/login/oauth/access_token",
+    userinfo_url: "https://api.github.com/user",
+    scopes: "read:user user:email",
+  },
+  google: {
+    authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+    token_url: "https://oauth2.googleapis.com/token",
+    userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo",
+    scopes: "openid email profile",
+  },
+} as const;
+
+const builtIn = computed(() => provider.value !== "generic");
+
+function applyPreset(): void {
+  if (provider.value === "generic") return;
+  const preset = PROVIDER_PRESETS[provider.value];
+  authorizeUrl.value = preset.authorize_url;
+  tokenUrl.value = preset.token_url;
+  userinfoUrl.value = preset.userinfo_url;
+  scopesText.value = preset.scopes;
+}
+
+watch(provider, applyPreset);
+
 const connectorIdLooksValid = computed(() => /^[a-z0-9][a-z0-9-]{1,31}$/.test(connectorId.value.trim().toLowerCase()));
 
 const urlsLookValid = computed(
   () =>
+    builtIn.value ||
     [authorizeUrl.value, tokenUrl.value, userinfoUrl.value].every((url) =>
       /^https?:\/\/[^\s]+$/.test(url.trim()),
     ),
@@ -78,12 +119,25 @@ function splitScopes(text: string): string[] {
 }
 
 watch(
-  [connectorId, displayName, authorizeUrl, tokenUrl, userinfoUrl, clientId, clientSecret, scopesText],
+  [
+    connectorId,
+    provider,
+    linkPolicy,
+    displayName,
+    authorizeUrl,
+    tokenUrl,
+    userinfoUrl,
+    clientId,
+    clientSecret,
+    scopesText,
+  ],
   () => (formError.value = null),
 );
 
 function openCreate(): void {
   connectorId.value = "";
+  provider.value = "github";
+  linkPolicy.value = "confirm_link";
   displayName.value = "";
   authorizeUrl.value = "";
   tokenUrl.value = "";
@@ -92,6 +146,7 @@ function openCreate(): void {
   clientSecret.value = "";
   scopesText.value = "";
   formError.value = null;
+  applyPreset();
   createOpen.value = true;
 }
 
@@ -121,7 +176,10 @@ async function submit(): Promise<void> {
   try {
     const created = await createConnector.mutateAsync({
       connector_id: connectorId.value.trim().toLowerCase(),
+      provider: provider.value,
       display_name: displayName.value.trim(),
+      link_policy: linkPolicy.value,
+      enabled: true,
       authorize_url: authorizeUrl.value.trim(),
       token_url: tokenUrl.value.trim(),
       userinfo_url: userinfoUrl.value.trim(),
@@ -169,6 +227,37 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
+async function setPolicy(connector: Connector, value: string): Promise<void> {
+  const policy = value as Connector["link_policy"];
+  try {
+    await updateConnector.mutateAsync({
+      connectorId: connector.connector_id,
+      body: { link_policy: policy },
+    });
+  } catch (error) {
+    toast({
+      title: t("connectors.updateFailed"),
+      description: describeError(error).title,
+      variant: "error",
+    });
+  }
+}
+
+async function setEnabled(connector: Connector, value: boolean | "indeterminate"): Promise<void> {
+  try {
+    await updateConnector.mutateAsync({
+      connectorId: connector.connector_id,
+      body: { enabled: value === true },
+    });
+  } catch (error) {
+    toast({
+      title: t("connectors.updateFailed"),
+      description: describeError(error).title,
+      variant: "error",
+    });
+  }
+}
+
 function formatDate(at: string): string {
   const parsed = new Date(at);
   return Number.isNaN(parsed.getTime()) ? at : parsed.toISOString().slice(0, 10);
@@ -213,8 +302,9 @@ function formatDate(at: string): string {
         <TableHeader>
           <TableRow class="hover:bg-transparent">
             <TableHead>{{ t('connectors.name') }}</TableHead>
-            <TableHead>{{ t('connectors.authorizeUrl') }}</TableHead>
-            <TableHead>{{ t('connectors.scopes') }}</TableHead>
+            <TableHead>{{ t('connectors.providerField') }}</TableHead>
+            <TableHead>{{ t('connectors.linkPolicyField') }}</TableHead>
+            <TableHead>{{ t('connectors.enabledField') }}</TableHead>
             <TableHead>{{ t('connectors.created') }}</TableHead>
             <TableHead class="w-[1%]" />
           </TableRow>
@@ -227,16 +317,27 @@ function formatDate(at: string): string {
                 {{ connector.connector_id }}
               </span>
             </TableCell>
-            <TableCell class="max-w-[260px]">
-              <span class="mono-data block truncate text-[11.5px] text-ink-muted">
-                {{ connector.authorize_url }}
-              </span>
+            <TableCell class="text-[11.5px] text-ink-muted">
+              {{ t(`connectors.provider_${connector.provider}`) }}
             </TableCell>
-            <TableCell class="max-w-[180px]">
-              <span v-if="connector.scopes.length > 0" class="flex flex-wrap gap-1">
-                <ScopeBadge v-for="scope in connector.scopes" :key="scope" :scope="scope" />
-              </span>
-              <span v-else class="text-[11.5px] text-ink-faint">{{ t('connectors.noScopes') }}</span>
+            <TableCell>
+              <NativeSelect
+                :model-value="connector.link_policy"
+                :disabled="updateConnector.isPending.value"
+                @update:model-value="(value: string) => setPolicy(connector, value)"
+              >
+                <option value="auto_link_verified_email">{{ t('connectors.linkPolicyAuto') }}</option>
+                <option value="confirm_link">{{ t('connectors.linkPolicyConfirm') }}</option>
+                <option value="create_new_only">{{ t('connectors.linkPolicyCreate') }}</option>
+              </NativeSelect>
+            </TableCell>
+            <TableCell>
+              <Checkbox
+                :model-value="connector.enabled"
+                :disabled="updateConnector.isPending.value"
+                :aria-label="t('connectors.enabledField')"
+                @update:model-value="(value: boolean | 'indeterminate') => setEnabled(connector, value)"
+              />
             </TableCell>
             <TableCell class="mono-data whitespace-nowrap text-[11.5px] text-ink-faint">
               {{ formatDate(connector.created_at) }}
@@ -294,7 +395,33 @@ function formatDate(at: string): string {
             {{ connectorId.length > 0 && !connectorIdLooksValid ? t('connectors.invalidConnectorId') : t('connectors.connectorIdHint') }}
           </p>
 
-          <div class="flex flex-col gap-1.5">
+          <div class="grid grid-cols-2 gap-3">
+            <div class="flex flex-col gap-1.5">
+              <Label for="connector-provider">{{ t('connectors.providerField') }}</Label>
+              <NativeSelect id="connector-provider" v-model="provider">
+                <option value="github">{{ t('connectors.provider_github') }}</option>
+                <option value="google">{{ t('connectors.provider_google') }}</option>
+                <option value="generic">{{ t('connectors.provider_generic') }}</option>
+              </NativeSelect>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="connector-policy">{{ t('connectors.linkPolicyField') }}</Label>
+              <NativeSelect id="connector-policy" v-model="linkPolicy">
+                <option value="auto_link_verified_email">{{ t('connectors.linkPolicyAuto') }}</option>
+                <option value="confirm_link">{{ t('connectors.linkPolicyConfirm') }}</option>
+                <option value="create_new_only">{{ t('connectors.linkPolicyCreate') }}</option>
+              </NativeSelect>
+            </div>
+          </div>
+          <p class="-mt-1.5 text-[11.5px] leading-snug text-ink-faint">
+            {{ t('connectors.linkPolicyHint') }}
+          </p>
+
+          <p v-if="builtIn" class="text-[11.5px] leading-snug text-ink-faint">
+            {{ t('connectors.providerPresetHint') }}
+          </p>
+
+          <div v-if="!builtIn" class="flex flex-col gap-1.5">
             <Label for="connector-authorize">{{ t('connectors.authorizeUrlField') }}</Label>
             <Input
               id="connector-authorize"
@@ -308,7 +435,7 @@ function formatDate(at: string): string {
             <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('connectors.authorizeUrlHint') }}</p>
           </div>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="!builtIn" class="flex flex-col gap-1.5">
             <Label for="connector-token">{{ t('connectors.tokenUrlField') }}</Label>
             <Input
               id="connector-token"
@@ -322,7 +449,7 @@ function formatDate(at: string): string {
             <p class="text-[11.5px] leading-snug text-ink-faint">{{ t('connectors.tokenUrlHint') }}</p>
           </div>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="!builtIn" class="flex flex-col gap-1.5">
             <Label for="connector-userinfo">{{ t('connectors.userinfoUrlField') }}</Label>
             <Input
               id="connector-userinfo"
@@ -361,7 +488,7 @@ function formatDate(at: string): string {
           </div>
           <p class="-mt-1.5 text-[11.5px] leading-snug text-ink-faint">{{ t('connectors.clientSecretHint') }}</p>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="!builtIn" class="flex flex-col gap-1.5">
             <Label for="connector-scopes">{{ t('connectors.scopesField') }}</Label>
             <Input
               id="connector-scopes"

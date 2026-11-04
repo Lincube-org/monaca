@@ -223,9 +223,20 @@ export interface ApiResource {
  * The client secret is sealed at rest and never part of this object; the endpoints and the client
  * id are what the sign-in flow needs, and the sign-in page shows only the id and the display name.
  */
+export type SocialProvider = "generic" | "github" | "google";
+
+/** How a verified provider email may attach to an existing Monaca account. */
+export type SocialLinkPolicy =
+  | "auto_link_verified_email"
+  | "confirm_link"
+  | "create_new_only";
+
 export interface Connector {
   connector_id: string;
+  provider: SocialProvider;
   display_name: string;
+  enabled: boolean;
+  link_policy: SocialLinkPolicy;
   authorize_url: string;
   token_url: string;
   userinfo_url: string;
@@ -673,13 +684,26 @@ export interface UpdateWebhookRequest {
 
 export interface CreateConnectorRequest {
   connector_id: string;
+  provider?: SocialProvider;
   display_name: string;
+  link_policy?: SocialLinkPolicy;
+  enabled?: boolean;
   authorize_url: string;
   token_url: string;
   userinfo_url: string;
   client_id: string;
   client_secret: string;
   scopes: string[];
+}
+
+/** The writable half of a connector; the endpoints stay as they were created. */
+export interface UpdateConnectorRequest {
+  display_name?: string;
+  client_id?: string;
+  client_secret?: string;
+  scopes?: string[];
+  enabled?: boolean;
+  link_policy?: SocialLinkPolicy;
 }
 
 export interface ListAccountsQuery {

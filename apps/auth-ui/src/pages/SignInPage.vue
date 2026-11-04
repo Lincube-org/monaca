@@ -46,9 +46,12 @@ import {
 import { PasskeyError, getPasskeyAssertion, passkeysSupported } from "@/api/webauthn";
 import CaptchaField from "@/components/CaptchaField.vue";
 import {
+  confirmSocialLink,
+  getSocialLink,
   listSocialConnectors,
   socialSignInUrl,
   type SocialConnector,
+  type SocialLinkDetails,
 } from "@/api/social";
 import { findSsoConnector, ssoSignInUrl, type SsoConnector } from "@/api/sso";
 import { applyPhraseOverrides, t } from "@/i18n";
@@ -87,7 +90,13 @@ const cancelling = ref(false);
 const fieldError = ref<MessageKey | null>(null);
 const submitError = ref<InteractionError | null>(null);
 
-/** Set once sign-in succeeds for a flow that still needs approval. */
+/** A social callback that found an existing account with the provider's email. */
+const socialLinkToken = ref<string | null>(null);
+const socialLink = ref<SocialLinkDetails | null>(null);
+const socialLinkLoading = ref(false);
+const socialLinkSubmitting = ref(false);
+const socialLinkError = ref<Error | null>(null);
+
 const consentRequired = ref(false);
 const consentRemember = ref(true);
 const consentSubmitting = ref(false);
@@ -399,6 +408,7 @@ function validAvatarUrl(value: string): boolean {
 }
 
 const pageTitle = computed<MessageKey>(() => {
+  if (socialLink.value) return "link.title";
   if (consentRequired.value) return "consent.title";
   if (mfaEnrollmentRequired.value) return "mfaEnroll.title";
   if (mfaRequired.value) return "mfa.title";
@@ -613,6 +623,11 @@ onMounted(async () => {
     if (details.value.signed_in && details.value.consent_required) {
       consentRequired.value = true;
     }
+    // A confirm-link callback parks here until the visitor accepts the association.
+    socialLinkToken.value = params.get("social_link");
+    if (socialLinkToken.value && tenantFromUrl.value) {
+      void loadSocialLink();
+    }
     // A page reload after the password was accepted must resume the second-factor step rather than
     // ask for the password again (§6.1 `mfa`).
     if (details.value.mfa_required) {
@@ -768,6 +783,34 @@ function changeEmail(): void {
   submitError.value = null;
   resetCaptcha();
   void nextTick(() => emailInput.value?.$el?.focus?.());
+}
+
+/** Ask the server what the confirm-link token is about. */
+async function loadSocialLink(): Promise<void> {
+  if (!tenantFromUrl.value || !socialLinkToken.value) return;
+  socialLinkLoading.value = true;
+  socialLinkError.value = null;
+  try {
+    socialLink.value = await getSocialLink(tenantFromUrl.value, socialLinkToken.value);
+  } catch (error) {
+    socialLinkError.value = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    socialLinkLoading.value = false;
+  }
+}
+
+/** Link the provider identity to the existing account and continue the original flow. */
+async function confirmLink(): Promise<void> {
+  if (!tenantFromUrl.value || !socialLinkToken.value) return;
+  socialLinkSubmitting.value = true;
+  socialLinkError.value = null;
+  try {
+    await handleResult(await confirmSocialLink(tenantFromUrl.value, socialLinkToken.value));
+  } catch (error) {
+    socialLinkError.value = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    socialLinkSubmitting.value = false;
+  }
 }
 
 /** Re-read the interaction after authentication; the scope list now reflects the account. */
@@ -1311,9 +1354,14 @@ async function cancel(): Promise<void> {
             </h1>
             <p class="mt-1 text-[12.5px] leading-snug text-ink-muted">
               {{
-                details
-                  ? t(consentRequired ? "consent.request" : modeNote, { client: details.client.name })
-                  : t(mfaRequired ? "mfa.noteFallback" : "signIn.requestFallback")
+                socialLink
+                  ? t("link.note", {
+                      provider: socialLink.display_name,
+                      email: socialLink.email,
+                    })
+                  : details
+                    ? t(consentRequired ? "consent.request" : modeNote, { client: details.client.name })
+                    : t(mfaRequired ? "mfa.noteFallback" : "signIn.requestFallback")
               }}
             </p>
           </div>
@@ -1341,8 +1389,46 @@ async function cancel(): Promise<void> {
             </div>
           </dl>
 
+          <!-- Confirm link: a verified provider email already belongs to an account here. -->
+          <div
+            v-if="socialLinkLoading || socialLink || socialLinkError"
+            class="flex flex-col gap-2"
+          >
+            <span
+              v-if="socialLinkLoading"
+              class="flex items-center gap-1.5 text-[12.5px] text-ink-muted"
+            >
+              <Loader2 class="size-3.5 animate-spin" aria-hidden="true" />
+              {{ t("link.confirming") }}
+            </span>
+            <template v-else-if="socialLink">
+              <Button
+                type="button"
+                variant="primary"
+                block
+                :disabled="socialLinkSubmitting"
+                :aria-busy="socialLinkSubmitting"
+                @click="confirmLink"
+              >
+                <Loader2 v-if="socialLinkSubmitting" class="animate-spin" />
+                <ShieldCheck v-else />
+                {{ socialLinkSubmitting ? t("link.confirming") : t("link.confirm") }}
+              </Button>
+              <Button type="button" variant="ghost" block :disabled="socialLinkSubmitting" @click="cancel">
+                <ArrowLeft />
+                {{ t("link.cancel") }}
+              </Button>
+            </template>
+            <p v-else role="alert" class="text-[12.5px] leading-snug text-deny">
+              {{ t("link.expired") }}
+            </p>
+            <p v-if="socialLinkError" role="alert" class="text-[12.5px] leading-snug text-deny">
+              {{ t("link.failed") }}
+            </p>
+          </div>
+
           <!-- Consent: signed in, but the code is withheld until the scopes are approved. -->
-          <div v-if="consentRequired" class="flex flex-col gap-2">
+          <div v-else-if="consentRequired" class="flex flex-col gap-2">
             <p class="text-[12.5px] leading-snug text-ink-muted">{{ t("consent.note") }}</p>
             <label class="flex items-start gap-2.5">
               <Checkbox

@@ -59,6 +59,7 @@ import type {
   CreateApiResourceRequest,
   CreateClientRequest,
   CreateConnectorRequest,
+  UpdateConnectorRequest,
   CreateGrantRequest,
   CreateOrganizationRequest,
   CreateOrgInvitationRequest,
@@ -1095,16 +1096,47 @@ class MockStore {
         code: "MONACA_INVALID_REQUEST",
       });
     }
-    for (const [field, url] of [
-      ["authorize_url", body.authorize_url.trim()],
-      ["token_url", body.token_url.trim()],
-      ["userinfo_url", body.userinfo_url.trim()],
-    ] as const) {
-      if (!/^https?:\/\/[^\s]+$/.test(url)) {
-        throw new ApiError(`${field} must be an absolute http(s) URL`, {
-          status: 400,
-          code: "MONACA_INVALID_REQUEST",
-        });
+    const provider = body.provider ?? "generic";
+    if (!["generic", "github", "google"].includes(provider)) {
+      throw new ApiError("provider must be generic, github or google", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const linkPolicy = body.link_policy ?? "confirm_link";
+    if (!["auto_link_verified_email", "confirm_link", "create_new_only"].includes(linkPolicy)) {
+      throw new ApiError(
+        "link_policy must be auto_link_verified_email, confirm_link or create_new_only",
+        { status: 400, code: "MONACA_INVALID_REQUEST" },
+      );
+    }
+    const preset = provider === "github"
+      ? {
+          authorize_url: "https://github.com/login/oauth/authorize",
+          token_url: "https://github.com/login/oauth/access_token",
+          userinfo_url: "https://api.github.com/user",
+          scopes: ["read:user", "user:email"],
+        }
+      : provider === "google"
+        ? {
+            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+            token_url: "https://oauth2.googleapis.com/token",
+            userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo",
+            scopes: ["openid", "email", "profile"],
+          }
+        : null;
+    if (preset === null) {
+      for (const [field, url] of [
+        ["authorize_url", body.authorize_url.trim()],
+        ["token_url", body.token_url.trim()],
+        ["userinfo_url", body.userinfo_url.trim()],
+      ] as const) {
+        if (!/^https?:\/\/[^\s]+$/.test(url)) {
+          throw new ApiError(`${field} must be an absolute http(s) URL`, {
+            status: 400,
+            code: "MONACA_INVALID_REQUEST",
+          });
+        }
       }
     }
     if (body.client_id.trim().length === 0 || body.client_secret.length === 0) {
@@ -1121,7 +1153,7 @@ class MockStore {
     }
 
     const scopes: string[] = [];
-    for (const scope of body.scopes) {
+    for (const scope of preset?.scopes ?? body.scopes) {
       const trimmed = scope.trim();
       if (trimmed.length === 0 || /\s/.test(trimmed)) {
         throw new ApiError("each scope must be a single non-empty token", {
@@ -1134,10 +1166,13 @@ class MockStore {
 
     const connector: Connector = {
       connector_id: connectorId,
+      provider,
       display_name: displayName,
-      authorize_url: body.authorize_url.trim(),
-      token_url: body.token_url.trim(),
-      userinfo_url: body.userinfo_url.trim(),
+      enabled: body.enabled ?? true,
+      link_policy: linkPolicy,
+      authorize_url: preset?.authorize_url ?? body.authorize_url.trim(),
+      token_url: preset?.token_url ?? body.token_url.trim(),
+      userinfo_url: preset?.userinfo_url ?? body.userinfo_url.trim(),
       client_id: body.client_id.trim(),
       scopes,
       created_at: new Date().toISOString(),
@@ -1150,9 +1185,81 @@ class MockStore {
       subjectType: "tenant",
       subjectId: TENANT,
       decision: "info",
-      payload: { connector_id: connector.connector_id },
+      payload: {
+        connector_id: connector.connector_id,
+        provider: connector.provider,
+        link_policy: connector.link_policy,
+      },
     });
     return cloneConnector(connector);
+  }
+
+  async updateConnector(
+    connectorId: string,
+    body: UpdateConnectorRequest,
+  ): Promise<Connector> {
+    const index = this.connectors.findIndex((connector) => connector.connector_id === connectorId);
+    const connector = this.connectors[index];
+    if (!connector) {
+      throw new ApiError("connector not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const displayName = body.display_name?.trim();
+    if (displayName !== undefined && displayName.length === 0) {
+      throw new ApiError("display_name must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (body.client_id !== undefined && body.client_id.trim().length === 0) {
+      throw new ApiError("client_id must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (body.client_secret !== undefined && body.client_secret.length === 0) {
+      throw new ApiError("client_secret must not be empty", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (connector.provider !== "generic" && body.scopes !== undefined) {
+      throw new ApiError("a built-in provider owns its scopes", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (
+      body.link_policy !== undefined &&
+      !["auto_link_verified_email", "confirm_link", "create_new_only"].includes(body.link_policy)
+    ) {
+      throw new ApiError(
+        "link_policy must be auto_link_verified_email, confirm_link or create_new_only",
+        { status: 400, code: "MONACA_INVALID_REQUEST" },
+      );
+    }
+    const updated: Connector = {
+      ...connector,
+      ...(displayName === undefined ? {} : { display_name: displayName }),
+      ...(body.client_id === undefined ? {} : { client_id: body.client_id.trim() }),
+      ...(body.scopes === undefined ? {} : { scopes: [...body.scopes] }),
+      ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+      ...(body.link_policy === undefined ? {} : { link_policy: body.link_policy }),
+    };
+    this.connectors = this.connectors.map((row, at) => (at === index ? updated : row));
+    await this.append({
+      action: "connector.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: {
+        connector_id: updated.connector_id,
+        provider: updated.provider,
+        enabled: updated.enabled,
+        link_policy: updated.link_policy,
+      },
+    });
+    return cloneConnector(updated);
   }
 
   async deleteConnector(connectorId: string): Promise<void> {
@@ -3171,6 +3278,10 @@ export const mockApi: MonacaApi = {
   async createConnector(body) {
     await delay();
     return store.createConnector(body);
+  },
+  async updateConnector(connectorId, body) {
+    await delay();
+    return store.updateConnector(connectorId, body);
   },
   async deleteConnector(connectorId) {
     await delay();

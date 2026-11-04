@@ -23,6 +23,7 @@ import type {
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
+  UpdateConnectorRequest,
   CreateTenantRoleRequest,
   CreateWebhookRequest,
   CreatedClient,
@@ -138,6 +139,7 @@ export interface MonacaApi {
   /** Social sign-in providers, tenant-level; deleting one also drops every identity it linked. */
   listConnectors(): Promise<Page<Connector>>;
   createConnector(body: CreateConnectorRequest): Promise<Connector>;
+  updateConnector(connectorId: string, body: UpdateConnectorRequest): Promise<Connector>;
   deleteConnector(connectorId: string): Promise<void>;
 
   /**

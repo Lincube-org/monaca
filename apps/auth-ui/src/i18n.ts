@@ -57,6 +57,16 @@ export const messages = {
     deny: "Deny",
     denySubmitting: "Denying",
   },
+  /** The confirm-link prompt a social callback may park on. */
+  link: {
+    title: "Link this provider account?",
+    note: "{provider} signed you in with {email}, which already belongs to an account here. Link this provider account and continue?",
+    confirm: "Link and continue",
+    confirming: "Linking",
+    cancel: "Cancel",
+    failed: "The link could not be completed. Try again.",
+    expired: "This link request is no longer usable. Start the sign-in again.",
+  },
   /** The way a visitor chooses between the four flows the page supports. */
   modes: {
     password: "Use a password",

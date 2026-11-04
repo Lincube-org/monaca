@@ -24,6 +24,7 @@ import type {
   CreateOrgInvitationRequest,
   CreateOrgRoleRequest,
   CreateSsoConnectorRequest,
+  UpdateConnectorRequest,
   CreateTenantRoleRequest,
   CreateWebhookRequest,
   CreatedClient,
@@ -273,6 +274,13 @@ export const httpApi: MonacaApi = {
 
   createConnector(body: CreateConnectorRequest): Promise<Connector> {
     return request<Connector>("/connectors", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  updateConnector(connectorId: string, body: UpdateConnectorRequest): Promise<Connector> {
+    return request<Connector>(`/connectors/${encodeURIComponent(connectorId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
   },
 
   deleteConnector(connectorId: string): Promise<void> {
