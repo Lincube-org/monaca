@@ -168,6 +168,21 @@ pub async fn authorize_admin(
     )
     .map_err(|err| ApiError::problem(kinds::UNAUTHORIZED, err.to_string()))?;
 
+    // An access token stays valid until its `exp`, so revocation only takes effect where a
+    // verifier consults `revoked_access_tokens`. `/oauth2/revoke` writes the `jti`; check it here
+    // for user and automation tokens alike (§6.2).
+    if let Some(jti) = claims
+        .get("jti")
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+        && state.store.access_token_revoked(&tenant, jti).await?
+    {
+        return Err(ApiError::problem(
+            kinds::UNAUTHORIZED,
+            "the token was revoked",
+        ));
+    }
+
     if claims.get("act").is_some() {
         return Err(ApiError::problem(
             kinds::INSUFFICIENT_SCOPE,

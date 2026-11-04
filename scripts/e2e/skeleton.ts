@@ -599,6 +599,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "502 MONACA_SOCIAL_PROVIDER_ERROR; disabling a connector removes it from the public list and makes its " +
       "authorize 404; social_sign_in.succeeded/failed and social_identity.linked are on the tenant audit chain",
   },
+  {
+    step: "60",
+    title: "revocation propagation",
+    assertion:
+      "two management tokens are minted for monaca-admin and both open /v1; POST /oauth2/revoke with " +
+      "token_type_hint=access_token returns 200 and records the jti, the revoked token is then 401 " +
+      "MONACA_UNAUTHORIZED on /v1 while the second token still answers 200, and revoking an unknown token " +
+      "is 200 without disclosing anything",
+  },
 ];
 
 interface StepResult {
@@ -6582,6 +6591,98 @@ async function socialProvidersFlow(
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: presets → state/PKCE/nonce → GitHub account reuse → auto-link → unverified refusal → confirm link → new-only policy → Google nonce → disable → audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 60 — revocation reaches the management verifier (§6.2).
+ *
+ * `/oauth2/revoke` has always recorded the access token's `jti`; this step proves the `/v1`
+ * verifier actually consults it. Two tokens are minted for the same automation client, one is
+ * revoked, and only the other may still call `/v1`. An unknown token stays a RFC 7009 `200`.
+ */
+async function revocationFlow(base: string, adminSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const basic = btoa(`${ADMIN_CLIENT_ID}:${adminSecret}`);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const mint = (): Promise<HttpResult> =>
+    tokenCall(base, { grant_type: "client_credentials", scope: "monaca:admin" }, basic);
+  const management = (token: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts?limit=1`, { headers: { authorization: `Bearer ${token}` } });
+  const revoke = (token: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/oauth2/revoke`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${basic}`,
+      },
+      body: new URLSearchParams({ token, token_type_hint: "access_token" }).toString(),
+    });
+
+  try {
+    const first = await mint();
+    const second = await mint();
+    const tokenA = (first.body as { access_token?: string } | undefined)?.access_token ?? "";
+    const tokenB = (second.body as { access_token?: string } | undefined)?.access_token ?? "";
+    checks.push([
+      "two management tokens are minted for the same client",
+      first.status === 200 && second.status === 200 && tokenA !== "" && tokenB !== "",
+    ]);
+    if (tokenA === "" || tokenB === "") {
+      detail = `mint → ${first.status}/${second.status}`;
+      return {
+        step: "60",
+        title: "revocation propagation",
+        status: "fail",
+        ms: Math.round(performance.now() - t),
+        detail,
+      };
+    }
+
+    const beforeA = await management(tokenA);
+    const beforeB = await management(tokenB);
+    checks.push([
+      "both tokens open /v1",
+      beforeA.status === 200 && beforeB.status === 200,
+    ]);
+
+    const revoked = await revoke(tokenA);
+    checks.push(["POST /oauth2/revoke is 200", revoked.status === 200]);
+
+    const afterA = await management(tokenA);
+    const afterB = await management(tokenB);
+    checks.push([
+      "the revoked token is 401 MONACA_UNAUTHORIZED on /v1",
+      afterA.status === 401 &&
+        (afterA.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_UNAUTHORIZED",
+    ]);
+    checks.push([
+      "the second token still opens /v1 after the revocation",
+      afterB.status === 200,
+    ]);
+
+    const unknown = await revoke("not-a-real-token");
+    checks.push([
+      "revoking an unknown token is 200 and discloses nothing",
+      unknown.status === 200,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "60",
+    title: "revocation propagation",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: two tokens → both open /v1 → revoke A → A is 401 → B still 200 → unknown is 200`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -13593,6 +13694,7 @@ async function main(): Promise<number> {
   push(await usernamePolicyFlow(base, adminToken));
   push(await capCaptchaFlow(base, adminToken));
   push(await socialProvidersFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
+  push(await revocationFlow(base, parsed.adminSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
