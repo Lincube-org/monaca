@@ -9,6 +9,12 @@ use monaca_types::AccountId;
 use crate::state::AppState;
 
 /// Seed everything the walk-through needs. Idempotent.
+///
+/// The seed credentials (`MONACA_BOOTSTRAP_ADMIN_PASSWORD`,
+/// `MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET`, `MONACA_CONSOLE_CLIENT_SECRET`) are read only when the
+/// corresponding row does not exist yet. Re-running on a populated database does not re-hash or
+/// overwrite an existing password or client secret; `create_client`'s conflict update changes the
+/// name and logout URIs only (§5.6).
 pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
     let store = Arc::clone(&state.store);
     let config = Arc::clone(&state.config);
@@ -39,15 +45,16 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
             .await?
     };
 
-    // The admin account.
-    let account = match store
+    // The admin account. An existing account keeps its stored password; the seed value is not
+    // even hashed when the row is present.
+    let (account, admin_created) = match store
         .account_by_email(&demo, &config.bootstrap_admin_email)
         .await?
     {
-        Some((account, _)) => account,
+        Some((account, _)) => (account, false),
         None => {
             let phc = hash_password(config.bootstrap_admin_password.clone(), state.argon).await?;
-            store
+            let account = store
                 .create_account(
                     &demo,
                     AccountId::new(),
@@ -58,9 +65,15 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
                     None,
                     None,
                 )
-                .await?
+                .await?;
+            (account, true)
         }
     };
+    tracing::info!(
+        email = %config.bootstrap_admin_email,
+        created = admin_created,
+        "bootstrap admin account"
+    );
 
     let ctx = acme.ctx(&demo);
     let mut tx = store.begin_org(&ctx).await?;
@@ -69,15 +82,30 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
         .await?;
     tx.commit().await?;
 
-    // The two seeded clients.
-    let console_phc = hash_password(config.console_client_secret.clone(), state.argon).await?;
+    // The two seeded clients. `create_client` refreshes the name and the redirect URIs on every
+    // run, but it never touches `secret_hash` on a conflict; a present client's secret is not
+    // re-hashed here.
+    let seeded_clients: Vec<String> = store
+        .clients(&demo)
+        .await?
+        .into_iter()
+        .map(|client| client.client_id)
+        .collect();
+    let console_exists = seeded_clients
+        .iter()
+        .any(|client_id| client_id == &config.console_client_id);
+    let console_phc = if console_exists {
+        None
+    } else {
+        Some(hash_password(config.console_client_secret.clone(), state.argon).await?)
+    };
     store
         .create_client(
             &demo,
             &config.console_client_id,
             "Monaca Console",
             "confidential",
-            Some(&console_phc),
+            console_phc.as_deref(),
             "client_secret_basic",
             None,
             &[
@@ -101,14 +129,19 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
         )
         .await?;
 
-    let admin_phc = hash_password(config.admin_client_secret.clone(), state.argon).await?;
+    let admin_exists = seeded_clients.iter().any(|client_id| client_id == "monaca-admin");
+    let admin_phc = if admin_exists {
+        None
+    } else {
+        Some(hash_password(config.admin_client_secret.clone(), state.argon).await?)
+    };
     store
         .create_client(
             &demo,
             "monaca-admin",
             "Monaca Automation",
             "confidential",
-            Some(&admin_phc),
+            admin_phc.as_deref(),
             "client_secret_basic",
             None,
             &["monaca:admin".into()],
