@@ -110,24 +110,32 @@ impl Jwks {
     }
 }
 
-/// The dev key provider: a 32-byte KEK from `MONACA_DEV_KEK`, tenant DEKs derived from it.
+/// The environment key provider: a 32-byte KEK supplied by the deployment, tenant DEKs derived
+/// from it.
 ///
-/// **Dev only.** The derivation is a domain-separated SHA-256 of the KEK and the tenant id, not a
-/// KDF with a work factor — it exists so a local checkout has one stable key per tenant without a
-/// database table of its own. `MONACA_ENV=prod` refuses this provider (§2.2).
-#[derive(Debug, Clone)]
-pub struct DevEnvKeyProvider {
+/// The server reads `MONACA_KEK` in `prod` (required) and `MONACA_DEV_KEK` or a public constant
+/// elsewhere (§2.2). The derivation is a domain-separated SHA-256 of the KEK and the tenant id, not
+/// a KDF with a work factor — it exists so one deployment key yields a stable DEK per tenant
+/// without a database table of its own.
+///
+/// This is the only `KeyProvider` in M0. A KMS-backed provider would implement the same trait and
+/// slot in where `AppState::new` builds this one; no call site knows the difference.
+///
+/// Deliberately no `Debug`: a derived one would print the KEK into any log line that formats the
+/// provider.
+#[derive(Clone)]
+pub struct EnvKeyProvider {
     kek: [u8; 32],
 }
 
-impl DevEnvKeyProvider {
+impl EnvKeyProvider {
     /// Build a provider from a 64-character hex KEK.
     pub fn from_hex(kek_hex: &str) -> Result<Self, CryptoError> {
         let bytes = hex::decode(kek_hex.trim())
-            .map_err(|err| CryptoError::KeyMaterial(format!("MONACA_DEV_KEK is not hex: {err}")))?;
+            .map_err(|err| CryptoError::KeyMaterial(format!("the KEK is not hex: {err}")))?;
         let kek: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
             CryptoError::KeyMaterial(format!(
-                "MONACA_DEV_KEK must be 32 bytes (64 hex chars), got {}",
+                "the KEK must be 32 bytes (64 hex chars), got {}",
                 bytes.len()
             ))
         })?;
@@ -140,7 +148,7 @@ impl DevEnvKeyProvider {
     }
 }
 
-impl KeyProvider for DevEnvKeyProvider {
+impl KeyProvider for EnvKeyProvider {
     fn platform_kek(&self) -> &[u8; 32] {
         &self.kek
     }
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn the_dev_provider_derives_stable_per_tenant_keys() {
-        let provider = DevEnvKeyProvider::from_hex(&"ab".repeat(32)).expect("provider");
+        let provider = EnvKeyProvider::from_hex(&"ab".repeat(32)).expect("provider");
         let first = TenantId::new();
         let second = TenantId::new();
         let a = provider.tenant_dek(&first).expect("dek");
@@ -239,8 +247,8 @@ mod tests {
 
     #[test]
     fn a_malformed_kek_is_refused() {
-        assert!(DevEnvKeyProvider::from_hex("zz").is_err());
-        assert!(DevEnvKeyProvider::from_hex("aabb").is_err());
+        assert!(EnvKeyProvider::from_hex("zz").is_err());
+        assert!(EnvKeyProvider::from_hex("aabb").is_err());
     }
 
     #[test]

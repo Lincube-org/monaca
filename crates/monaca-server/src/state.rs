@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use monaca_audit::AuditEvent;
-use monaca_crypto::{Argon2Params, DevEnvKeyProvider, KeyProvider, SigningKeyPair, seal};
+use monaca_crypto::{Argon2Params, EnvKeyProvider, KeyProvider, SigningKeyPair, seal};
 use monaca_oidc::Interaction as InteractionRequest;
 use monaca_store::{OrgRow, Store, TenantRow};
 use monaca_types::{Clock, KeyId, OrgCtx, SystemClock};
@@ -52,8 +52,9 @@ pub struct AppState {
     pub store: Arc<Store>,
     /// Environment-derived configuration.
     pub config: Arc<Config>,
-    /// Key provider (dev KEK in M0).
-    pub keys: Arc<DevEnvKeyProvider>,
+    /// Key provider (the environment-supplied KEK in M0; a KMS provider replaces this behind the
+    /// same trait).
+    pub keys: Arc<dyn KeyProvider>,
     /// Argon2 parameters.
     pub argon: Argon2Params,
     /// Time.
@@ -80,8 +81,10 @@ pub struct AppState {
 impl AppState {
     /// Build the state from a connected store and a config.
     pub fn new(store: Store, config: Config) -> Result<Arc<Self>, anyhow::Error> {
-        let keys = DevEnvKeyProvider::from_hex(&crate::config::dev_kek())
-            .map_err(|err| anyhow::anyhow!("MONACA_DEV_KEK: {err}"))?;
+        // `Config::validate` has already checked the shape; the error here names the variable
+        // without ever printing the value.
+        let keys = EnvKeyProvider::from_hex(&config.kek_hex)
+            .map_err(|err| anyhow::anyhow!("MONACA_KEK/MONACA_DEV_KEK: {err}"))?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()

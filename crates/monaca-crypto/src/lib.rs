@@ -26,7 +26,7 @@ mod webauthn;
 
 pub use jwk::{jwk_thumbprint, verify_embedded_jwk};
 pub use jws::{SigningKeyPair, decode_unverified, verify_jws, verify_jws_with_audience};
-pub use keys::{DevEnvKeyProvider, Jwks, generate_pkcs8_der, open, public_jwk_from_der, seal};
+pub use keys::{EnvKeyProvider, Jwks, generate_pkcs8_der, open, public_jwk_from_der, seal};
 pub use password::{Argon2Params, hash_password, verify_password};
 pub use secret::{
     BACKUP_CODE_COUNT, BACKUP_CODE_LEN, DEFAULT_CODE_DIGITS, format_backup_code,
@@ -45,9 +45,10 @@ pub use webauthn::{
 
 /// Where a tenant's data-encryption key comes from.
 ///
-/// The dev implementation derives it from `MONACA_DEV_KEK`; production binds a KMS or Vault
-/// handle. The trait is async-free on purpose: a provider that needs I/O can do it once at
-/// construction and cache the resolved key.
+/// M0 has one implementation: [`EnvKeyProvider`], which takes the KEK from the deployment's
+/// environment. A future KMS or Vault provider binds a handle behind the same trait. The trait is
+/// async-free on purpose: a provider that needs I/O can do it once at construction and cache the
+/// resolved key.
 ///
 /// The DEK is returned by value rather than by reference: a derived key (the dev provider) has no
 /// stable address inside the provider, and a KMS-backed provider caches a copy anyway. Thirty-two

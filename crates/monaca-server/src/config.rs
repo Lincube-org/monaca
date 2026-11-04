@@ -4,11 +4,28 @@
 //! that end up in a token or a discovery document come from `public_base_url` only: the server
 //! never derives an issuer from the request's `Host`, because in dev that is `127.0.0.1:8081` and
 //! §2.1 forbids it in a token.
+//!
+//! `MONACA_ENV=prod` removes every credential default. [`Config::validate`] covers what a running
+//! server needs (the KEK and the `/internal/*` secret); [`Config::validate_bootstrap`] additionally
+//! covers the seed values, because only `monaca-server bootstrap` consumes them and a server
+//! restart must not depend on the credentials that created the first tenant.
+//!
+//! The struct deliberately does not derive `Debug`: it holds the KEK and the seeded credentials,
+//! and a derived `Debug` is how a key ends up in a log line.
 
 use std::time::Duration;
 
+/// The dev/ci default for `MONACA_INTERNAL_SECRET`. `MONACA_ENV=prod` refuses it.
+const DEV_INTERNAL_SECRET: &str = "dev-internal-secret-change-me";
+/// The dev/ci default for `MONACA_BOOTSTRAP_ADMIN_PASSWORD`. `MONACA_ENV=prod` refuses it.
+const DEV_ADMIN_PASSWORD: &str = "monaca-dev-password";
+/// The dev/ci default for `MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET`.
+const DEV_ADMIN_CLIENT_SECRET: &str = "dev-admin-client-secret";
+/// The dev/ci default for `MONACA_CONSOLE_CLIENT_SECRET`.
+const DEV_CONSOLE_CLIENT_SECRET: &str = "dev-console-client-secret";
+
 /// The server's configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// The single public origin; source of every `iss`.
     pub public_base_url: String,
@@ -36,16 +53,22 @@ pub struct Config {
     pub default_org: String,
     /// The console's OIDC client id.
     pub console_client_id: String,
-    /// The console's client secret (dev only).
+    /// The console's client secret (a dev default outside `prod`).
     pub console_client_secret: String,
-    /// The automation client's secret (dev only).
+    /// The automation client's secret (a dev default outside `prod`).
     pub admin_client_secret: String,
     /// The seeded tenant-admin email.
     pub bootstrap_admin_email: String,
-    /// The seeded tenant-admin password (dev only).
+    /// The seeded tenant-admin password (a dev default outside `prod`).
     pub bootstrap_admin_password: String,
-    /// Whether `MONACA_ENV=prod`, which forbids the dev KEK and the bootstrap password.
+    /// Whether `MONACA_ENV=prod`.
     pub production: bool,
+    /// The key-encryption key, 64 hex characters. In `prod` it comes from `MONACA_KEK` and must be
+    /// explicit; outside `prod` it falls back to `MONACA_DEV_KEK` and then to a public constant.
+    /// Never log this value.
+    pub kek_hex: String,
+    /// Whether `MONACA_DEV_KEK` was supplied; `prod` refuses it.
+    pub dev_kek_supplied: bool,
     /// A dev/CI-only siteverify endpoint that replaces the provider's documented URL
     /// (`MONACA_CAPTCHA_SITEVERIFY_URL`). For `cap` it replaces the instance base, and the
     /// site-key path is appended exactly as the real protocol expects. The acceptance
@@ -66,13 +89,34 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
         let environment = env("MONACA_ENV").unwrap_or_else(|| "dev".to_owned());
+        let production = environment == "prod";
+
+        let dev_kek = env("MONACA_DEV_KEK");
+        let dev_kek_supplied = dev_kek.is_some();
+        let kek_hex = if production {
+            env("MONACA_KEK").unwrap_or_default()
+        } else if let Some(kek) = env("MONACA_KEK") {
+            kek
+        } else if let Some(kek) = dev_kek {
+            kek
+        } else {
+            // A missing key would otherwise be silent; say it once, loudly, at startup.
+            tracing::warn!(
+                "MONACA_KEK and MONACA_DEV_KEK are both unset; using the public dev fallback KEK. \
+                 This must never happen outside dev or ci."
+            );
+            "11".repeat(32)
+        };
 
         Self {
             public_base_url,
             auth_ui_url: env("MONACA_AUTH_UI_URL")
                 .unwrap_or_else(|| "http://localhost:5174".to_owned()),
-            internal_secret: env("MONACA_INTERNAL_SECRET")
-                .unwrap_or_else(|| "dev-internal-secret-change-me".to_owned()),
+            internal_secret: match env("MONACA_INTERNAL_SECRET") {
+                Some(secret) => secret,
+                None if production => String::new(),
+                None => DEV_INTERNAL_SECRET.to_owned(),
+            },
             access_token_ttl: secs("MONACA_ACCESS_TOKEN_TTL_SECS", 900),
             refresh_token_ttl: secs("MONACA_REFRESH_TOKEN_TTL_SECS", 2_592_000),
             auth_code_ttl: secs("MONACA_AUTH_CODE_TTL_SECS", 60),
@@ -84,15 +128,26 @@ impl Config {
             default_org: env("MONACA_BFF_DEFAULT_ORG").unwrap_or_else(|| "acme".to_owned()),
             console_client_id: env("MONACA_CONSOLE_CLIENT_ID")
                 .unwrap_or_else(|| "monaca-console".to_owned()),
-            console_client_secret: env("MONACA_CONSOLE_CLIENT_SECRET")
-                .unwrap_or_else(|| "dev-console-client-secret".to_owned()),
-            admin_client_secret: env("MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET")
-                .unwrap_or_else(|| "dev-admin-client-secret".to_owned()),
+            console_client_secret: seeded(
+                "MONACA_CONSOLE_CLIENT_SECRET",
+                DEV_CONSOLE_CLIENT_SECRET,
+                production,
+            ),
+            admin_client_secret: seeded(
+                "MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET",
+                DEV_ADMIN_CLIENT_SECRET,
+                production,
+            ),
             bootstrap_admin_email: env("MONACA_BOOTSTRAP_ADMIN_EMAIL")
                 .unwrap_or_else(|| "admin@demo.localhost".to_owned()),
-            bootstrap_admin_password: env("MONACA_BOOTSTRAP_ADMIN_PASSWORD")
-                .unwrap_or_else(|| "monaca-dev-password".to_owned()),
-            production: environment == "prod",
+            bootstrap_admin_password: seeded(
+                "MONACA_BOOTSTRAP_ADMIN_PASSWORD",
+                DEV_ADMIN_PASSWORD,
+                production,
+            ),
+            production,
+            kek_hex,
+            dev_kek_supplied,
             captcha_siteverify_url: matches!(environment.as_str(), "dev" | "ci")
                 .then(|| env("MONACA_CAPTCHA_SITEVERIFY_URL"))
                 .flatten(),
@@ -137,17 +192,107 @@ impl Config {
         format!("{}/v1", self.public_base_url)
     }
 
-    /// Reject a configuration that must never reach production — §2.2.
+    /// Reject a startup configuration that must never reach production — §2.2.
+    ///
+    /// Only what a running server uses is checked here. The bootstrap seed values are checked by
+    /// [`Config::validate_bootstrap`], so a restart of an already-provisioned deployment does not
+    /// depend on them.
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.production {
-            if std::env::var("MONACA_DEV_KEK").is_ok() {
-                anyhow::bail!("MONACA_DEV_KEK is forbidden when MONACA_ENV=prod");
-            }
-            if std::env::var("MONACA_BOOTSTRAP_ADMIN_PASSWORD").is_ok() {
-                anyhow::bail!("MONACA_BOOTSTRAP_ADMIN_PASSWORD is forbidden when MONACA_ENV=prod");
-            }
+        if !self.production {
+            return Ok(());
         }
-        Ok(())
+        if self.dev_kek_supplied {
+            anyhow::bail!(
+                "MONACA_DEV_KEK is forbidden when MONACA_ENV=prod; set MONACA_KEK instead"
+            );
+        }
+
+        let mut problems = Vec::new();
+        if self.kek_hex.is_empty() {
+            problems.push("MONACA_KEK is not set (must be 32 bytes, 64 hex characters)");
+        } else if let Err(err) = monaca_crypto::EnvKeyProvider::from_hex(&self.kek_hex) {
+            // `err` reports the shape (`not hex`, `wrong length`), never the value.
+            problems.push(format!("MONACA_KEK is invalid: {err}"));
+        }
+        if self.internal_secret.is_empty() {
+            problems.push(
+                "MONACA_INTERNAL_SECRET is not set (X-Monaca-Internal-Secret for /internal/*)",
+            );
+        } else if self.internal_secret == DEV_INTERNAL_SECRET {
+            problems.push("MONACA_INTERNAL_SECRET must not be the dev default");
+        }
+
+        reject("startup", problems)
+    }
+
+    /// Reject a production `monaca-server bootstrap` that lacks the seed credentials — §2.2.
+    ///
+    /// `bootstrap` is idempotent and runs on every deploy, but the values are only consumed when
+    /// the tenant, account or client row does not exist yet. Existing rows are never rewritten
+    /// (§5.6), so these variables are a first-deploy requirement, not a restart requirement.
+    pub fn validate_bootstrap(&self) -> anyhow::Result<()> {
+        self.validate()?;
+        if !self.production {
+            return Ok(());
+        }
+
+        let mut problems = Vec::new();
+        require_seed(
+            &mut problems,
+            "MONACA_BOOTSTRAP_ADMIN_PASSWORD",
+            &self.bootstrap_admin_password,
+            DEV_ADMIN_PASSWORD,
+            "seeded admin password",
+        );
+        require_seed(
+            &mut problems,
+            "MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET",
+            &self.admin_client_secret,
+            DEV_ADMIN_CLIENT_SECRET,
+            "seeded monaca-admin secret",
+        );
+        require_seed(
+            &mut problems,
+            "MONACA_CONSOLE_CLIENT_SECRET",
+            &self.console_client_secret,
+            DEV_CONSOLE_CLIENT_SECRET,
+            "seeded monaca-console secret",
+        );
+
+        reject("bootstrap", problems)
+    }
+}
+
+fn reject(phase: &str, problems: Vec<String>) -> anyhow::Result<()> {
+    if problems.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "MONACA_ENV=prod {phase} requires explicit secrets; refusing to continue:\n  - {}",
+        problems.join("\n  - ")
+    )
+}
+
+fn require_seed(
+    problems: &mut Vec<String>,
+    name: &str,
+    value: &str,
+    dev_default: &str,
+    detail: &str,
+) {
+    if value.is_empty() {
+        problems.push(format!("{name} is not set ({detail})"));
+    } else if value == dev_default {
+        problems.push(format!("{name} must not be the dev default"));
+    }
+}
+
+/// A seeded credential: the environment value, or the documented dev default outside `prod`.
+fn seeded(name: &str, dev_default: &str, production: bool) -> String {
+    match env(name) {
+        Some(value) => value,
+        None if production => String::new(),
+        None => dev_default.to_owned(),
     }
 }
 
@@ -163,21 +308,15 @@ fn secs(name: &str, default: u64) -> Duration {
     )
 }
 
-/// The dev KEK, 32 hex-encoded bytes.
-pub fn dev_kek() -> String {
-    env("MONACA_DEV_KEK").unwrap_or_else(|| "11".repeat(32))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_issuer_is_built_from_the_public_base_only() {
-        let config = Config {
+    fn dev_config() -> Config {
+        Config {
             public_base_url: "http://localhost:8080".into(),
             auth_ui_url: String::new(),
-            internal_secret: String::new(),
+            internal_secret: DEV_INTERNAL_SECRET.into(),
             access_token_ttl: Duration::from_secs(900),
             refresh_token_ttl: Duration::from_secs(1),
             auth_code_ttl: Duration::from_secs(60),
@@ -188,14 +327,35 @@ mod tests {
             console_tenant: "demo".into(),
             default_org: "acme".into(),
             console_client_id: "monaca-console".into(),
-            console_client_secret: String::new(),
-            admin_client_secret: String::new(),
-            bootstrap_admin_email: String::new(),
-            bootstrap_admin_password: String::new(),
+            console_client_secret: DEV_CONSOLE_CLIENT_SECRET.into(),
+            admin_client_secret: DEV_ADMIN_CLIENT_SECRET.into(),
+            bootstrap_admin_email: "admin@demo.localhost".into(),
+            bootstrap_admin_password: DEV_ADMIN_PASSWORD.into(),
             production: false,
+            kek_hex: "11".repeat(32),
+            dev_kek_supplied: false,
             captcha_siteverify_url: None,
             social_provider_base_url: None,
-        };
+        }
+    }
+
+    fn prod_config() -> Config {
+        let mut config = dev_config();
+        config.production = true;
+        config
+    }
+
+    fn seed_all(config: &mut Config) {
+        config.kek_hex = "ab".repeat(32);
+        config.internal_secret = "explicit-internal-secret".into();
+        config.bootstrap_admin_password = "explicit-admin-password".into();
+        config.admin_client_secret = "explicit-admin-secret".into();
+        config.console_client_secret = "explicit-console-secret".into();
+    }
+
+    #[test]
+    fn the_issuer_is_built_from_the_public_base_only() {
+        let config = dev_config();
         assert_eq!(config.issuer("demo"), "http://localhost:8080/t/demo");
         assert_eq!(
             config.token_endpoint("demo"),
@@ -213,7 +373,89 @@ mod tests {
     }
 
     #[test]
-    fn the_dev_kek_is_32_bytes() {
-        assert_eq!(dev_kek().len(), 64);
+    fn the_dev_fallback_kek_is_a_32_byte_hex_key() {
+        let fallback = "11".repeat(32);
+        assert_eq!(fallback.len(), 64);
+        assert!(monaca_crypto::EnvKeyProvider::from_hex(&fallback).is_ok());
+    }
+
+    #[test]
+    fn prod_startup_requires_the_kek_and_the_internal_secret() {
+        let mut config = prod_config();
+        config.kek_hex = String::new();
+        config.internal_secret = String::new();
+        let err = config.validate().expect_err("must fail");
+        let text = err.to_string();
+        assert!(text.contains("MONACA_KEK"), "{text}");
+        assert!(text.contains("MONACA_INTERNAL_SECRET"), "{text}");
+    }
+
+    #[test]
+    fn prod_bootstrap_requires_the_seed_credentials() {
+        let mut config = prod_config();
+        config.kek_hex = "ab".repeat(32);
+        config.internal_secret = "explicit-internal-secret".into();
+
+        let err = config.validate_bootstrap().expect_err("must fail");
+        let text = err.to_string();
+        assert!(text.contains("MONACA_BOOTSTRAP_ADMIN_PASSWORD"), "{text}");
+        assert!(
+            text.contains("MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET"),
+            "{text}"
+        );
+        assert!(text.contains("MONACA_CONSOLE_CLIENT_SECRET"), "{text}");
+    }
+
+    #[test]
+    fn prod_startup_does_not_depend_on_the_bootstrap_seeds() {
+        let mut config = prod_config();
+        config.kek_hex = "ab".repeat(32);
+        config.internal_secret = "explicit-internal-secret".into();
+        config.bootstrap_admin_password = String::new();
+        config.admin_client_secret = String::new();
+        config.console_client_secret = String::new();
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn prod_accepts_explicit_secrets() {
+        let mut config = prod_config();
+        seed_all(&mut config);
+        assert!(config.validate().is_ok());
+        assert!(config.validate_bootstrap().is_ok());
+    }
+
+    #[test]
+    fn prod_rejects_the_documented_dev_defaults() {
+        let mut config = prod_config();
+        config.kek_hex = "ab".repeat(32);
+        config.internal_secret = DEV_INTERNAL_SECRET.into();
+        let err = config.validate().expect_err("must fail");
+        assert!(err.to_string().contains("dev default"));
+
+        let mut config = prod_config();
+        seed_all(&mut config);
+        config.bootstrap_admin_password = DEV_ADMIN_PASSWORD.into();
+        let err = config.validate_bootstrap().expect_err("must fail");
+        assert!(err.to_string().contains("dev default"));
+    }
+
+    #[test]
+    fn prod_refuses_the_dev_kek() {
+        let mut config = prod_config();
+        seed_all(&mut config);
+        config.dev_kek_supplied = true;
+        let err = config.validate().expect_err("must fail");
+        assert!(err.to_string().contains("MONACA_DEV_KEK"));
+    }
+
+    #[test]
+    fn a_malformed_kek_is_named_in_the_error() {
+        let mut config = prod_config();
+        seed_all(&mut config);
+        config.kek_hex = "aabb".into();
+        let err = config.validate().expect_err("must fail");
+        assert!(err.to_string().contains("MONACA_KEK"), "{err}");
     }
 }

@@ -111,9 +111,13 @@ async fn migrate() -> anyhow::Result<()> {
 }
 
 /// `monaca-server bootstrap`.
+///
+/// The seed credentials are required here, and only here: a `serve` restart of an already
+/// provisioned deployment does not depend on them (§2.2). `bootstrap` itself never rewrites an
+/// existing account password or client secret (§5.6).
 async fn bootstrap() -> anyhow::Result<()> {
     let config = Config::from_env();
-    config.validate()?;
+    config.validate_bootstrap()?;
     let store = Store::connect(StoreConfig::from_env())
         .await
         .context("could not connect to PostgreSQL")?;
