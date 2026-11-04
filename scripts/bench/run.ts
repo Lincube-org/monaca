@@ -139,12 +139,12 @@ interface Args {
   readonly appRole: boolean;
   readonly pool: boolean;
   readonly onlyPool: boolean;
+  readonly allConnectors: boolean;
 }
 
 function usage(): string {
   return `usage: bun scripts/bench/run.ts [--profile smoke|full|scale] [--out <path>] [--archive <path>]
-                                  [--no-app-role] [--no-pool] [--only-pool]
-
+                                  [--no-app-role] [--no-pool] [--only-pool] [--all-connectors]
 
   smoke  10 tenants, 50 accounts, 10 clients, 100 measured iterations
   full   200 tenants, 200 accounts, 20 clients, 1000 measured iterations
@@ -163,6 +163,7 @@ function parseArgs(argv: readonly string[]): Args {
   let appRole = true;
   let pool = true;
   let onlyPool = false;
+  let allConnectors = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? "";
@@ -198,6 +199,10 @@ function parseArgs(argv: readonly string[]): Args {
     } else if (arg === "--only-pool") {
       onlyPool = true;
       appRole = false;
+    } else if (arg === "--all-connectors") {
+      allConnectors = true;
+      onlyPool = true;
+      appRole = false;
     } else {
       throw new Error(`unknown argument ${JSON.stringify(arg)}\n${usage()}`);
     }
@@ -210,6 +215,7 @@ function parseArgs(argv: readonly string[]): Args {
     appRole,
     pool,
     onlyPool,
+    allConnectors,
   };
 }
 
@@ -340,6 +346,50 @@ async function migrateAndSeed(
   await runServerCommand(bin, ["migrate"], env, "migrate (tenants)");
 
   return Array.from({ length: profile.extraTenants }, (_, index) => extraSlug(index + 1));
+}
+
+/**
+ * Give every tenant an enabled HTTP connector and add it to the control-plane index.
+ *
+ * This is the deliberately bad fixture: the mailer's new index cannot skip a tenant that really
+ * has a connector, so every tick still opens every active tenant database. No mail rows exist,
+ * so the mailer never posts to the unreachable endpoint; it only pays the lookup and pool cost.
+ */
+async function seedConnectors(
+  pg: BenchPg,
+  control: Bun.SQL,
+  slugs: readonly string[],
+): Promise<number> {
+  const rows = (await raw(
+    control,
+    `SELECT slug, db_name FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")})`,
+  )) as { slug: string; db_name: string }[];
+  for (const row of rows) {
+    const db = new Bun.SQL(withDatabase(pg.adminUrl, row.db_name));
+    try {
+      await raw(
+        db,
+        `INSERT INTO tenant.email_connector
+           (singleton, provider, endpoint, from_address, enabled)
+         VALUES (true, 'http', 'http://127.0.0.1:39999', 'bench@example.test', true)
+         ON CONFLICT (singleton) DO UPDATE SET
+           provider = EXCLUDED.provider,
+           endpoint = EXCLUDED.endpoint,
+           from_address = EXCLUDED.from_address,
+           enabled = true,
+           updated_at = now()`,
+      );
+    } finally {
+      await db.close();
+    }
+  }
+  await raw(
+    control,
+    `INSERT INTO tenant_email_connectors (tenant_id)
+     SELECT id FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")})
+     ON CONFLICT (tenant_id) DO NOTHING`,
+  );
+  return rows.length;
 }
 
 async function mintAdmin(base: string): Promise<string> {
@@ -1196,8 +1246,13 @@ async function main(): Promise<number> {
     }
 
     const allSlugs = [...extras, "system", "demo"];
+    let connectorCount = 0;
+    if (args.allConnectors) {
+      connectorCount = await seedConnectors(pg, control, allSlugs);
+    }
     if (args.pool) {
-      for (const size of args.profile.poolSizes) {
+      const sizes = args.allConnectors ? [allSlugs.length] : args.profile.poolSizes;
+      for (const size of sizes) {
         if (size > allSlugs.length) continue;
         pool.push(
           await poolPhase(bin, env, CONTROL_BASE, control, allSlugs, size, stats),
@@ -1312,6 +1367,8 @@ async function main(): Promise<number> {
           accounts: args.profile.accounts,
           accounts_in_demo: accountsInDemo,
           clients: args.profile.clients,
+          all_connectors: args.allConnectors,
+          connectors: connectorCount,
           instances: 1,
           tenant_pool_size: 5,
           tenant_pool_cache: 64,
