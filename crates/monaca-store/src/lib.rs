@@ -142,6 +142,11 @@ pub struct StoreConfig {
     pub tenant_pool_cache: usize,
     /// Whether org transactions `SET LOCAL ROLE` (`MONACA_ORG_ROLE_ENFORCEMENT`).
     pub org_role_enforcement: bool,
+    /// Optional least-privilege base DSN for tenant pools (`MONACA_APP_DATABASE_URL`). When set,
+    /// the per-tenant database name is substituted into this URL instead of `control_url`, so
+    /// request-path connections use the `monaca_app` login rather than the control superuser.
+    /// Unset keeps the pre-existing behaviour.
+    pub app_url: Option<String>,
 }
 
 impl Default for StoreConfig {
@@ -152,6 +157,7 @@ impl Default for StoreConfig {
             tenant_pool_size: 5,
             tenant_pool_cache: 64,
             org_role_enforcement: true,
+            app_url: None,
         }
     }
 }
@@ -170,6 +176,7 @@ impl StoreConfig {
                 .unwrap_or(default.tenant_pool_cache as u32)
                 .max(1) as usize,
             org_role_enforcement: env_bool("MONACA_ORG_ROLE_ENFORCEMENT", true),
+            app_url: env_string("MONACA_APP_DATABASE_URL"),
         }
     }
 }
@@ -239,8 +246,13 @@ impl Store {
             return Ok(pool.clone());
         }
 
-        let options = PgConnectOptions::from_str(&self.config.control_url)
-            .map_err(|err| StoreError::Database(format!("control URL: {err}")))?
+        let base = self
+            .config
+            .app_url
+            .as_deref()
+            .unwrap_or(&self.config.control_url);
+        let options = PgConnectOptions::from_str(base)
+            .map_err(|err| StoreError::Database(format!("tenant pool URL: {err}")))?
             .database(db_name);
         let pool = PgPoolOptions::new()
             .max_connections(self.config.tenant_pool_size)

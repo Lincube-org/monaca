@@ -119,6 +119,29 @@ database size and has not been measured for this stack; run the drill against a 
 copy before relying on a number. Dumps are sequential per database, so control and tenants can be
 seconds apart.
 
+## Least-privilege tenant role (opt-in)
+
+By default tenant pools reuse `MONACA_CONTROL_DATABASE_URL` (a privileged login). To run
+request-path queries as `monaca_app` instead:
+
+1. Set `MONACA_APP_DATABASE_URL` to a DSN for that login (the per-tenant database name is
+   substituted into it), and keep `MONACA_APP_DB_USER` / `MONACA_APP_DB_PASSWORD` in sync.
+2. Provision the role and its grants once, from a checkout on the host or from CI:
+
+       MONACA_CONTROL_DATABASE_URL=… MONACA_ADMIN_DATABASE_URL=… \
+       MONACA_APP_DB_PASSWORD=… MONACA_SERVER_BIN=.monaca/bin/monaca-server \
+         bun scripts/verify-app-role.ts
+
+   The script is idempotent: it creates/updates the login, grants `tenant` schema CRUD, grants
+   every org role for `SET ROLE`, revokes `CONNECT … FROM PUBLIC` on the tenant database, and
+   proves that DDL, a direct org-schema read and another database are all denied while a real
+   server using the app pool still creates and reads an account.
+3. Restart the server.
+
+This is **off by default**: without `MONACA_APP_DATABASE_URL`, no existing deployment changes. The
+first enablement on an existing database also revokes `CONNECT` from `PUBLIC` on the tenant
+databases; other roles that relied on PUBLIC and are not superusers will need an explicit grant.
+
 ## Metrics
 
 The server exposes Prometheus text at `/metrics` (§6.4). `compose.dev.yml` also starts a second
