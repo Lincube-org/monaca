@@ -31,6 +31,19 @@ monaca-server (Rust/axum, :8081) ──sqlx──► PostgreSQL   control DB + o
 * [docs/contracts/m0.md](docs/contracts/m0.md) — the binding M0 contract: names, ports, DDL, token
   formats, API shapes, CI artifacts. Read this before changing anything.
 
+## Social sign-in and account linking
+
+Social connectors are tenant-level configuration. `provider: "github"` and `provider: "google"`
+use server-owned endpoints, scopes and userinfo mapping; `generic` keeps tenant-supplied URLs and
+the OIDC-shaped userinfo contract. Every connector carries a `link_policy` for a verified provider
+email: `auto_link_verified_email`, `confirm_link`, or `create_new_only`.
+
+New connectors default to `confirm_link`. It is the most conservative policy that can still link:
+nothing is associated silently, and the visitor explicitly accepts the address's existing account
+on the hosted page. `create_new_only` cannot create a second account with an address that is
+already taken, because `accounts.primary_email` is unique per tenant; it therefore refuses that
+case with `409 MONACA_SOCIAL_EMAIL_TAKEN` instead of weakening the identity model.
+
 ## Prerequisites
 
 | need | why |

@@ -585,6 +585,20 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "fresh tokens count, the next correct attempt is 429 MONACA_ACCOUNT_LOCKED and is audited as " +
       "interaction.sign_in.failed with reason account_locked",
   },
+  {
+    step: "59",
+    title: "social providers and linking",
+    assertion:
+      "GitHub and Google connectors store provider, link policy and endpoints from the server presets; an authorize " +
+      "redirect carries state, PKCE and (Google) a nonce; a malformed state is 400 and audited state_invalid; a valid " +
+      "GitHub callback creates an account and signs it in, a repeat subject reuses that account, and " +
+      "auto_link_verified_email attaches a verified email to an existing account while an unverified one is " +
+      "403 MONACA_SOCIAL_UNLINKED; confirm_link parks on the hosted page, exposes the pending link, links on confirm " +
+      "and rejects a replay; create_new_only refuses an existing email with 409 MONACA_SOCIAL_EMAIL_TAKEN and creates " +
+      "when the address is free; a Google callback validates the id_token nonce and a mismatch is " +
+      "502 MONACA_SOCIAL_PROVIDER_ERROR; disabling a connector removes it from the public list and makes its " +
+      "authorize 404; social_sign_in.succeeded/failed and social_identity.linked are on the tenant audit chain",
+  },
 ];
 
 interface StepResult {
@@ -5854,6 +5868,720 @@ async function capCaptchaFlow(base: string, adminToken: string): Promise<StepRes
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: base URL validation → JSON site-key siteverify → rejected and accepted tokens → one-time replay → lock and audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 59: built-in social providers and the three linking policies.
+ *
+ * The server's real GitHub/Google endpoints are replaced by a local mock through
+ * `MONACA_SOCIAL_PROVIDER_BASE_URL` (dev/CI only). The mock implements GitHub's token → `/user` →
+ * `/user/emails` chain (primary+verified only), Google's token → userinfo chain with an id_token
+ * carrying the nonce, and verifies the PKCE S256 verifier the server sends. Every profile is keyed
+ * by the authorization code the step fabricates after reading the real authorize redirect.
+ */
+async function socialProvidersFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  let mock: ReturnType<typeof Bun.serve> | undefined;
+  const mockPort = Number(process.env.MONACA_SOCIAL_MOCK_PORT ?? 38200);
+  const mockBase = `http://127.0.0.1:${mockPort}`;
+  const profiles = new Map<
+    string,
+    {
+      provider: "github" | "google";
+      subject: string;
+      email: string;
+      verified: boolean;
+      name: string;
+      challenge?: string;
+      nonce?: string;
+    }
+  >();
+  const consumed = new Set<string>();
+
+  const fail = (why: string): StepResult => ({
+    step: "59",
+    title: "social providers and linking",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+
+  /** A fresh authorize → interaction; the service verifier is the console's own PKCE. */
+  const begin = async (
+    tag: string,
+  ): Promise<{ interaction: string; verifier: string } | undefined> => {
+    const verifier = `s59-${tag}-${runId}-${"x".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const response = await call(
+      `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-s59-${tag}-${runId}`,
+        nonce: `n-s59-${tag}-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (response.status !== 302 || interaction === null) {
+      detail = `authorize(${tag}) → ${response.status}`;
+      return undefined;
+    }
+    return { interaction: encodeURIComponent(interaction), verifier };
+  };
+
+  const exchange = async (redirectTo: string, verifier: string): Promise<HttpResult> => {
+    const code = new URL(redirectTo).searchParams.get("code") ?? "";
+    return tokenCall(
+      base,
+      {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        client_id: "monaca-console",
+        code_verifier: verifier,
+      },
+      basic,
+    );
+  };
+
+  const createConnector = (
+    id: string,
+    provider: "github" | "google",
+    policy: string,
+  ): Promise<HttpResult> =>
+    call(`${base}/v1/connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connector_id: id,
+        provider,
+        display_name: `${provider} ${policy}`,
+        link_policy: policy,
+        enabled: true,
+        client_id: `${id}-client`,
+        client_secret: `${id}-secret`,
+      }),
+    });
+
+  const startFlow = async (
+    connector: string,
+    tag: string,
+  ): Promise<
+    | { interaction: string; verifier: string; location: string; params: URLSearchParams }
+    | undefined
+  > => {
+    const started = await begin(tag);
+    if (started === undefined) return undefined;
+    const authorize = await call(
+      `${base}/t/${TENANT}/connectors/${connector}/authorize?interaction=${started.interaction}`,
+      { redirect: "manual" },
+    );
+    const location = authorize.headers.get("location") ?? "";
+    if (authorize.status !== 302 || location === "") {
+      detail = `connector authorize → ${authorize.status} ${text(authorize.body)}`;
+      return undefined;
+    }
+    return { ...started, location, params: new URL(location).searchParams };
+  };
+
+  const register = async (
+    code: string,
+    profile: {
+      provider: "github" | "google";
+      subject: string;
+      email: string;
+      verified: boolean;
+      name: string;
+      challenge?: string;
+      nonce?: string;
+    },
+  ): Promise<void> => {
+    profiles.set(code, profile);
+  };
+
+  const callback = (start: { location: string }, code: string): Promise<HttpResult> => {
+    const params = new URL(start.location).searchParams;
+    const state = params.get("state") ?? "";
+    const redirect = params.get("redirect_uri") ?? "";
+    if (state === "" || redirect === "") {
+      throw new Error("the provider redirect carried no callback URL");
+    }
+    return call(`${redirect}?${new URLSearchParams({ state, code })}`, { redirect: "manual" });
+  };
+
+  const accountsFor = async (email: string): Promise<{ id?: string; count: number }> => {
+    const response = await call(`${base}/v1/accounts?${new URLSearchParams({ query: email })}`, {
+      headers,
+    });
+    const items = (response.body as { items?: { id?: string; email?: string }[] } | undefined)
+      ?.items ?? [];
+    const matched = items.filter((item) => item.email === email);
+    return { id: matched[0]?.id, count: matched.length };
+  };
+
+  const auditEvents = async (action: string): Promise<Record<string, unknown>[]> => {
+    const response = await call(
+      `${base}/internal/audit?${new URLSearchParams({
+        tenant: TENANT,
+        action,
+        limit: "100",
+      })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    return (response.body as { items?: { payload?: Record<string, unknown> }[] } | undefined)
+      ?.items?.map((item) => item.payload ?? {}) ?? [];
+  };
+
+  const existingEmail = `social59-existing-${runId}@demo.localhost`;
+  const existingPassword = `pw-${runId}-social59`;
+  const connectorIds = [
+    `s59-gh-auto-${runId}`,
+    `s59-gh-confirm-${runId}`,
+    `s59-gh-new-${runId}`,
+    `s59-gh-off-${runId}`,
+    `s59-go-auto-${runId}`,
+  ];
+
+  try {
+    // --- the mock's four provider endpoints -----------------------------------------------------
+    mock = Bun.serve({
+      port: mockPort,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (request.method === "POST" && url.pathname === "/mock/profile") {
+          const body = (await request.json()) as {
+            code?: string;
+            profile?: {
+              provider: "github" | "google";
+              subject: string;
+              email: string;
+              verified: boolean;
+              name: string;
+              challenge?: string;
+              nonce?: string;
+            };
+          };
+          if (typeof body.code !== "string" || body.profile === undefined) {
+            return new Response("bad profile", { status: 400 });
+          }
+          profiles.set(body.code, body.profile);
+          return new Response(null, { status: 204 });
+        }
+
+        if (request.method === "POST" && /\/(github|google)\/token$/.test(url.pathname)) {
+          const form = await request.formData();
+          const code = String(form.get("code") ?? "");
+          const profile = profiles.get(code);
+          if (!profile) return Response.json({ error: "invalid_grant" }, { status: 400 });
+          if (consumed.has(code)) return Response.json({ error: "invalid_grant" }, { status: 400 });
+          const verifier = String(form.get("code_verifier") ?? "");
+          if (profile.challenge !== undefined) {
+            const digest = base64Url(
+              new Uint8Array(
+                await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+              ),
+            );
+            if (digest !== profile.challenge) {
+              return Response.json({ error: "invalid_grant" }, { status: 400 });
+            }
+          }
+          consumed.add(code);
+          if (profile.provider === "google") {
+            const payload = base64Url(
+              new TextEncoder().encode(JSON.stringify({ nonce: profile.nonce ?? "" })),
+            );
+            return Response.json({
+              access_token: `go-${code}`,
+              id_token: `eyJhbGciOiJub25lIn0.${payload}.`,
+              token_type: "Bearer",
+            });
+          }
+          return Response.json({ access_token: `gh-${code}`, token_type: "bearer" });
+        }
+
+        const bearer = request.headers.get("authorization")?.replace(/^Bearer /i, "") ?? "";
+        if (request.method === "GET" && url.pathname === "/github/userinfo") {
+          const code = bearer.replace(/^gh-/, "");
+          const profile = profiles.get(code);
+          if (!profile) return new Response("not found", { status: 404 });
+          return Response.json({
+            id: Number(profile.subject),
+            login: `gh-${profile.subject}`,
+            name: profile.name,
+          });
+        }
+        if (request.method === "GET" && url.pathname === "/github/emails") {
+          const code = bearer.replace(/^gh-/, "");
+          const profile = profiles.get(code);
+          if (!profile) return new Response("not found", { status: 404 });
+          return Response.json([
+            { email: profile.email, primary: true, verified: profile.verified },
+          ]);
+        }
+        if (request.method === "GET" && url.pathname === "/google/userinfo") {
+          const code = bearer.replace(/^go-/, "");
+          const profile = profiles.get(code);
+          if (!profile) return new Response("not found", { status: 404 });
+          return Response.json({
+            sub: profile.subject,
+            email: profile.email,
+            email_verified: profile.verified,
+            name: profile.name,
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    // --- an existing password account the social flows can meet --------------------------------
+    const createdExisting = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        email: existingEmail,
+        display_name: "Social existing",
+        password: existingPassword,
+      }),
+    });
+    const existingId = (createdExisting.body as { id?: string } | undefined)?.id;
+    if (createdExisting.status !== 201 || existingId === undefined) {
+      return fail(`POST /v1/accounts → ${createdExisting.status} ${text(createdExisting.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: existingId, role: "member" }),
+    });
+
+    const [ghAuto, ghConfirm, ghNew, ghOff, goAuto] = await Promise.all([
+      createConnector(connectorIds[0]!, "github", "auto_link_verified_email"),
+      createConnector(connectorIds[1]!, "github", "confirm_link"),
+      createConnector(connectorIds[2]!, "github", "create_new_only"),
+      createConnector(connectorIds[3]!, "github", "auto_link_verified_email"),
+      createConnector(connectorIds[4]!, "google", "auto_link_verified_email"),
+    ]);
+    const autoJson = ghAuto.body as
+      | { provider?: unknown; link_policy?: unknown; enabled?: unknown; authorize_url?: unknown }
+      | undefined;
+    checks.push([
+      "built-in connectors store their provider, policy and server-owned endpoints without the secret",
+      ghAuto.status === 201 &&
+        autoJson?.provider === "github" &&
+        autoJson?.link_policy === "auto_link_verified_email" &&
+        autoJson?.enabled === true &&
+        String(autoJson?.authorize_url ?? "") === `${mockBase}/github/authorize` &&
+        !JSON.stringify(ghAuto.body).includes(`${connectorIds[0]}-secret`) &&
+        ghConfirm.status === 201 &&
+        ghNew.status === 201 &&
+        ghOff.status === 201 &&
+        goAuto.status === 201,
+    ]);
+
+    // --- start: state, PKCE and (Google) nonce ---------------------------------------------------
+    const ghStart = await startFlow(connectorIds[0]!, "gh-start");
+    if (ghStart === undefined) return fail(detail);
+    checks.push([
+      "the GitHub redirect carries state, S256 PKCE and the fixed read:user user:email scopes",
+      ghStart.params.get("state") !== null &&
+        ghStart.params.get("code_challenge") !== null &&
+        ghStart.params.get("code_challenge_method") === "S256" &&
+        ghStart.params.get("scope") === "read:user user:email",
+    ]);
+
+    const goStart = await startFlow(connectorIds[4]!, "go-start");
+    if (goStart === undefined) return fail(detail);
+    checks.push([
+      "the Google redirect carries an OIDC nonce and S256 PKCE",
+      goStart.params.get("nonce") !== null &&
+        goStart.params.get("code_challenge") !== null &&
+        goStart.params.get("code_challenge_method") === "S256",
+    ]);
+
+    const badState = await call(
+      `${ghStart.params.get("redirect_uri")}?state=not-a-uuid&code=anything`,
+      { redirect: "manual" },
+    );
+    checks.push([
+      "a malformed state is 400 and audited as state_invalid",
+      badState.status === 400 &&
+        (badState.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_INVALID_REQUEST" &&
+        (await auditEvents("social_sign_in.failed")).some(
+          (payload) => payload.connector_id === connectorIds[0] && payload.reason === "state_invalid",
+        ),
+    ]);
+
+    // --- a first GitHub sign-in creates the account; a repeat subject reuses it -----------------
+    const newEmail = `social59-new-${runId}@example.test`;
+    const newSubject = `${9100000 + Math.floor(Math.random() * 1000)}`;
+    const newCode = `code-gh-new-${runId}`;
+    await register(newCode, {
+      provider: "github",
+      subject: newSubject,
+      email: newEmail,
+      verified: true,
+      name: "Social New",
+      challenge: ghStart.params.get("code_challenge") ?? undefined,
+    });
+    const firstCallback = await callback(ghStart, newCode);
+    const firstRedirect = firstCallback.headers.get("location") ?? "";
+    if (firstCallback.status !== 302 || firstRedirect === "") {
+      detail = `first social callback → ${firstCallback.status} ${text(firstCallback.body)}`;
+    }
+    const firstToken =
+      firstCallback.status === 302 && firstRedirect !== ""
+        ? await exchange(firstRedirect, ghStart.verifier)
+        : undefined;
+    const firstClaims = jwtClaims((firstToken?.body as { id_token?: unknown })?.id_token);
+    const firstAccount = await accountsFor(newEmail);
+    checks.push([
+      "a first GitHub sign-in creates one account and signs it in",
+      firstCallback.status === 302 &&
+        new URL(firstRedirect).searchParams.get("code") !== null &&
+        firstToken?.status === 200 &&
+        firstClaims?.email === newEmail &&
+        firstAccount.count === 1 &&
+        firstAccount.id === firstClaims?.sub,
+    ]);
+
+    const repeatStart = await startFlow(connectorIds[0]!, "gh-repeat");
+    if (repeatStart === undefined) return fail(detail);
+    const repeatCode = `code-gh-repeat-${runId}`;
+    await register(repeatCode, {
+      provider: "github",
+      subject: newSubject,
+      email: newEmail,
+      verified: true,
+      name: "Social New",
+      challenge: repeatStart.params.get("code_challenge") ?? undefined,
+    });
+    const repeatCallback = await callback(repeatStart, repeatCode);
+    const repeatRedirect = repeatCallback.headers.get("location") ?? "";
+    if (repeatCallback.status !== 302 || repeatRedirect === "") {
+      detail = `repeat social callback → ${repeatCallback.status} ${text(repeatCallback.body)}`;
+    }
+    const repeatToken =
+      repeatCallback.status === 302 && repeatRedirect !== ""
+        ? await exchange(repeatRedirect, repeatStart.verifier)
+        : undefined;
+    const repeatClaims = jwtClaims((repeatToken?.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "the same provider subject signs into the same account",
+      repeatCallback.status === 302 &&
+        repeatToken?.status === 200 &&
+        repeatClaims?.sub === firstClaims?.sub &&
+        (await accountsFor(newEmail)).count === 1,
+    ]);
+
+    // --- auto_link_verified_email: verified matches, unverified is refused -----------------------
+    const autoStart = await startFlow(connectorIds[0]!, "gh-auto-link");
+    if (autoStart === undefined) return fail(detail);
+    const autoCode = `code-gh-auto-${runId}`;
+    await register(autoCode, {
+      provider: "github",
+      subject: `${9200000 + Math.floor(Math.random() * 1000)}`,
+      email: existingEmail,
+      verified: true,
+      name: "Social Auto",
+      challenge: autoStart.params.get("code_challenge") ?? undefined,
+    });
+    const autoCallback = await callback(autoStart, autoCode);
+    const autoRedirect = autoCallback.headers.get("location") ?? "";
+    if (autoCallback.status !== 302 || autoRedirect === "") {
+      detail = `auto-link social callback → ${autoCallback.status} ${text(autoCallback.body)}`;
+    }
+    const autoToken =
+      autoCallback.status === 302 && autoRedirect !== ""
+        ? await exchange(autoRedirect, autoStart.verifier)
+        : undefined;
+    const autoClaims = jwtClaims((autoToken?.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "auto_link_verified_email attaches a verified address to the existing account",
+      autoCallback.status === 302 &&
+        autoToken?.status === 200 &&
+        autoClaims?.sub === existingId &&
+        (await accountsFor(existingEmail)).count === 1,
+    ]);
+
+    const unverifiedEmail = `social59-unverified-${runId}@example.test`;
+    const unverifiedStart = await startFlow(connectorIds[0]!, "gh-unverified");
+    if (unverifiedStart === undefined) return fail(detail);
+    const unverifiedCode = `code-gh-unverified-${runId}`;
+    await register(unverifiedCode, {
+      provider: "github",
+      subject: `${9300000 + Math.floor(Math.random() * 1000)}`,
+      email: unverifiedEmail,
+      verified: false,
+      name: "Social Unverified",
+      challenge: unverifiedStart.params.get("code_challenge") ?? undefined,
+    });
+    const unverifiedCallback = await callback(unverifiedStart, unverifiedCode);
+    checks.push([
+      "an unverified GitHub email is refused with MONACA_SOCIAL_UNLINKED and makes no account",
+      unverifiedCallback.status === 403 &&
+        (unverifiedCallback.body as { monaca_error_code?: unknown } | undefined)
+          ?.monaca_error_code === "MONACA_SOCIAL_UNLINKED" &&
+        (await accountsFor(unverifiedEmail)).count === 0 &&
+        (await auditEvents("social_sign_in.failed")).some(
+          (payload) =>
+            payload.connector_id === connectorIds[0] && payload.reason === "unverified_email",
+        ),
+    ]);
+
+    // --- confirm_link: a page prompt, then an explicit link --------------------------------------
+    const confirmStart = await startFlow(connectorIds[1]!, "gh-confirm");
+    if (confirmStart === undefined) return fail(detail);
+    const confirmCode = `code-gh-confirm-${runId}`;
+    await register(confirmCode, {
+      provider: "github",
+      subject: `${9400000 + Math.floor(Math.random() * 1000)}`,
+      email: existingEmail,
+      verified: true,
+      name: "Social Confirm",
+      challenge: confirmStart.params.get("code_challenge") ?? undefined,
+    });
+    const confirmCallback = await callback(confirmStart, confirmCode);
+    const confirmLocation = confirmCallback.headers.get("location") ?? "";
+    const linkToken = new URL(confirmLocation, base).searchParams.get("social_link");
+    checks.push([
+      "confirm_link parks on the hosted page instead of linking",
+      confirmCallback.status === 302 &&
+        linkToken !== null &&
+        confirmLocation.includes("social_link="),
+    ]);
+    if (linkToken === null) return fail("the confirm_link callback carried no token");
+
+    const details = await call(
+      `${base}/t/${TENANT}/social/link/${encodeURIComponent(linkToken)}`,
+    );
+    checks.push([
+      "the pending-link read exposes the provider and the asserted email",
+      details.status === 200 &&
+        (details.body as { email?: unknown } | undefined)?.email === existingEmail &&
+        (details.body as { connector_id?: unknown } | undefined)?.connector_id ===
+          connectorIds[1],
+    ]);
+
+    const confirmed = await call(
+      `${base}/t/${TENANT}/social/link/${encodeURIComponent(linkToken)}/confirm`,
+      { method: "POST" },
+    );
+    const confirmedRedirect = (confirmed.body as { redirect_to?: unknown } | undefined)
+      ?.redirect_to;
+    const confirmedToken =
+      typeof confirmedRedirect === "string"
+        ? await exchange(confirmedRedirect, confirmStart.verifier)
+        : undefined;
+    const confirmedClaims = jwtClaims(
+      (confirmedToken?.body as { id_token?: unknown })?.id_token,
+    );
+    checks.push([
+      "confirming links the identity and completes the sign-in with the existing account",
+      confirmed.status === 200 &&
+        typeof confirmedRedirect === "string" &&
+        confirmedToken?.status === 200 &&
+        confirmedClaims?.sub === existingId &&
+        (await auditEvents("social_identity.linked")).some(
+          (payload) => payload.connector_id === connectorIds[1],
+        ),
+    ]);
+
+    const replayConfirm = await call(
+      `${base}/t/${TENANT}/social/link/${encodeURIComponent(linkToken)}/confirm`,
+      { method: "POST" },
+    );
+    checks.push([
+      "a consumed link confirmation cannot be replayed",
+      replayConfirm.status === 400,
+    ]);
+
+    // --- create_new_only: never links; refuses an address another account owns --------------------
+    const newOnlyStart = await startFlow(connectorIds[2]!, "gh-new-only");
+    if (newOnlyStart === undefined) return fail(detail);
+    const newOnlyCode = `code-gh-new-only-${runId}`;
+    await register(newOnlyCode, {
+      provider: "github",
+      subject: `${9500000 + Math.floor(Math.random() * 1000)}`,
+      email: existingEmail,
+      verified: true,
+      name: "Social New Only",
+      challenge: newOnlyStart.params.get("code_challenge") ?? undefined,
+    });
+    const newOnlyCallback = await callback(newOnlyStart, newOnlyCode);
+    checks.push([
+      "create_new_only refuses an address another account owns with MONACA_SOCIAL_EMAIL_TAKEN",
+      newOnlyCallback.status === 409 &&
+        (newOnlyCallback.body as { monaca_error_code?: unknown } | undefined)
+          ?.monaca_error_code === "MONACA_SOCIAL_EMAIL_TAKEN" &&
+        (await accountsFor(existingEmail)).count === 1 &&
+        (await auditEvents("social_sign_in.failed")).some(
+          (payload) =>
+            payload.connector_id === connectorIds[2] && payload.reason === "link_conflict",
+        ),
+    ]);
+
+    const freeEmail = `social59-newonly-${runId}@example.test`;
+    const freeStart = await startFlow(connectorIds[2]!, "gh-new-only-free");
+    if (freeStart === undefined) return fail(detail);
+    const freeCode = `code-gh-new-only-free-${runId}`;
+    await register(freeCode, {
+      provider: "github",
+      subject: `${9600000 + Math.floor(Math.random() * 1000)}`,
+      email: freeEmail,
+      verified: true,
+      name: "Social New Free",
+      challenge: freeStart.params.get("code_challenge") ?? undefined,
+    });
+    const freeCallback = await callback(freeStart, freeCode);
+    const freeRedirect = freeCallback.headers.get("location") ?? "";
+    if (freeCallback.status !== 302 || freeRedirect === "") {
+      detail = `new-only social callback → ${freeCallback.status} ${text(freeCallback.body)}`;
+    }
+    const freeToken =
+      freeCallback.status === 302 && freeRedirect !== ""
+        ? await exchange(freeRedirect, freeStart.verifier)
+        : undefined;
+    checks.push([
+      "create_new_only still creates an account when the address is free",
+      freeCallback.status === 302 &&
+        freeToken?.status === 200 &&
+        (await accountsFor(freeEmail)).count === 1,
+    ]);
+
+    // --- Google: the id_token nonce is checked ---------------------------------------------------
+    const googleEmail = `social59-google-${runId}@example.test`;
+    const googleStart = await startFlow(connectorIds[4]!, "google-ok");
+    if (googleStart === undefined) return fail(detail);
+    const googleCode = `code-go-ok-${runId}`;
+    await register(googleCode, {
+      provider: "google",
+      subject: `google-${runId}`,
+      email: googleEmail,
+      verified: true,
+      name: "Social Google",
+      challenge: googleStart.params.get("code_challenge") ?? undefined,
+      nonce: googleStart.params.get("nonce") ?? undefined,
+    });
+    const googleCallback = await callback(googleStart, googleCode);
+    const googleRedirect = googleCallback.headers.get("location") ?? "";
+    if (googleCallback.status !== 302 || googleRedirect === "") {
+      detail = `Google social callback → ${googleCallback.status} ${text(googleCallback.body)}`;
+    }
+    const googleToken =
+      googleCallback.status === 302 && googleRedirect !== ""
+        ? await exchange(googleRedirect, googleStart.verifier)
+        : undefined;
+    const googleClaims = jwtClaims((googleToken?.body as { id_token?: unknown })?.id_token);
+    checks.push([
+      "a Google sign-in whose id_token carries the state nonce succeeds",
+      googleCallback.status === 302 &&
+        googleToken?.status === 200 &&
+        googleClaims?.email === googleEmail,
+    ]);
+
+    const wrongNonceStart = await startFlow(connectorIds[4]!, "google-bad-nonce");
+    if (wrongNonceStart === undefined) return fail(detail);
+    const wrongNonceCode = `code-go-bad-${runId}`;
+    await register(wrongNonceCode, {
+      provider: "google",
+      subject: `google-bad-${runId}`,
+      email: `social59-google-bad-${runId}@example.test`,
+      verified: true,
+      name: "Social Google Bad",
+      challenge: wrongNonceStart.params.get("code_challenge") ?? undefined,
+      nonce: "not-the-state-nonce",
+    });
+    const wrongNonceCallback = await callback(wrongNonceStart, wrongNonceCode);
+    checks.push([
+      "a mismatched id_token nonce is 502 MONACA_SOCIAL_PROVIDER_ERROR and audited provider_error",
+      wrongNonceCallback.status === 502 &&
+        (wrongNonceCallback.body as { monaca_error_code?: unknown } | undefined)
+          ?.monaca_error_code === "MONACA_SOCIAL_PROVIDER_ERROR" &&
+        (await auditEvents("social_sign_in.failed")).some(
+          (payload) => payload.connector_id === connectorIds[4] && payload.reason === "provider_error",
+        ),
+    ]);
+
+    // --- disabling a connector -------------------------------------------------------------------
+    const disabled = await call(`${base}/v1/connectors/${connectorIds[3]}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    const publicAfter = await call(`${base}/t/${TENANT}/connectors`);
+    const publicItems =
+      (publicAfter.body as { items?: { connector_id?: unknown }[] } | undefined)?.items ?? [];
+    const disabledStart = await startFlow(connectorIds[3]!, "disabled");
+    checks.push([
+      "a disabled connector leaves the public list and its authorize is 404",
+      disabled.status === 200 &&
+        (disabled.body as { enabled?: unknown } | undefined)?.enabled === false &&
+        !publicItems.some((item) => item.connector_id === connectorIds[3]) &&
+        disabledStart === undefined &&
+        (await auditEvents("connector.updated")).some(
+          (payload) =>
+            payload.connector_id === connectorIds[3] && payload.enabled === false,
+        ),
+    ]);
+
+    // --- success audit ---------------------------------------------------------------------------
+    const success = await auditEvents("social_sign_in.succeeded");
+    checks.push([
+      "social_sign_in.succeeded records the connector, new-account flag and confirmation",
+      success.some(
+        (payload) =>
+          payload.connector_id === connectorIds[0] &&
+          payload.new_account === true &&
+          payload.email === newEmail,
+      ) &&
+        success.some(
+          (payload) =>
+            payload.connector_id === connectorIds[1] && payload.confirmed === true,
+        ),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    for (const id of connectorIds) {
+      await call(`${base}/v1/connectors/${id}`, { method: "DELETE", headers }).catch(
+        () => undefined,
+      );
+    }
+    mock?.stop(true);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "59",
+    title: "social providers and linking",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: presets → state/PKCE/nonce → GitHub account reuse → auto-link → unverified refusal → confirm link → new-only policy → Google nonce → disable → audit`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -12864,6 +13592,7 @@ async function main(): Promise<number> {
   push(await emailConnectorFlow(base, adminToken, parsed.internalSecret));
   push(await usernamePolicyFlow(base, adminToken));
   push(await capCaptchaFlow(base, adminToken));
+  push(await socialProvidersFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

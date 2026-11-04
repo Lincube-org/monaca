@@ -379,6 +379,9 @@ jobs:
       # Acceptance step 52 starts a local siteverify mock on this port. The server accepts the
       # override only in dev/CI; a production process always calls the provider's real endpoint.
       MONACA_CAPTCHA_SITEVERIFY_URL: http://127.0.0.1:38100/siteverify
+      # Acceptance step 59 starts a local GitHub/Google mock on this base. The server accepts the
+      # override only in dev/CI; a production process always calls the provider's real endpoints.
+      MONACA_SOCIAL_PROVIDER_BASE_URL: http://127.0.0.1:38200
     steps:
       - uses: actions/checkout@v4
 
