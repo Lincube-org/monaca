@@ -45,12 +45,16 @@ pub fn spawn(state: Arc<AppState>) {
     });
 }
 
-/// One pass over every active tenant.
+/// One pass over the active tenants that have a connector.
+///
+/// The control-plane index keeps this to the tenants the mailer can actually deliver for. Reading
+/// every active tenant and opening its database just to discover `email_connector` is absent was
+/// the dominant cost at 198/400 tenants, and it also churned the tenant-pool cache.
 async fn deliver_pending(state: &Arc<AppState>) {
-    let tenants = match state.store.active_tenants().await {
+    let tenants = match state.store.tenants_with_email_connector().await {
         Ok(tenants) => tenants,
         Err(err) => {
-            tracing::warn!(%err, "mailer could not list tenants");
+            tracing::warn!(%err, "mailer could not list indexed tenants");
             return;
         }
     };

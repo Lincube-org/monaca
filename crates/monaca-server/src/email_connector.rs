@@ -149,6 +149,9 @@ pub async fn update_email_connector(
         }
     };
 
+    // Index before the tenant-database write: if the upsert fails, the worst case is a tenant the
+    // mailer queries and finds without a connector, not a connector it never discovers.
+    state.store.mark_email_connector_present(&tenant).await?;
     let row = state
         .store
         .upsert_email_connector(
@@ -197,7 +200,13 @@ pub async fn delete_email_connector(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
-    if !state.store.delete_email_connector(&tenant).await? {
+    let deleted = state.store.delete_email_connector(&tenant).await?;
+    // Delete the tenant row first: a stale index entry only costs the mailer one query, while a
+    // missing entry would stop delivery. `migrate` reconciles any entry left behind here.
+    if let Err(err) = state.store.forget_email_connector_index(&tenant).await {
+        tracing::warn!(%err, "could not remove the email-connector index entry");
+    }
+    if !deleted {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 

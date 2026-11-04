@@ -230,12 +230,19 @@ impl PoolStats {
     }
 }
 
+/// One cached tenant pool plus the tick at which it was last used, for LRU eviction.
+struct CachedPool {
+    pool: PgPool,
+    last_used: u64,
+}
+
 /// The database handle: one control-plane pool, one provisioning pool, one pool per tenant.
 pub struct Store {
     control: PgPool,
     admin: PgPool,
     config: StoreConfig,
-    tenants: Mutex<HashMap<String, PgPool>>,
+    tenants: Mutex<HashMap<String, CachedPool>>,
+    pool_tick: AtomicU64,
     stats: PoolStats,
 }
 
@@ -259,6 +266,7 @@ impl Store {
             admin,
             config,
             tenants: Mutex::new(HashMap::new()),
+            pool_tick: AtomicU64::new(0),
             stats: PoolStats::default(),
         })
     }
@@ -282,15 +290,17 @@ impl Store {
     pub async fn tenant_pool(&self, db_name: &str) -> Result<PgPool, StoreError> {
         validate_database_name(db_name)?;
 
+        let tick = self.pool_tick.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let mut pools = self.tenants.lock().await;
         let lookup = started.elapsed();
-        if let Some(pool) = pools.get(db_name) {
+        if let Some(entry) = pools.get_mut(db_name) {
+            entry.last_used = tick;
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
             self.stats
                 .lookup_nanos
                 .fetch_add(lookup.as_nanos() as u64, Ordering::Relaxed);
-            return Ok(pool.clone());
+            return Ok(entry.pool.clone());
         }
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
         self.stats
@@ -317,16 +327,25 @@ impl Store {
             Ordering::Relaxed,
         );
 
-        // Evict the oldest entry when the cache is full. Pools are cheap to rebuild and the cap is
-        // what keeps an unbounded tenant count from exhausting PostgreSQL's connection slots.
-        while pools.len() >= self.config.tenant_pool_cache {
-            if let Some(oldest) = pools.keys().next().cloned() {
-                pools.remove(&oldest);
-            } else {
-                break;
-            }
+        // Evict the least recently used pool when the cache is full. Pools are cheap to rebuild
+        // and the cap is what keeps an unbounded tenant count from exhausting PostgreSQL's
+        // connection slots. Scanning the map on a miss is cheap at the deployed cache sizes; the
+        // hit path only touches the entry it already found.
+        if pools.len() >= self.config.tenant_pool_cache
+            && let Some(oldest) = pools
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+        {
+            pools.remove(&oldest);
         }
-        pools.insert(db_name.to_owned(), pool.clone());
+        pools.insert(
+            db_name.to_owned(),
+            CachedPool {
+                pool: pool.clone(),
+                last_used: tick,
+            },
+        );
         Ok(pool)
     }
 
@@ -484,14 +503,62 @@ impl Store {
         .await?)
     }
 
-    /// Every tenant that may serve traffic, ordered by slug — the mailer's work list.
-    pub async fn active_tenants(&self) -> Result<Vec<TenantRow>, StoreError> {
+    /// Active tenants whose database has an email connector, ordered by slug.
+    ///
+    /// The index is maintained by connector writes and reconciled by `migrate`; without it the
+    /// mailer would open every active tenant database on every poll just to discover that most
+    /// have no connector.
+    pub async fn tenants_with_email_connector(&self) -> Result<Vec<TenantRow>, StoreError> {
         Ok(sqlx::query_as::<_, TenantRow>(
-            "SELECT id, slug, short, db_name, issuer, state
-             FROM tenants WHERE state = 'active' ORDER BY slug",
+            "SELECT t.id, t.slug, t.short, t.db_name, t.issuer, t.state
+             FROM tenants t
+             JOIN tenant_email_connectors c ON c.tenant_id = t.id
+             WHERE t.state = 'active'
+             ORDER BY t.slug",
         )
         .fetch_all(&self.control)
         .await?)
+    }
+
+    /// Record that a tenant has an email connector row. Called before the tenant-database write on
+    /// the create path, so a failed index write cannot leave a connector that the mailer never sees.
+    pub async fn mark_email_connector_present(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO tenant_email_connectors (tenant_id) VALUES ($1)
+             ON CONFLICT (tenant_id) DO UPDATE SET updated_at = now()",
+        )
+        .bind(tenant.id)
+        .execute(&self.control)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a tenant from the email-connector index.
+    pub async fn forget_email_connector_index(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM tenant_email_connectors WHERE tenant_id = $1")
+            .bind(tenant.id)
+            .execute(&self.control)
+            .await?;
+        Ok(())
+    }
+
+    /// Make the index row match the tenant database. Called by `migrate`, which is the upgrade
+    /// path for connectors that predate the index.
+    pub async fn reconcile_email_connector_index(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<(), StoreError> {
+        if self.email_connector(tenant).await?.is_some() {
+            self.mark_email_connector_present(tenant).await
+        } else {
+            self.forget_email_connector_index(tenant).await
+        }
     }
 
     /// Mark a fully provisioned tenant `active` — §5.4 step 5.

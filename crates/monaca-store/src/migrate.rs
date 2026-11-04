@@ -31,11 +31,18 @@ impl MigrationReport {
 }
 
 /// The control-plane set.
-const CONTROL: &[(i64, &str, &str)] = &[(
-    1,
-    "control schema (§5.3)",
-    include_str!("../migrations/control.sql"),
-)];
+const CONTROL: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "control schema (§5.3)",
+        include_str!("../migrations/control.sql"),
+    ),
+    (
+        2,
+        "email-connector index (§5.3)",
+        include_str!("../migrations/control_2.sql"),
+    ),
+];
 
 /// The tenant set (§5.6). Applied to each tenant database after `CREATE DATABASE`.
 const TENANT: &[(i64, &str, &str)] = &[
