@@ -11,7 +11,10 @@ bun run bench --profile full      # 200 tenants, 200 accounts, 20 clients, 1000 
 ```
 
 Both profiles create their fixtures from an empty database; nothing is reused from `bun run dev` or
-the acceptance walk-through. The report is `.monaca/reports/bench-<profile>.json`; pass
+the acceptance walk-through. The scenario tenant (`demo`) carries all the accounts and clients;
+the extra tenant databases are empty fixtures used only by the pool section, so the pool numbers
+measure database count, not per-tenant account volume. The report is
+`.monaca/reports/bench-<profile>.json`; pass
 `--archive docs/bench/results/<name>.json` to keep a copy in the repository.
 
 `--no-app-role` and `--no-pool` skip the app-pool comparison and tenant-pool phases. They exist for

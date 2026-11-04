@@ -68,9 +68,10 @@ regression coverage. OpenAPI is a contract artifact; it is cheaper once the A en
    workstation (`docs/bench/results/full-windows-2026-11-04.json`, 200 tenants / 200 created
    accounts / 20 created clients / 1000 iterations; demo also holds the bootstrap admin account
    and the two seeded clients) and the smoke profile on CI
-   (`docs/bench/results/smoke-ci-41820073251.json`, 10 tenants / 100 iterations). Both use one
-   server instance, `fsync=off`, `synchronous_commit=off` and `max_connections=500`; the numbers
-   are comparative, not a production SLO.
+   (`docs/bench/results/smoke-ci-41820073251.json`, 10 tenants / 100 iterations). The 198 extra
+   tenant databases are deliberately empty: they exist for the pool section, not for per-tenant
+   account volume. Both runs use one server instance, `fsync=off`, `synchronous_commit=off` and
+   `max_connections=500`; the numbers are comparative, not a production SLO.
 
 ### Results
 
