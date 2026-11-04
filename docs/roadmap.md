@@ -178,6 +178,113 @@ Why last: A and B change the query mix and request instrumentation, so a benchma
 them measures the wrong program. No optimization lands without a before/after number, and no
 semantic change lands without a contract decision.
 
+## Batch D — Capacity from the baseline
+
+The C baseline said the 198-tenant pool phase was the capacity risk. This batch only changes
+mechanisms whose effect is invisible to a request: the mailer's work list, the pool cache's
+eviction order, and the measured connection budget. It does not cache tenant/key/client/role/
+revocation data, weaken Argon2, or rewrite the interaction flow.
+
+### Scale curve, before → after
+
+`bun run bench --profile scale --only-pool` on the same Windows fixture: 400 tenant databases, one
+server instance, `max_connections=500`, `fsync=off`, 50/100/200/400 active tenants. Before is the
+C-era binary; after is the mailer index plus LRU eviction. Full reports:
+`docs/bench/results/scale-before-windows-2026-11-04.json`,
+`docs/bench/results/scale-after-windows-2026-11-04.json`, and the comparison
+`scale-compare-windows-2026-11-04.json`.
+
+| tenants | phase s before → after | cold P50 before → after | hot P50 before → after | hot hit before → after | mixed hit before → after |
+|---:|---:|---:|---:|---:|---:|
+| 50 | 10.2 → 13.0 | 182 → 237 ms | 1.4 → 1.3 ms | 100% → 100% | n/a |
+| 100 | 131.7 → 84.6 | 254 → 235 ms | 130 → 1.5 ms | 65% → 100% | 62.5% → 60% |
+| 200 | 208.7 → 113.1 | 460 → 240 ms | 336 → 1.6 ms | 39.3% → 100% | 37.3% → 60% |
+| 400 | 304.1 → 171.0 | 459 → 252 ms | 257 → 1.5 ms | 29.2% → 100% | 30.3% → 60% |
+
+Mailer work per phase:
+
+| tenants | connector queries before → after | index/active-list queries | activation peak connections before → after | steady tenant connections |
+|---:|---:|---:|---:|---:|
+| 50 | 104 → 0 | 1/tick | 20 → 1 | 100 |
+| 100 | 1,644 → 0 | 1/tick | 19 → 3 | 128 |
+| 200 | 1,358 → 0 | 1/tick | 21 → 0 | 128 |
+| 400 | 1,620 → 0 | 1/tick | 24 → 3 | 128 |
+
+The mailer index removes every per-tenant connector query when the tenant has no connector. The
+active list is now `tenants_with_email_connector` (one control query per 5 s tick, same as the old
+`active_tenants`), not `active_tenants` plus N tenant-database opens. Hot P50 and hit rate improve
+by an order of magnitude because the background sweep no longer evicts the 50-tenant working set.
+
+Honest trade-offs:
+
+* **Cold start at 50 tenants is slower** (182 → 237 ms P50) and the cold hit rate drops from 84.6%
+  to 50%: the old mailer prewarmed pools as a side effect of scanning every tenant; the index stops
+  that. Each request still does two pool lookups (the first creates, the second hits), hence 50%.
+* **Mixed at 100 tenants is slower** (114 → 225 ms P50) for the same reason: the hot 50 plus a
+  50-tenant churn working set exceed the 64-entry cache, so the churn evicts hot pools. At 200/400
+  the mixed P50 improves (342/314 → 233/224 ms) because the old mailer churn was worse. The mixed
+  hit rate plateaus at 60% — this is a capacity limit (working set > cache), not an eviction-order
+  bug. A deployment whose hot set is 100 tenants needs a larger cache and more connections, not
+  just LRU.
+* `phase s` and `mailer_ticks` are not comparable across the two reports (the hot/mixed passes
+  lengthen the phase); `connector_queries` and the per-pass latency/hit metrics are.
+
+### Connection budget
+
+Observed steady state after the fix: ~2 live tenant connections per cached pool, so 64 cached pools
+hold ~128 tenant connections independent of the registered tenant count; the activation step itself
+now creates 0–3 (the mailer no longer prewarms). The ceiling depends on both knobs:
+
+    max_connections >= MONACA_TENANT_POOL_CACHE × MONACA_TENANT_POOL_SIZE + control/admin headroom
+
+With the defaults (cache 64, pool size 5) the worst case is 320 + ~12 control/admin. A
+`max_connections=100` server is already below the observed 128 at 100 active tenants, and the
+C-era all-tenant mailer stalled a 198-tenant fixture at `max_connections=200`. The safe choices are:
+
+* **Keep 5:** `max_connections >= 400` (the dev compose now sets 400).
+* **Keep 100–200 connections:** `MONACA_TENANT_POOL_SIZE=2` and a cache of at most ~32–64
+  (observed ~2 connections per pool; 64 × 2 + 12 = 140, so 200 is safe).
+* **Large tenant counts:** size the cache to the hot working set, not to all tenants. Covering 400
+  tenants at pool size 5 would require 2,000 connections.
+
+### What changed
+
+1. **Mailer work list.** Control migration `control_2.sql` adds `tenant_email_connectors`; connector
+   writes maintain it and `migrate` reconciles pre-index connectors. The five-second cadence and
+   delivery semantics are unchanged. The mailer queries only indexed tenants.
+2. **Pool eviction.** The tenant-pool map now records a last-use tick and evicts the least recently
+   used entry on a miss; the hit path only updates that entry. Hot hit rate reached 100% at every
+   scale point; mixed hit rate improved at 200/400 (37/30 → 60%).
+3. **Activation.** Activation of N tenants now creates 0–3 connections; the old 19–24 peak and the
+   1,300–1,600 connector queries per phase are gone. No batching code was added because the
+   connection slope from activation is flat; the cold sweep still creates one pool per first
+   request, which is the real workload.
+
+### Not done (semantic or infrastructure decisions)
+
+* **Tenant row cache:** would delay tenant-state changes (suspension, reactivation, archiving) by
+  the TTL; a multi-instance invalidation channel is needed for correctness. Not implemented.
+* **Signing-key cache:** would delay a new key in JWKS and therefore token verification by the
+  TTL; safe only if rotation is versioned or invalidated. Not implemented.
+* **Client/role cache:** would delay secret rotation and permission removal; security-sensitive,
+  needs invalidation across instances. Not implemented.
+* **Revocation cache:** would delay revocation propagation. The current per-request lookup is
+  the contract; not implemented.
+* **Argon2 relaxation:** `token` is 23 rps on Windows / 53 rps on Linux because of client-secret
+  verification; changing the KDF parameters or caching verified secrets trades security for
+  throughput. Not implemented.
+* **Flow query reduction:** the interactive path is 50 statements; the interaction read/consume,
+  session/auth-code writes, org/role reads and audit chain are all part of the current semantics.
+  A merged query set needs a transaction/consistency design, not a benchmark-driven edit.
+
+### Regression check
+
+`bun run bench:compare --baseline <json> --candidate <json> --threshold X` compares scenario
+P50/P95/P99, throughput, error rate, queries per request, the rate-limit ramp, pool cold/hot/mixed
+latency and hit rates, activation connections, connector queries and app-pool latency. CI runs it
+non-blocking against the committed smoke baseline with a 20% threshold, archives the JSON/text and
+writes the comparison to the job summary.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, per-IP limiting, Redis-backed rate

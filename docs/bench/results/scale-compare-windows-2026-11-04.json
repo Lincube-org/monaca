@@ -1,0 +1,300 @@
+{
+  "generated_at": "2026-11-04T12:47:22.024Z",
+  "baseline": ".monaca/reports/bench-scale-before.json",
+  "candidate": ".monaca/reports/bench-scale-after.json",
+  "threshold_pct": 10,
+  "profile_match": true,
+  "comparisons": 32,
+  "regressions": [
+    {
+      "kind": "tenant_pool",
+      "key": "50",
+      "metric": "cold_p50_ms",
+      "baseline": 182.253,
+      "candidate": 237.418,
+      "delta_pct": 30.27,
+      "direction": "regression"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "50",
+      "metric": "cold_hit_rate",
+      "baseline": 0.846,
+      "candidate": 0.5,
+      "delta_pct": -40.9,
+      "direction": "regression"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "mixed_p50_ms",
+      "baseline": 114.457,
+      "candidate": 224.785,
+      "delta_pct": 96.39,
+      "direction": "regression"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "cold_hit_rate",
+      "baseline": 0.585,
+      "candidate": 0.5,
+      "delta_pct": -14.53,
+      "direction": "regression"
+    }
+  ],
+  "improvements": [
+    {
+      "kind": "tenant_pool",
+      "key": "50",
+      "metric": "activation_peak_connections",
+      "baseline": 20,
+      "candidate": 1,
+      "delta_pct": -95,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "50",
+      "metric": "connector_queries",
+      "baseline": 104,
+      "candidate": 0,
+      "delta_pct": -100,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "cold_p99_ms",
+      "baseline": 1098.867,
+      "candidate": 386.018,
+      "delta_pct": -64.87,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "hot_p50_ms",
+      "baseline": 130.066,
+      "candidate": 1.535,
+      "delta_pct": -98.82,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "hot_p99_ms",
+      "baseline": 568.222,
+      "candidate": 4.558,
+      "delta_pct": -99.2,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "hot_hit_rate",
+      "baseline": 0.65,
+      "candidate": 1,
+      "delta_pct": 53.85,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "activation_peak_connections",
+      "baseline": 19,
+      "candidate": 3,
+      "delta_pct": -84.21,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "100",
+      "metric": "connector_queries",
+      "baseline": 1644,
+      "candidate": 0,
+      "delta_pct": -100,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "cold_p50_ms",
+      "baseline": 460.396,
+      "candidate": 239.668,
+      "delta_pct": -47.94,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "cold_p99_ms",
+      "baseline": 737.204,
+      "candidate": 448.631,
+      "delta_pct": -39.14,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "hot_p50_ms",
+      "baseline": 335.762,
+      "candidate": 1.641,
+      "delta_pct": -99.51,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "hot_p99_ms",
+      "baseline": 615.738,
+      "candidate": 4.86,
+      "delta_pct": -99.21,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "mixed_p50_ms",
+      "baseline": 341.963,
+      "candidate": 233.167,
+      "delta_pct": -31.82,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "cold_hit_rate",
+      "baseline": 0.305,
+      "candidate": 0.5,
+      "delta_pct": 63.93,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "hot_hit_rate",
+      "baseline": 0.393,
+      "candidate": 1,
+      "delta_pct": 154.45,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "mixed_hit_rate",
+      "baseline": 0.373,
+      "candidate": 0.6,
+      "delta_pct": 60.86,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "activation_peak_connections",
+      "baseline": 21,
+      "candidate": 0,
+      "delta_pct": -100,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "200",
+      "metric": "connector_queries",
+      "baseline": 1358,
+      "candidate": 0,
+      "delta_pct": -100,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "cold_p50_ms",
+      "baseline": 458.957,
+      "candidate": 251.727,
+      "delta_pct": -45.15,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "cold_p99_ms",
+      "baseline": 739.574,
+      "candidate": 481.854,
+      "delta_pct": -34.85,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "hot_p50_ms",
+      "baseline": 256.995,
+      "candidate": 1.512,
+      "delta_pct": -99.41,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "hot_p99_ms",
+      "baseline": 582.54,
+      "candidate": 5.184,
+      "delta_pct": -99.11,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "mixed_p50_ms",
+      "baseline": 313.727,
+      "candidate": 223.667,
+      "delta_pct": -28.71,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "cold_hit_rate",
+      "baseline": 0.163,
+      "candidate": 0.5,
+      "delta_pct": 206.75,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "hot_hit_rate",
+      "baseline": 0.292,
+      "candidate": 1,
+      "delta_pct": 242.47,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "mixed_hit_rate",
+      "baseline": 0.303,
+      "candidate": 0.6,
+      "delta_pct": 98.02,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "activation_peak_connections",
+      "baseline": 24,
+      "candidate": 3,
+      "delta_pct": -87.5,
+      "direction": "improvement"
+    },
+    {
+      "kind": "tenant_pool",
+      "key": "400",
+      "metric": "connector_queries",
+      "baseline": 1620,
+      "candidate": 0,
+      "delta_pct": -100,
+      "direction": "improvement"
+    }
+  ]
+}

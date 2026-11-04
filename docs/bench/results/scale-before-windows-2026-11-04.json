@@ -1,0 +1,368 @@
+{
+  "meta": {
+    "generated_at": "2026-11-04T12:09:50.012Z",
+    "profile": "scale",
+    "commit": "826fb79fe249ba2f4db1428e0625ed87f42c17de",
+    "host": {
+      "platform": "win32",
+      "release": "10.0.26200",
+      "arch": "x64",
+      "cpu": "Intel(R) Core(TM) Ultra 5 226V",
+      "memory_gb": 15.6,
+      "bun": "1.3.14"
+    },
+    "server": {
+      "binary": "C:\\git\\sso\\monaca\\.monaca\\bin\\monaca-server.exe",
+      "version": "unknown"
+    },
+    "pg": {
+      "source": "embedded",
+      "port": 5442,
+      "version": "18.4",
+      "settings": {
+        "fsync": "off",
+        "full_page_writes": "off",
+        "max_connections": "500",
+        "shared_buffers": "32768",
+        "synchronous_commit": "off",
+        "work_mem": "8192"
+      },
+      "stats_available": true,
+      "stats_error": ""
+    },
+    "fixtures": {
+      "tenants": 400,
+      "extra_tenants": 398,
+      "scenario_tenant": "demo",
+      "accounts": 0,
+      "accounts_in_demo": 0,
+      "clients": 0,
+      "instances": 1,
+      "tenant_pool_size": 5,
+      "tenant_pool_cache": 64
+    },
+    "iterations": {
+      "warmup": 10,
+      "measured": 100,
+      "flow_warmup": 5,
+      "flow_measured": 20
+    },
+    "notes": [
+      "The PostgreSQL cluster is disposable: fsync=off, synchronous_commit=off, full_page_writes=off.",
+      "Numbers are comparative and machine-specific; the fixture and parameters are fixed per profile.",
+      "Metrics on /metrics are per process; this run uses one server instance at a time."
+    ]
+  },
+  "scenarios": [],
+  "rate_limit_ramp": [],
+  "tenant_pool": [
+    {
+      "tenants": 50,
+      "seconds": 10.216,
+      "activation_seconds": 6.715,
+      "activation_base_connections": 2,
+      "activation_peak_connections": 20,
+      "cold": {
+        "latency": {
+          "count": 50,
+          "min_ms": 109.089,
+          "p50_ms": 182.253,
+          "p95_ms": 346.725,
+          "p99_ms": 440.932,
+          "max_ms": 440.932,
+          "mean_ms": 196.159
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "hot": {
+        "latency": {
+          "count": 100,
+          "min_ms": 0.799,
+          "p50_ms": 1.448,
+          "p95_ms": 3.406,
+          "p99_ms": 3.742,
+          "max_ms": 4.048,
+          "mean_ms": 1.647
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "mixed": {
+        "latency": {
+          "count": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "cold_pool": {
+        "hits": 154,
+        "misses": 28,
+        "hit_rate": 0.846,
+        "lookup_avg_ms": 15.565,
+        "connect_avg_ms": 232.055
+      },
+      "hot_pool": {
+        "hits": 200,
+        "misses": 0,
+        "hit_rate": 1,
+        "lookup_avg_ms": 0,
+        "connect_avg_ms": 0
+      },
+      "mixed_pool": {
+        "hits": 0,
+        "misses": 0,
+        "hit_rate": 0,
+        "lookup_avg_ms": 0,
+        "connect_avg_ms": 0
+      },
+      "connections_after_cold": 102,
+      "connections_after_hot": 102,
+      "connections_after_mixed": 102,
+      "mailer_ticks": 2,
+      "connector_queries": 104,
+      "index_queries": 0,
+      "errors": 0,
+      "first_error": "",
+      "mailer_tick_possible": true
+    },
+    {
+      "tenants": 100,
+      "seconds": 131.708,
+      "activation_seconds": 6.693,
+      "activation_base_connections": 2,
+      "activation_peak_connections": 19,
+      "cold": {
+        "latency": {
+          "count": 100,
+          "min_ms": 129.012,
+          "p50_ms": 253.931,
+          "p95_ms": 657.236,
+          "p99_ms": 1098.867,
+          "max_ms": 1428.008,
+          "mean_ms": 344.154
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "hot": {
+        "latency": {
+          "count": 100,
+          "min_ms": 1.453,
+          "p50_ms": 130.066,
+          "p95_ms": 528.002,
+          "p99_ms": 568.222,
+          "max_ms": 586.624,
+          "mean_ms": 227.191
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "mixed": {
+        "latency": {
+          "count": 100,
+          "min_ms": 1.795,
+          "p50_ms": 114.457,
+          "p95_ms": 468.008,
+          "p99_ms": 555.77,
+          "max_ms": 615.049,
+          "mean_ms": 211.928
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "cold_pool": {
+        "hits": 289,
+        "misses": 205,
+        "hit_rate": 0.585,
+        "lookup_avg_ms": 54.068,
+        "connect_avg_ms": 161.178
+      },
+      "hot_pool": {
+        "hits": 336,
+        "misses": 181,
+        "hit_rate": 0.65,
+        "lookup_avg_ms": 41.307,
+        "connect_avg_ms": 122.711
+      },
+      "mixed_pool": {
+        "hits": 671,
+        "misses": 403,
+        "hit_rate": 0.625,
+        "lookup_avg_ms": 41.654,
+        "connect_avg_ms": 121.21
+      },
+      "connections_after_cold": 95,
+      "connections_after_hot": 103,
+      "connections_after_mixed": 125,
+      "mailer_ticks": 17,
+      "connector_queries": 1644,
+      "index_queries": 0,
+      "errors": 0,
+      "first_error": "",
+      "mailer_tick_possible": true
+    },
+    {
+      "tenants": 200,
+      "seconds": 208.651,
+      "activation_seconds": 6.679,
+      "activation_base_connections": 2,
+      "activation_peak_connections": 21,
+      "cold": {
+        "latency": {
+          "count": 200,
+          "min_ms": 151.679,
+          "p50_ms": 460.396,
+          "p95_ms": 633.881,
+          "p99_ms": 737.204,
+          "max_ms": 765.263,
+          "mean_ms": 418.624
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "hot": {
+        "latency": {
+          "count": 100,
+          "min_ms": 1.142,
+          "p50_ms": 335.762,
+          "p95_ms": 561.004,
+          "p99_ms": 615.738,
+          "max_ms": 750.996,
+          "mean_ms": 311.537
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "mixed": {
+        "latency": {
+          "count": 100,
+          "min_ms": 3.223,
+          "p50_ms": 341.963,
+          "p95_ms": 570.461,
+          "p99_ms": 652.736,
+          "max_ms": 691.639,
+          "mean_ms": 307.342
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "cold_pool": {
+        "hits": 267,
+        "misses": 608,
+        "hit_rate": 0.305,
+        "lookup_avg_ms": 83.654,
+        "connect_avg_ms": 135.429
+      },
+      "hot_pool": {
+        "hits": 165,
+        "misses": 255,
+        "hit_rate": 0.393,
+        "lookup_avg_ms": 71.661,
+        "connect_avg_ms": 121.139
+      },
+      "mixed_pool": {
+        "hits": 312,
+        "misses": 525,
+        "hit_rate": 0.373,
+        "lookup_avg_ms": 73.949,
+        "connect_avg_ms": 123.576
+      },
+      "connections_after_cold": 96,
+      "connections_after_hot": 113,
+      "connections_after_mixed": 124,
+      "mailer_ticks": 7,
+      "connector_queries": 1358,
+      "index_queries": 0,
+      "errors": 0,
+      "first_error": "",
+      "mailer_tick_possible": true
+    },
+    {
+      "tenants": 400,
+      "seconds": 304.125,
+      "activation_seconds": 6.66,
+      "activation_base_connections": 2,
+      "activation_peak_connections": 24,
+      "cold": {
+        "latency": {
+          "count": 400,
+          "min_ms": 140.318,
+          "p50_ms": 458.957,
+          "p95_ms": 612.227,
+          "p99_ms": 739.574,
+          "max_ms": 869.103,
+          "mean_ms": 447.747
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "hot": {
+        "latency": {
+          "count": 100,
+          "min_ms": 1.414,
+          "p50_ms": 256.995,
+          "p95_ms": 551.669,
+          "p99_ms": 582.54,
+          "max_ms": 693.155,
+          "mean_ms": 285.928
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "mixed": {
+        "latency": {
+          "count": 100,
+          "min_ms": 70.148,
+          "p50_ms": 313.727,
+          "p95_ms": 592.78,
+          "p99_ms": 689.833,
+          "max_ms": 758.435,
+          "mean_ms": 314.685
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "cold_pool": {
+        "hits": 274,
+        "misses": 1405,
+        "hit_rate": 0.163,
+        "lookup_avg_ms": 96.732,
+        "connect_avg_ms": 126.158
+      },
+      "hot_pool": {
+        "hits": 100,
+        "misses": 243,
+        "hit_rate": 0.292,
+        "lookup_avg_ms": 80.302,
+        "connect_avg_ms": 116.826
+      },
+      "mixed_pool": {
+        "hits": 249,
+        "misses": 574,
+        "hit_rate": 0.303,
+        "lookup_avg_ms": 77.785,
+        "connect_avg_ms": 117.241
+      },
+      "connections_after_cold": 90,
+      "connections_after_hot": 113,
+      "connections_after_mixed": 126,
+      "mailer_ticks": 5,
+      "connector_queries": 1620,
+      "index_queries": 0,
+      "errors": 0,
+      "first_error": "",
+      "mailer_tick_possible": true
+    }
+  ],
+  "app_role": {
+    "passes": [],
+    "comparison": {}
+  }
+}

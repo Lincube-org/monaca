@@ -40,6 +40,7 @@ interface Report {
     mailer_ticks?: number;
     connector_queries?: number;
     cold?: { latency?: { p50_ms?: number; p99_ms?: number } };
+    cold_pool?: { hit_rate?: number };
     hot?: { latency?: { p50_ms?: number; p99_ms?: number }; errors?: number };
     mixed?: { latency?: { p50_ms?: number; p99_ms?: number }; errors?: number };
     hot_pool?: { hit_rate?: number };
@@ -218,11 +219,13 @@ async function main(): Promise<number> {
     add(deltas, "tenant_pool", key, "hot_p50_ms", base.hot?.latency?.p50_ms, next.hot?.latency?.p50_ms, true, args.threshold);
     add(deltas, "tenant_pool", key, "hot_p99_ms", base.hot?.latency?.p99_ms, next.hot?.latency?.p99_ms, true, args.threshold);
     add(deltas, "tenant_pool", key, "mixed_p50_ms", base.mixed?.latency?.p50_ms, next.mixed?.latency?.p50_ms, true, args.threshold);
+    add(deltas, "tenant_pool", key, "cold_hit_rate", base.cold_pool?.hit_rate, next.cold_pool?.hit_rate, false, args.threshold);
     add(deltas, "tenant_pool", key, "hot_hit_rate", base.hot_pool?.hit_rate, next.hot_pool?.hit_rate, false, args.threshold);
     add(deltas, "tenant_pool", key, "mixed_hit_rate", base.mixed_pool?.hit_rate, next.mixed_pool?.hit_rate, false, args.threshold);
     add(deltas, "tenant_pool", key, "activation_peak_connections", base.activation_peak_connections, next.activation_peak_connections, true, args.threshold);
-    add(deltas, "tenant_pool", key, "seconds", base.seconds, next.seconds, true, args.threshold);
-    add(deltas, "tenant_pool", key, "mailer_ticks", base.mailer_ticks, next.mailer_ticks, true, args.threshold);
+    // `seconds` and `mailer_ticks` changed meaning when the hot/mixed passes lengthened the
+    // phase; comparing them against an older report would be a false regression. The per-pass
+    // latency, hit-rate and connector-query metrics are the comparable ones.
     add(deltas, "tenant_pool", key, "connector_queries", base.connector_queries, next.connector_queries, true, args.threshold);
   }
 
@@ -231,11 +234,12 @@ async function main(): Promise<number> {
   for (const [name, base] of Object.entries(baseApp)) {
     const next = candidateApp[name];
     if (next === undefined) continue;
-    // The app-role comparison is already a ratio against its own control pass, so compare the
-    // deltas themselves rather than the absolute app latency.
-    add(deltas, "app_role", name, "p50_delta_pct", base.p50_delta_pct, next.p50_delta_pct, true, args.threshold);
-    add(deltas, "app_role", name, "p99_delta_pct", base.p99_delta_pct, next.p99_delta_pct, true, args.threshold);
-    add(deltas, "app_role", name, "rps_delta_pct", base.rps_delta_pct, next.rps_delta_pct, false, args.threshold);
+    // Compare the app pass against the app pass across runs. The signed delta against the control
+    // pass is a derived ratio; comparing those directly would invert the meaning when the control
+    // value is negative or near zero.
+    add(deltas, "app_role", name, "app_p50_ms", base.app_p50_ms, next.app_p50_ms, true, args.threshold);
+    add(deltas, "app_role", name, "app_p99_ms", base.app_p99_ms, next.app_p99_ms, true, args.threshold);
+    add(deltas, "app_role", name, "app_rps", base.app_rps, next.app_rps, false, args.threshold);
   }
 
   const regressions = deltas.filter((delta) => delta.direction === "regression");

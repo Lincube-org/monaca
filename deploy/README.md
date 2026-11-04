@@ -161,6 +161,23 @@ cache counters. Metrics are per process: scrape every server instance and aggreg
 (`sum` for counters, `sum by (le)` for histogram buckets). A single instance's `/metrics` is not a
 deployment total.
 
+## Tenant pool connection budget
+
+Tenant pools are cached per database (`MONACA_TENANT_POOL_CACHE`, default 64) and each can open up
+to `MONACA_TENANT_POOL_SIZE` connections (default 5). The benchmark observed about two live tenant
+connections per cached pool at steady state, and the mailer no longer opens a pool for a tenant
+without an email connector. The safe ceiling is:
+
+    max_connections >= MONACA_TENANT_POOL_CACHE × MONACA_TENANT_POOL_SIZE + control/admin headroom
+
+The default 64 × 5 is a worst case of 320 tenant connections plus control/admin. A PostgreSQL
+`max_connections=100` (the image default) is below the observed ~128 tenant connections at 100
+active tenants; the old all-tenant mailer stalled a 198-tenant fixture at `max_connections=200`.
+`compose.dev.yml` therefore starts PostgreSQL with `max_connections=400`. An external PostgreSQL
+must set the same headroom, or use `MONACA_TENANT_POOL_SIZE=2` with a cache of at most ~32 on a
+100-connection server. The cache should cover the hot tenant working set, not every registered
+tenant: 400 tenants at pool size 5 would need 2,000 connections if the cache covered them all.
+
 ## Operating
 
 `remote-deploy.sh` is the deploy itself (postgres ready → pull → backup → migrate → bootstrap → up);
