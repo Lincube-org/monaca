@@ -1652,7 +1652,7 @@ fn provider_redirect(
         ("response_type", "code".to_owned()),
         ("client_id", connector.client_id.clone()),
         ("redirect_uri", redirect_uri),
-        ("state", state_value),
+        ("state", state_value.clone()),
     ];
     if !scope.is_empty() {
         params.push(("scope", scope));
