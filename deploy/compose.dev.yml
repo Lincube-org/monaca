@@ -13,8 +13,19 @@
 #   POSTGRES_PASSWORD        password for the `monaca` role and the databases below
 #   MONACA_INTERNAL_SECRET   gateway -> server /internal/* shared secret
 #   MONACA_DEV_KEK           64 hex chars; MONACA_ENV=dev only
-#   MONACA_BOOTSTRAP_ADMIN_PASSWORD / MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET
+#   MONACA_BOOTSTRAP_ADMIN_PASSWORD / MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET /
+#   MONACA_CONSOLE_CLIENT_SECRET
 #   MONACA_APP_DB_PASSWORD   password of the monaca_app login role
+#
+# `MONACA_ENV` defaults to `dev` here. Setting it to `prod` makes remote-deploy.sh preflight these
+# requirements before anything starts, and the server then refuses dev defaults (§2.2):
+#
+#   MONACA_KEK               64 hex chars; replaces MONACA_DEV_KEK (which prod forbids)
+#   MONACA_INTERNAL_SECRET   explicit, not the dev default
+#   MONACA_BOOTSTRAP_ADMIN_PASSWORD / MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET /
+#   MONACA_CONSOLE_CLIENT_SECRET   explicit, not the dev defaults; bootstrap-only
+#
+# The server never validates the bootstrap seeds on `serve`, only on `bootstrap` (§2.2).
 #
 # Set MONACA_SERVER_IMAGE / MONACA_GATEWAY_IMAGE to pin a commit; both default to :latest.
 
@@ -63,7 +74,7 @@ services:
         condition: service_healthy
     env_file: [.env]
     environment:
-      MONACA_ENV: dev
+      MONACA_ENV: ${MONACA_ENV:-dev}
       MONACA_CONTROL_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/monaca_control
       MONACA_ADMIN_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/postgres
     command: ["migrate"]
@@ -79,7 +90,7 @@ services:
         condition: service_completed_successfully
     env_file: [.env]
     environment:
-      MONACA_ENV: dev
+      MONACA_ENV: ${MONACA_ENV:-dev}
       MONACA_CONTROL_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/monaca_control
       MONACA_ADMIN_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/postgres
     # Idempotent by contract (§5.6 seed rows); safe on every deploy.
@@ -94,7 +105,7 @@ services:
         condition: service_healthy
     env_file: [.env]
     environment:
-      MONACA_ENV: dev
+      MONACA_ENV: ${MONACA_ENV:-dev}
       # The image defaults to 0.0.0.0:8081 too; restated because this is the value the
       # gateway's MONACA_SERVER_URL must agree with.
       MONACA_SERVER_ADDR: 0.0.0.0:8081
@@ -120,7 +131,7 @@ services:
         condition: service_started
     env_file: [.env]
     environment:
-      MONACA_ENV: dev
+      MONACA_ENV: ${MONACA_ENV:-dev}
       MONACA_GATEWAY_ADDR: 0.0.0.0:8080
       # Server-to-server hop only (§2.1). The compose service name is the DNS name.
       MONACA_SERVER_URL: http://server:8081

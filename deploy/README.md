@@ -47,11 +47,81 @@ Compose fails with an explicit "set POSTGRES_PASSWORD in deploy/.env" message wh
 value is missing, rather than starting a stack with a default credential.
 
 `MONACA_DEV_KEK` is dev-only and the server refuses it unless `MONACA_ENV=dev` (§2.2) — which
-is exactly what the compose file sets. A real environment uses the KMS KeyProvider instead.
+is exactly what the compose file sets.
+
+`MONACA_ENV` defaults to `dev` in `compose.dev.yml`. To run the same stack as `prod`, put
+`MONACA_ENV=prod` in the deployed `.env` and replace the dev values as well:
+
+    MONACA_KEK=<64 hex chars>
+    MONACA_INTERNAL_SECRET=<explicit, not the dev default>
+    MONACA_BOOTSTRAP_ADMIN_PASSWORD=<explicit, not the dev default>
+    MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET=<explicit, not the dev default>
+    MONACA_CONSOLE_CLIENT_SECRET=<explicit, not the dev default>
+    # remove MONACA_DEV_KEK entirely
+
+`remote-deploy.sh` checks all of these before it starts anything, and the server repeats the
+startup checks (§2.2). The bootstrap secrets are read only when the seeded rows do not exist:
+an existing admin password or client secret is never overwritten by a later deploy.
+
+**KEK rotation is not supported.** `MONACA_KEK` derives every tenant DEK, and sealed signing keys
+and account secrets are encrypted under those DEKs. Changing the value silently makes existing
+rows unreadable; there is no re-encryption tool in M0. Treat it as a permanent secret (§10.7).
+
+This also applies to switching an existing deployment from dev to prod: the KEK changes from
+`MONACA_DEV_KEK` to `MONACA_KEK`, so rows sealed by the old key stop decrypting. Either start
+from an empty database, or set `MONACA_KEK` to the exact hex value the existing data was sealed
+with (copy the old `MONACA_DEV_KEK`, or `1111…` if that deployment used the built-in fallback)
+and only then remove `MONACA_DEV_KEK`.
+
+## Backups and recovery
+
+`remote-deploy.sh` dumps every Monaca database between `pull` and `migrate`. A failed dump aborts
+the deploy before the schema changes. Dumps are written to `backups/<UTC stamp>/` (override with
+`MONACA_BACKUP_DIR`) and are owner-only. The pg_dump client runs inside the `postgres` container,
+so the host does not need PostgreSQL installed.
+
+    # what the deploy does, by hand (files are in /opt/monaca on the host)
+    bash backup.sh --compose-file compose.dev.yml \
+      --db monaca_control --out "backups/$(date -u +%Y%m%dT%H%M%SZ)/monaca_control.dump"
+
+`MONACA_SKIP_BACKUP=1` skips the step and prints a warning; it is for throw-away environments
+only, and it is not the default.
+
+A dump is one database. A complete backup is `monaca_control` plus every `mt_*` tenant database;
+`remote-deploy.sh` enumerates them from `pg_database`, and a manual backup should do the same.
+
+**Restore drill.** Restore into a new database, then prove the schema replays and the audit chain
+still verifies:
+
+    bash restore-drill.sh --compose-file compose.dev.yml \
+      --dump backups/<stamp>/monaca_control.dump --target-db monaca_control_drill --recreate
+
+    # Replay the schema and verify an audit chain against the restored copy. `docker compose
+    # run` replaces the service command, so the entrypoint sees `audit verify`.
+    docker compose -f compose.dev.yml --env-file .env run --rm \
+      -e MONACA_CONTROL_DATABASE_URL=postgres://monaca:<password>@postgres:5432/monaca_control_drill \
+      migrate
+    docker compose -f compose.dev.yml --env-file .env run --rm \
+      -e MONACA_CONTROL_DATABASE_URL=postgres://monaca:<password>@postgres:5432/monaca_control_drill \
+      -e MONACA_AUDIT_TENANT=demo -e MONACA_AUDIT_ORG=acme \
+      migrate audit verify
+
+`audit verify` exits non-zero on the first broken row. For a full drill, restore the tenant
+databases too and point `MONACA_AUDIT_*` at one of them.
+
+**RPO: the last successful pre-deploy dump.** There is no WAL archiving and no point-in-time
+recovery. Anything written after that dump is lost in a disaster, and deploys are the only
+scheduled dump in M0 — schedule `backup.sh` yourself if that window is too large. Copy the dumps
+off the deploy host: a backup in the same failure domain as PostgreSQL is not a backup.
+
+**RTO: one `pg_restore` per database plus `migrate` plus a server start.** It is dominated by
+database size and has not been measured for this stack; run the drill against a production-sized
+copy before relying on a number. Dumps are sequential per database, so control and tenants can be
+seconds apart.
 
 ## Operating
 
-`remote-deploy.sh` is the deploy itself (postgres ready → pull → migrate → bootstrap → up);
+`remote-deploy.sh` is the deploy itself (postgres ready → pull → backup → migrate → bootstrap → up);
 run it by hand on the host when a workflow deploy fails:
 
     cd /opt/monaca

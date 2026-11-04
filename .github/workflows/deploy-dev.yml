@@ -95,14 +95,17 @@ jobs:
           ssh-keyscan -p "$port" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Copy compose.dev.yml, remote-deploy.sh and the environment file
+      - name: Copy compose.dev.yml, the deploy scripts and the environment file
         if: steps.gate.outputs.configured == '1'
         run: |
           set -euo pipefail
           port="${DEPLOY_PORT:-22}"
           path="${DEPLOY_PATH:-/opt/monaca}"
           ssh -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$path'"
-          scp -P "$port" deploy/compose.dev.yml deploy/remote-deploy.sh "$DEPLOY_USER@$DEPLOY_HOST:$path/"
+          # backup.sh is not optional: remote-deploy.sh refuses to migrate without it (§10.7).
+          scp -P "$port" deploy/compose.dev.yml deploy/remote-deploy.sh deploy/backup.sh \
+            deploy/restore-drill.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$path/"
           # The .env never enters the repository or the runner's log; it is streamed over ssh
           # from a secret into a 0600 file on the host.
           #
