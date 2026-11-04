@@ -630,6 +630,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "TOTP enrollment started before another restart verifies after it; a passkey registration challenge " +
       "issued before a third restart completes after it",
   },
+  {
+    step: "63",
+    title: "rate limits are shared across instances",
+    assertion:
+      "a second server process is started on the same database; a per-client token row at 2 lets two " +
+      "requests through the first process and the third request through the second process is 429 with " +
+      "Retry-After, proving the counter is shared; clearing the configuration lets the second process mint " +
+      "again",
+  },
 ];
 
 interface StepResult {
@@ -7141,6 +7150,138 @@ async function persistenceFlow(
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: interaction after restart → sign-in+consent+exchange → replay 409 → unknown 404 → TOTP across restart → passkey across restart`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 63 — the counter behind a gate is shared, not per process (§6.2).
+ *
+ * A per-instance counter would let the second server start a fresh budget. Two requests on the
+ * first process and the third on the second must be the one that receives `429`.
+ */
+async function sharedRateLimitFlow(
+  base: string,
+  adminToken: string,
+  adminSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const basic = btoa(`${ADMIN_CLIENT_ID}:${adminSecret}`);
+  const serverBin =
+    process.env.MONACA_SERVER_BIN ??
+    join(ROOT, ".monaca", "bin", process.platform === "win32" ? "monaca-server.exe" : "monaca-server");
+  const port = 8084;
+  const second = `http://127.0.0.1:${port}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  let proc: ReturnType<typeof Bun.spawn> | undefined;
+
+  const skip = (why: string): StepResult => ({
+    step: "63",
+    title: "rate limits are shared across instances",
+    status: "skip",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+  if (!existsSync(serverBin)) {
+    return skip(`no server binary at ${serverBin}; set MONACA_SERVER_BIN or run bun run fetch:native`);
+  }
+  if (
+    process.env.MONACA_CONTROL_DATABASE_URL === undefined ||
+    process.env.MONACA_ADMIN_DATABASE_URL === undefined
+  ) {
+    return skip("MONACA_CONTROL_DATABASE_URL / MONACA_ADMIN_DATABASE_URL are not in this environment");
+  }
+
+  const patch = (items: unknown[]): Promise<HttpResult> =>
+    call(`${base}/v1/rate-limits`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ items }),
+    });
+  const mint = (target: string): Promise<HttpResult> =>
+    tokenCall(target, { grant_type: "client_credentials", scope: "monaca:admin" }, basic);
+  const limited = (result: HttpResult): boolean => {
+    const raw = result.headers.get("retry-after");
+    const retry = raw === null ? Number.NaN : Number(raw);
+    return (
+      result.status === 429 &&
+      (result.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+        "MONACA_TOO_MANY_ATTEMPTS" &&
+      Number.isInteger(retry) &&
+      retry > 0
+    );
+  };
+
+  try {
+    proc = Bun.spawn([serverBin, "serve"], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        MONACA_SERVER_ADDR: `127.0.0.1:${port}`,
+        MONACA_SERVER_URL: second,
+        MONACA_LOG_LEVEL: "warn",
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    let started = false;
+    for (let i = 0; i < 120; i++) {
+      try {
+        const response = await fetch(`${second}/healthz`, { signal: AbortSignal.timeout(2_000) });
+        if (response.ok) {
+          started = true;
+          break;
+        }
+      } catch {
+        // not listening yet
+      }
+      await Bun.sleep(250);
+    }
+    if (!started) throw new Error(`the second server did not answer ${second}/healthz`);
+
+    const row = await patch([
+      { endpoint: "token", client_id: ADMIN_CLIENT_ID, limit: 2, window_secs: 60 },
+    ]);
+    checks.push(["a per-client token row at 2 is stored", row.status === 200]);
+
+    const first = await mint(base);
+    const secondOnA = await mint(base);
+    const thirdOnB = await mint(second);
+    checks.push([
+      "two requests pass on the first process",
+      first.status === 200 && secondOnA.status === 200,
+    ]);
+    checks.push([
+      "the third request on the second process is 429 with Retry-After",
+      limited(thirdOnB),
+    ]);
+
+    const cleared = await patch([]);
+    const afterOnB = await mint(second);
+    checks.push([
+      "clearing the configuration lets the second process mint again",
+      cleared.status === 200 && afterOnB.status === 200,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    if (proc !== undefined) {
+      proc.kill();
+      await proc.exited;
+    }
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "63",
+    title: "rate limits are shared across instances",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: row stored → two pass on A → third on B is 429 → cleared → B mints`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -14155,6 +14296,7 @@ async function main(): Promise<number> {
   push(await revocationFlow(base, parsed.adminSecret));
   push(await rateLimitFlow(base, adminToken, parsed.adminSecret));
   push(await persistenceFlow(base, adminToken, parsed.consoleSecret));
+  push(await sharedRateLimitFlow(base, adminToken, parsed.adminSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

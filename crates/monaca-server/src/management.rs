@@ -2645,6 +2645,7 @@ pub async fn update_rate_limits(
     }
 
     state.store.replace_rate_limits(&tenant, &rows).await?;
+    state.store.reset_rate_limit_counters(&tenant).await?;
     state.invalidate_rate_limits(&tenant).await;
     let saved = state.store.rate_limits(&tenant).await?;
     Ok(Json(rate_limits_json(&saved)))

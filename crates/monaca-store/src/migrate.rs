@@ -274,6 +274,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "row-backed interaction, TOTP enrollment and passkey challenge state (M1)",
         include_str!("../migrations/tenant_47.sql"),
     ),
+    (
+        48,
+        "shared fixed-window rate-limit counters (M1)",
+        include_str!("../migrations/tenant_48.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

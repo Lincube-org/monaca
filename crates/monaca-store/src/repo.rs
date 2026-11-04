@@ -5071,6 +5071,49 @@ impl Store {
         .await?)
     }
 
+    /// Count one request in a shared fixed window, returning `(count, window_start)`.
+    ///
+    /// The upsert is one atomic statement, so every server instance increments the same row. A
+    /// window that has elapsed is reset in place, which keeps the table bounded by the number of
+    /// distinct bucket keys rather than by request volume.
+    pub async fn rate_limit_hit(
+        &self,
+        tenant: &TenantRow,
+        bucket_key: &str,
+        window_secs: u32,
+        now: OffsetDateTime,
+    ) -> Result<(i64, OffsetDateTime), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: (i64, OffsetDateTime) = sqlx::query_as(
+            "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)
+             VALUES ($1,$2,1)
+             ON CONFLICT (bucket_key) DO UPDATE SET
+               count = CASE
+                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2
+                 THEN 1 ELSE rate_limit_counters.count + 1 END,
+               window_start = CASE
+                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2
+                 THEN $2 ELSE rate_limit_counters.window_start END
+             RETURNING count, window_start",
+        )
+        .bind(bucket_key)
+        .bind(now)
+        .bind(window_secs as i32)
+        .fetch_one(&pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Clear a tenant's shared counters. A configuration write starts every window fresh, so a
+    /// lowered limit applies to the next request instead of inheriting an earlier count.
+    pub async fn reset_rate_limit_counters(&self, tenant: &TenantRow) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query("DELETE FROM tenant.rate_limit_counters")
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+
     /// Replace the tenant's whole rate-limit configuration.
     ///
     /// The caller validates every entry first; the delete-and-insert is one transaction so a

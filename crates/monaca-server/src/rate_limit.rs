@@ -1,12 +1,14 @@
 //! Per-endpoint request gates — `docs/contracts/m0.md` §6.2.
 //!
 //! Two layers are evaluated for every counted request: the tenant-wide row for the endpoint and,
-//! when one exists, the stricter row for the calling client. Both are fixed windows in process
-//! memory. Configuration lives in `tenant.rate_limits`; the built-in defaults are deliberately
-//! generous so an existing deployment is not throttled until an administrator writes a row.
+//! when one exists, the stricter row for the calling client. Both are fixed windows counted in
+//! `tenant.rate_limit_counters`, so every server instance increments the same row and the limit is
+//! deployment-wide. Configuration lives in `tenant.rate_limits`; the built-in defaults are
+//! deliberately generous so an existing deployment is not throttled until an administrator writes
+//! a row.
 //!
-//! The bucket and configuration maps are capacity-bounded: a long-lived process cannot grow them
-//! without limit just because clients keep arriving.
+//! This module owns the configuration cache and the pure window decision. The atomic increment is
+//! a store call; the cache is capacity-bounded.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,8 +33,6 @@ const DEFAULTS: &[(&str, i32, i32)] = &[
 /// How long a tenant's configuration is cached. A write in this process invalidates it immediately;
 /// another instance picks it up within this window.
 const CONFIG_TTL_SECS: i64 = 5;
-/// Upper bound on counted buckets.
-const BUCKET_CAP: usize = 8_192;
 /// Upper bound on cached tenant configurations.
 const CONFIG_CAP: usize = 1_024;
 
@@ -55,19 +55,6 @@ struct CachedConfig {
     loaded_at: OffsetDateTime,
 }
 
-struct Bucket {
-    count: u32,
-    window_end: OffsetDateTime,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BucketKey {
-    tenant: Uuid,
-    endpoint: String,
-    /// `""` for the tenant-wide layer, the protocol client id for the client layer.
-    subject: String,
-}
-
 /// A rejected request: the caller may retry after this many seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct Rejection {
@@ -75,11 +62,10 @@ pub struct Rejection {
     pub retry_after: u64,
 }
 
-/// The process-local gate state.
+/// The cached configuration and the pure window decision.
 #[derive(Default)]
 pub struct RateLimiter {
     configs: Mutex<HashMap<Uuid, CachedConfig>>,
-    buckets: Mutex<HashMap<BucketKey, Bucket>>,
 }
 
 impl RateLimiter {
@@ -113,104 +99,54 @@ impl RateLimiter {
         );
     }
 
-    /// Drop a tenant's cached configuration and counted buckets, so a write takes effect now.
+    /// Drop a tenant's cached configuration, so a write takes effect now.
     pub async fn invalidate(&self, tenant: Uuid) {
         self.configs.lock().await.remove(&tenant);
-        self.buckets
-            .lock()
-            .await
-            .retain(|key, _| key.tenant != tenant);
-    }
-
-    /// Count one request against the tenant and (when configured) client layers.
-    pub async fn check(
-        &self,
-        tenant: Uuid,
-        rows: &[RateLimitRow],
-        endpoint: &str,
-        client: Option<&str>,
-        now: OffsetDateTime,
-    ) -> Result<(), Rejection> {
-        let tenant_limit = rows
-            .iter()
-            .find(|row| row.client_id.is_none() && row.endpoint == endpoint)
-            .map(|row| (row.limit_count.max(1) as u32, row.window_secs.max(1) as u32))
-            .unwrap_or_else(|| {
-                let (limit, window) = default_limit(endpoint);
-                (limit as u32, window as u32)
-            });
-        let client_limit = client.and_then(|client| {
-            rows.iter()
-                .find(|row| {
-                    row.endpoint == endpoint && row.client_id.as_deref() == Some(client)
-                })
-                .map(|row| (row.limit_count.max(1) as u32, row.window_secs.max(1) as u32))
-        });
-
-        let mut buckets = self.buckets.lock().await;
-        consume(
-            &mut buckets,
-            BucketKey {
-                tenant,
-                endpoint: endpoint.to_owned(),
-                subject: String::new(),
-            },
-            tenant_limit,
-            now,
-        )?;
-        if let Some((limit, window)) = client_limit
-            && let Some(client) = client
-        {
-            consume(
-                &mut buckets,
-                BucketKey {
-                    tenant,
-                    endpoint: endpoint.to_owned(),
-                    subject: client.to_owned(),
-                },
-                (limit, window),
-                now,
-            )?;
-        }
-        Ok(())
     }
 }
 
-fn consume(
-    buckets: &mut HashMap<BucketKey, Bucket>,
-    key: BucketKey,
-    (limit, window_secs): (u32, u32),
-    now: OffsetDateTime,
-) -> Result<(), Rejection> {
-    if buckets.len() >= BUCKET_CAP && !buckets.contains_key(&key) {
-        buckets.retain(|_, bucket| bucket.window_end > now);
-        if buckets.len() >= BUCKET_CAP {
-            let oldest = buckets
-                .iter()
-                .min_by_key(|(_, bucket)| bucket.window_end)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                buckets.remove(&oldest);
-            }
-        }
-    }
-
-    let window_end = now + time::Duration::seconds(i64::from(window_secs));
-    let bucket = buckets.entry(key).or_insert(Bucket {
-        count: 0,
-        window_end,
-    });
-    if now >= bucket.window_end {
-        bucket.count = 0;
-        bucket.window_end = window_end;
-    }
-    if bucket.count >= limit {
-        return Err(Rejection {
-            retry_after: (bucket.window_end - now).whole_seconds().max(1) as u64,
+/// The effective layer limit for `endpoint` and an optional client.
+///
+/// Returns `(limit, window_secs)` for the tenant row or its built-in default, and the optional
+/// client row. A client row can only tighten the result because both layers are evaluated.
+pub fn layer_limits(
+    rows: &[RateLimitRow],
+    endpoint: &str,
+    client: Option<&str>,
+) -> ((u32, u32), Option<(u32, u32)>) {
+    let tenant = rows
+        .iter()
+        .find(|row| row.client_id.is_none() && row.endpoint == endpoint)
+        .map(|row| (row.limit_count.max(1) as u32, row.window_secs.max(1) as u32))
+        .unwrap_or_else(|| {
+            let (limit, window) = default_limit(endpoint);
+            (limit as u32, window as u32)
         });
+    let client = client.and_then(|client| {
+        rows.iter()
+            .find(|row| row.endpoint == endpoint && row.client_id.as_deref() == Some(client))
+            .map(|row| (row.limit_count.max(1) as u32, row.window_secs.max(1) as u32))
+    });
+    (tenant, client)
+}
+
+/// Whether the `count`th request in a window is over the limit.
+///
+/// `count` is the value returned by the atomic counter after this request was included.
+pub fn rejection(
+    count: i64,
+    limit: u32,
+    window_start: OffsetDateTime,
+    window_secs: u32,
+    now: OffsetDateTime,
+) -> Option<Rejection> {
+    if count <= i64::from(limit) {
+        return None;
     }
-    bucket.count += 1;
-    Ok(())
+    let window_end = window_start + time::Duration::seconds(i64::from(window_secs));
+    Some(Rejection {
+        retry_after: (window_end - now).whole_seconds().max(1) as u64,
+    })
 }
 
 /// How long a cached configuration is trusted, in seconds. Exposed for the contract test.
@@ -233,33 +169,16 @@ mod tests {
     #[test]
     fn the_window_rejects_and_reports_a_retry() {
         let now = OffsetDateTime::UNIX_EPOCH;
-        let mut buckets = HashMap::new();
-        let key = BucketKey {
-            tenant: Uuid::nil(),
-            endpoint: "token".into(),
-            subject: String::new(),
-        };
-        for _ in 0..2 {
-            consume(&mut buckets, key.clone(), (2, 60), now).expect("under the limit");
-        }
-        let rejection = consume(&mut buckets, key, (2, 60), now).expect_err("over the limit");
-        assert!((1..=60).contains(&rejection.retry_after));
+        assert!(rejection(2, 2, now, 60, now).is_none());
+        let over = rejection(3, 2, now, 60, now).expect("over the limit");
+        assert!((1..=60).contains(&over.retry_after));
     }
 
     #[test]
-    fn an_elapsed_window_starts_a_new_count() {
-        let now = OffsetDateTime::UNIX_EPOCH;
-        let mut buckets = HashMap::new();
-        let key = BucketKey {
-            tenant: Uuid::nil(),
-            endpoint: "token".into(),
-            subject: String::new(),
-        };
-        consume(&mut buckets, key.clone(), (1, 10), now).expect("first");
-        // `OffsetDateTime` does not implement Add for Duration through the operator here; the
-        // helper takes an explicit instant.
-        let later = now + time::Duration::seconds(11);
-        consume(&mut buckets, key, (1, 10), later).expect("a new window");
+    fn an_elapsed_window_is_not_rejected() {
+        let start = OffsetDateTime::UNIX_EPOCH;
+        let later = start + time::Duration::seconds(11);
+        assert!(rejection(2, 1, start, 10, later).is_none());
     }
 
     #[test]

@@ -98,13 +98,38 @@ impl AppState {
                 loaded
             }
         };
-        self.rate_limit
-            .check(tenant.id, &rows, endpoint, client, now)
-            .await
-            .map_err(|rejection| ApiError::rate_limited(rejection.retry_after))
+        let (tenant_layer, client_layer) =
+            crate::rate_limit::layer_limits(&rows, endpoint, client);
+        let key = format!("{endpoint}|tenant");
+        let (count, window_start) = self
+            .store
+            .rate_limit_hit(tenant, &key, tenant_layer.1, now)
+            .await?;
+        if let Some(rejection) = crate::rate_limit::rejection(
+            count,
+            tenant_layer.0,
+            window_start,
+            tenant_layer.1,
+            now,
+        ) {
+            return Err(ApiError::rate_limited(rejection.retry_after));
+        }
+        if let (Some((limit, window_secs)), Some(client)) = (client_layer, client) {
+            let key = format!("{endpoint}|client|{client}");
+            let (count, window_start) =
+                self.store
+                    .rate_limit_hit(tenant, &key, window_secs, now)
+                    .await?;
+            if let Some(rejection) =
+                crate::rate_limit::rejection(count, limit, window_start, window_secs, now)
+            {
+                return Err(ApiError::rate_limited(rejection.retry_after));
+            }
+        }
+        Ok(())
     }
 
-    /// Drop the tenant's cached limit configuration and counters after a management write.
+    /// Drop the tenant's cached limit configuration after a management write.
     pub async fn invalidate_rate_limits(&self, tenant: &TenantRow) {
         self.rate_limit.invalidate(tenant.id).await;
     }
