@@ -141,7 +141,12 @@ async fn profile_json(
         },
         "social": social
             .iter()
-            .map(|row| json!({ "connector": row.connector, "display_name": row.display_name }))
+            .map(|row| json!({
+                "connector": row.connector,
+                "display_name": row.display_name,
+                "email_at_link": row.email_at_link,
+                "linked_at": crate::management::ts(row.linked_at),
+            }))
             .collect::<Vec<_>>(),
         "roles": roles
             .iter()

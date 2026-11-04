@@ -226,7 +226,13 @@ pub mod kinds {
         "Connector exists",
         409,
     );
-    /// The provider account is already linked to another account.
+    /// An account already owns the provider's verified email, and the policy does not link.
+    pub const SOCIAL_EMAIL_TAKEN: ProblemKind = ProblemKind::new(
+        "social_email_taken",
+        "MONACA_SOCIAL_EMAIL_TAKEN",
+        "Email already in use",
+        409,
+    );
     pub const SOCIAL_IDENTITY_TAKEN: ProblemKind = ProblemKind::new(
         "social_identity_taken",
         "MONACA_SOCIAL_IDENTITY_TAKEN",

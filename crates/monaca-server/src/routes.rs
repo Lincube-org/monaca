@@ -185,6 +185,14 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             get(crate::social::connector_callback),
         )
         .route(
+            "/t/{tenant}/social/link/{token}",
+            get(crate::social::social_link_details),
+        )
+        .route(
+            "/t/{tenant}/social/link/{token}/confirm",
+            post(crate::social::confirm_social_link),
+        )
+        .route(
             "/t/{tenant}/sso-connectors",
             get(crate::sso::list_public_sso_connectors),
         )
@@ -399,7 +407,7 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/connectors/{connector}",
-            delete(crate::social::delete_connector),
+            patch(crate::social::update_connector).delete(crate::social::delete_connector),
         )
         .route(
             "/v1/sso-connectors",

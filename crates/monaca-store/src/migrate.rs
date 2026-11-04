@@ -259,6 +259,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "Cap proof-of-work CAPTCHA (M1)",
         include_str!("../migrations/tenant_44.sql"),
     ),
+    (
+        45,
+        "social provider presets and linking policy (M1)",
+        include_str!("../migrations/tenant_45.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

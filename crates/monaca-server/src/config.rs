@@ -52,6 +52,10 @@ pub struct Config {
     /// walk-through points this at a local mock so a valid token can be proven without calling a
     /// real provider. Ignored in production, where the provider URL is always the documented one.
     pub captcha_siteverify_url: Option<String>,
+    /// A dev/CI-only base that replaces the built-in social provider endpoints
+    /// (`MONACA_SOCIAL_PROVIDER_BASE_URL`), so acceptance can run a local mock. Ignored in
+    /// production, where the provider's documented endpoints always win.
+    pub social_provider_base_url: Option<String>,
 }
 
 impl Config {
@@ -91,6 +95,9 @@ impl Config {
             production: environment == "prod",
             captcha_siteverify_url: matches!(environment.as_str(), "dev" | "ci")
                 .then(|| env("MONACA_CAPTCHA_SITEVERIFY_URL"))
+                .flatten(),
+            social_provider_base_url: matches!(environment.as_str(), "dev" | "ci")
+                .then(|| env("MONACA_SOCIAL_PROVIDER_BASE_URL"))
                 .flatten(),
         }
     }
@@ -187,6 +194,7 @@ mod tests {
             bootstrap_admin_password: String::new(),
             production: false,
             captcha_siteverify_url: None,
+            social_provider_base_url: None,
         };
         assert_eq!(config.issuer("demo"), "http://localhost:8080/t/demo");
         assert_eq!(

@@ -224,8 +224,14 @@ pub struct SocialConnectorRow {
     pub id: Uuid,
     /// The slug the protocol and the page use, unique within the tenant.
     pub connector_id: String,
+    /// `generic` | `github` | `google`; built-ins own the endpoints and field mapping.
+    pub provider: String,
     /// Human-readable name shown on the sign-in page.
     pub display_name: String,
+    /// Whether the connector is offered publicly and may complete a round-trip.
+    pub enabled: bool,
+    /// `auto_link_verified_email` | `confirm_link` | `create_new_only`.
+    pub link_policy: String,
     /// The provider's authorization endpoint.
     pub authorize_url: String,
     /// The provider's token endpoint.
@@ -251,6 +257,10 @@ pub struct SocialIdentityRow {
     pub display_name: String,
     /// The provider's stable subject for this account.
     pub subject: String,
+    /// The address the provider asserted when the link was created.
+    pub email_at_link: Option<String>,
+    /// When the identity was linked.
+    pub linked_at: OffsetDateTime,
 }
 
 /// A pending social `state`, as the callback reads it (§6.1).
@@ -264,6 +274,29 @@ pub struct SocialStateRow {
     pub interaction_id: Option<String>,
     /// The account a link state attaches to.
     pub account_id: Option<Uuid>,
+    /// The sealed PKCE verifier minted with the state.
+    pub code_verifier_enc: Option<Vec<u8>>,
+    /// The OIDC nonce minted with the state, when the provider uses one.
+    pub nonce: Option<String>,
+}
+
+/// A pending "link this provider identity to the account that owns the email" confirmation.
+#[derive(Debug, Clone, FromRow)]
+pub struct SocialLinkRequestRow {
+    /// The opaque token handed to the hosted page.
+    pub id: Uuid,
+    /// The connector the provider identity belongs to.
+    pub connector: String,
+    /// The provider's stable subject.
+    pub subject: String,
+    /// The verified address the provider asserted.
+    pub email: String,
+    /// The existing account that owns the address.
+    pub account_id: Uuid,
+    /// The interaction the confirmed sign-in completes.
+    pub interaction_id: String,
+    /// When the confirmation expires.
+    pub expires_at: OffsetDateTime,
 }
 
 /// An enterprise SSO (OIDC) connector in `tenant.sso_connectors` (§6.1).
@@ -1918,8 +1951,9 @@ impl Store {
     ) -> Result<Vec<SocialConnectorRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SocialConnectorRow>(
-            "SELECT id, connector_id, display_name, authorize_url, token_url, userinfo_url,
-                    client_id, client_secret_enc, scopes, created_at
+            "SELECT id, connector_id, provider, display_name, enabled, link_policy,
+                    authorize_url, token_url, userinfo_url, client_id, client_secret_enc, scopes,
+                    created_at
              FROM tenant.social_connectors ORDER BY connector_id",
         )
         .fetch_all(&pool)
@@ -1934,8 +1968,9 @@ impl Store {
     ) -> Result<Option<SocialConnectorRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SocialConnectorRow>(
-            "SELECT id, connector_id, display_name, authorize_url, token_url, userinfo_url,
-                    client_id, client_secret_enc, scopes, created_at
+            "SELECT id, connector_id, provider, display_name, enabled, link_policy,
+                    authorize_url, token_url, userinfo_url, client_id, client_secret_enc, scopes,
+                    created_at
              FROM tenant.social_connectors WHERE connector_id = $1",
         )
         .bind(connector_id)
@@ -1949,7 +1984,10 @@ impl Store {
         &self,
         tenant: &TenantRow,
         connector_id: &str,
+        provider: &str,
         display_name: &str,
+        enabled: bool,
+        link_policy: &str,
         authorize_url: &str,
         token_url: &str,
         userinfo_url: &str,
@@ -1960,15 +1998,19 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         sqlx::query_as::<_, SocialConnectorRow>(
             "INSERT INTO tenant.social_connectors
-                (id, connector_id, display_name, authorize_url, token_url, userinfo_url,
-                 client_id, client_secret_enc, scopes)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             RETURNING id, connector_id, display_name, authorize_url, token_url, userinfo_url,
-                       client_id, client_secret_enc, scopes, created_at",
+                (id, connector_id, provider, display_name, enabled, link_policy, authorize_url,
+                 token_url, userinfo_url, client_id, client_secret_enc, scopes)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             RETURNING id, connector_id, provider, display_name, enabled, link_policy,
+                       authorize_url, token_url, userinfo_url, client_id, client_secret_enc, scopes,
+                       created_at",
         )
         .bind(Uuid::now_v7())
         .bind(connector_id)
+        .bind(provider)
         .bind(display_name)
+        .bind(enabled)
+        .bind(link_policy)
         .bind(authorize_url)
         .bind(token_url)
         .bind(userinfo_url)
@@ -1978,6 +2020,43 @@ impl Store {
         .fetch_one(&pool)
         .await
         .map_err(|err| unique_conflict(err, "connector"))
+    }
+
+    /// Change the writable half of a connector; absent fields keep their value.
+    pub async fn update_social_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        display_name: Option<&str>,
+        client_id: Option<&str>,
+        client_secret_enc: Option<&[u8]>,
+        scopes: Option<&[String]>,
+        enabled: Option<bool>,
+        link_policy: Option<&str>,
+    ) -> Result<Option<SocialConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialConnectorRow>(
+            "UPDATE tenant.social_connectors
+             SET display_name = COALESCE($2, display_name),
+                 client_id = COALESCE($3, client_id),
+                 client_secret_enc = COALESCE($4, client_secret_enc),
+                 scopes = COALESCE($5, scopes),
+                 enabled = COALESCE($6, enabled),
+                 link_policy = COALESCE($7, link_policy)
+             WHERE connector_id = $1
+             RETURNING id, connector_id, provider, display_name, enabled, link_policy,
+                       authorize_url, token_url, userinfo_url, client_id, client_secret_enc, scopes,
+                       created_at",
+        )
+        .bind(connector_id)
+        .bind(display_name)
+        .bind(client_id)
+        .bind(client_secret_enc)
+        .bind(scopes)
+        .bind(enabled)
+        .bind(link_policy)
+        .fetch_optional(&pool)
+        .await?)
     }
 
     /// Delete a connector, and with it every identity that used it; false when it did not exist.
@@ -2026,16 +2105,19 @@ impl Store {
         account_id: AccountId,
         connector: &str,
         subject: &str,
+        email_at_link: Option<&str>,
     ) -> Result<(), StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         sqlx::query(
-            "INSERT INTO tenant.account_social_identities (id, account_id, connector, subject)
-             VALUES ($1,$2,$3,$4)",
+            "INSERT INTO tenant.account_social_identities
+                (id, account_id, connector, subject, email_at_link)
+             VALUES ($1,$2,$3,$4,$5)",
         )
         .bind(Uuid::now_v7())
         .bind(account_id.uuid())
         .bind(connector)
         .bind(subject)
+        .bind(email_at_link)
         .execute(&pool)
         .await
         .map_err(|err| unique_conflict(err, "social identity"))?;
@@ -2069,7 +2151,7 @@ impl Store {
     ) -> Result<Vec<SocialIdentityRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, SocialIdentityRow>(
-            "SELECT i.connector, c.display_name, i.subject
+            "SELECT i.connector, c.display_name, i.subject, i.email_at_link, i.created_at AS linked_at
              FROM tenant.account_social_identities i
              JOIN tenant.social_connectors c ON c.connector_id = i.connector
              WHERE i.account_id = $1
@@ -2088,20 +2170,25 @@ impl Store {
         purpose: &str,
         interaction_id: Option<&str>,
         account_id: Option<Uuid>,
+        code_verifier_enc: Option<&[u8]>,
+        nonce: Option<&str>,
         expires_at: OffsetDateTime,
     ) -> Result<Uuid, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO tenant.social_states
-                (id, connector, purpose, interaction_id, account_id, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6)",
+                (id, connector, purpose, interaction_id, account_id, code_verifier_enc, nonce,
+                 expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(id)
         .bind(connector)
         .bind(purpose)
         .bind(interaction_id)
         .bind(account_id)
+        .bind(code_verifier_enc)
+        .bind(nonce)
         .bind(expires_at)
         .execute(&pool)
         .await?;
@@ -2119,9 +2206,74 @@ impl Store {
         Ok(sqlx::query_as::<_, SocialStateRow>(
             "UPDATE tenant.social_states SET consumed_at = now()
              WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
-             RETURNING connector, purpose, interaction_id, account_id",
+             RETURNING connector, purpose, interaction_id, account_id, code_verifier_enc, nonce",
         )
         .bind(state_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Mint a pending link confirmation; returns the opaque token the page presents.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_social_link_request(
+        &self,
+        tenant: &TenantRow,
+        connector: &str,
+        subject: &str,
+        email: &str,
+        account_id: Uuid,
+        interaction_id: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO tenant.social_link_requests
+                (id, connector, subject, email, account_id, interaction_id, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(id)
+        .bind(connector)
+        .bind(subject)
+        .bind(email)
+        .bind(account_id)
+        .bind(interaction_id)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Read a link confirmation without consuming it, for the page's prompt.
+    pub async fn social_link_request(
+        &self,
+        tenant: &TenantRow,
+        token: Uuid,
+    ) -> Result<Option<SocialLinkRequestRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialLinkRequestRow>(
+            "SELECT id, connector, subject, email, account_id, interaction_id, expires_at
+             FROM tenant.social_link_requests
+             WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()",
+        )
+        .bind(token)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Redeem a link confirmation once.
+    pub async fn take_social_link_request(
+        &self,
+        tenant: &TenantRow,
+        token: Uuid,
+    ) -> Result<Option<SocialLinkRequestRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SocialLinkRequestRow>(
+            "UPDATE tenant.social_link_requests SET consumed_at = now()
+             WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
+             RETURNING id, connector, subject, email, account_id, interaction_id, expires_at",
+        )
+        .bind(token)
         .fetch_optional(&pool)
         .await?)
     }
