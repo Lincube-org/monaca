@@ -190,6 +190,8 @@ async function modeA(withGateway: boolean): Promise<number> {
     MONACA_PUBLIC_BASE_URL: ENV.publicBaseUrl,
     MONACA_CONTROL_DATABASE_URL: controlUrl,
     MONACA_ADMIN_DATABASE_URL: adminUrl,
+    // The dev gateway and the server are on this host and the gateway appends X-Forwarded-For.
+    MONACA_TRUSTED_PROXY_CIDRS: "127.0.0.1/32,::1/128",
   };
 
   try {

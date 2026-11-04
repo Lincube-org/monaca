@@ -436,10 +436,158 @@ Configuration advice, without changing semantics:
   poller its own connection budget or process is a design change outside this batch.
 * Latency: the cache mutex is held across pool `connect`, so a churning poller adds cold-request
   P99. Moving the connect outside the lock is a shared-mechanism change, not done here.
+  (**Closed in Batch F** — see below.)
+
+## Batch F — pool single-flight, per-IP gate, contract and console
+
+Batch F moves one shared mechanism (the tenant-pool cache) and adds three pieces of surface: a
+per-IP request gate, a console page for the existing rate limits, and typed OpenAPI schemas for the
+management resources an SDK actually calls. No request-path semantics change.
+
+### Tenant-pool single flight
+
+Before, `Store::tenant_pool` held the cache mutex for the whole `connect`: every lookup for another
+tenant waited behind the pool being opened, and a churning workload (the mailer visiting 400
+connector tenants) turned that lock into a request-path bottleneck (`lookup_avg_ms` 41 ms on the
+cold sweep). Each cache entry now holds an `Arc<tokio::sync::OnceCell<Result<PgPool, StoreError>>>`;
+the map lock covers only the lookup and the insertion. The caller that installs the cell runs
+`connect` outside the lock; every concurrent caller for the same tenant awaits that one attempt.
+When the attempt fails, all of those waiters receive the same error and the entry is removed — a
+request that arrives *after* the failure starts a new attempt, so a failing database is not
+hammered by a retry burst. In-flight entries are never chosen for LRU eviction, so a concurrent
+lookup cannot create a second pool for the same tenant.
+
+The pool DSN, `max_connections`, timeouts and every caller are unchanged. Suspension, key rotation
+and revocation are read from the tenant row and tables on each request; none of them is cached in
+the pool entry, so the time at which a suspension or revocation takes effect does not move. New
+unit tests in `monaca-store` cover one shared attempt for two callers, the same error reaching a
+waiter, the failed entry being dropped, and a later request retrying.
+
+Both fixtures below run `bun run bench --profile scale --only-pool --reuse`, 400 tenants, pool size
+5, cache 64, on the same Windows host. The four reports are
+`docs/bench/results/pool-{before,after}-{regular,all-connectors}-windows-2026-11-05.json`.
+
+| fixture | metric | before | after |
+|---|---|---:|---:|
+| regular 400 | cold P50 / P99 | 258.4 / 530.2 ms | 315.8 / 911.3 ms |
+| regular 400 | hot P50 / P99 | 1.8 / 31.8 ms | 1.7 / 4.6 ms |
+| regular 400 | hot / mixed hit rate | 100% / 60% | 100% / 60% |
+| regular 400 | mixed P50 | 219.1 ms | 223.6 ms |
+| regular 400 | connections after cold/hot/mixed | 128 / 128 / 128 | 128 / 128 / 128 |
+| all connectors 400 | cold P50 / P99 | 474.3 / 1728.6 ms | 329.4 / 945.3 ms |
+| all connectors 400 | hot P50 / P99 | 6.3 / 148.9 ms | 5.4 / 15.7 ms |
+| all connectors 400 | hot / mixed hit rate | 98.1% / 71.0% | 99.0% / 71.5% |
+| all connectors 400 | mixed P50 | 285.2 ms | 342.4 ms |
+| all connectors 400 | lookup avg, cold/hot/mixed | 41.0 / 4.2 / 35.5 ms | 0.001 / 0.002 / 0.001 ms |
+| all connectors 400 | connect avg, cold/hot/mixed | 315.3 / 272.2 / 195.5 ms | 194.5 / 65.3 / 189.1 ms |
+| all connectors 400 | phase duration | 297.8 s | 200.4 s |
+| all connectors 400 | connections after cold/hot/mixed | 189 / 185 / 108 | 188 / 188 / 128 |
+
+The mechanism being gone shows up in `lookup_avg_ms` (41 → 0.001 ms) and in hot P99 (149 → 15.7 ms
+with all 400 connectors active). The mixed phase is a churn test, not a cache-hit test: each
+cold request inserts a pool and the LRU eviction that follows removes a hot entry, so roughly half
+of the measured hot requests are misses by construction and the p50 tracks `connect` time. Its
++20% move in the all-connector fixture (p95 573.7 → 524.8 ms, p99 671.7 → 677.9 ms) is within the
+run-to-run spread of that phase; the warm regular fixture moved 219.1 → 223.6 ms (+2%). Cold
+numbers are noisier still (the regular before/after swap direction), because each run's first
+sweep opens 400 pools on a machine that also had other work.
+
+### Per-IP request gate
+
+The tenant and client layers count in PostgreSQL so every instance shares them; an IP layer cannot
+follow that pattern. There is one row per (address, endpoint) for the whole internet, which would
+mean a write on every unauthenticated request and a table whose growth is outside the deployment's
+control. The gate therefore counts in a **bounded, per-process** map: fixed 60 s windows,
+16,384 entries, oldest window evicted when full, IPv6 keyed by its `/64` network so a client
+cannot rotate its interface identifier past the limit. It covers `authorize`, `token` and the
+`interaction` POSTs (sign-in, sign-up, consent, abort, MFA and passkey verification), where an
+unauthenticated caller can force expensive work; `/v1` remains protected by its admin token and
+the tenant/client layers. The default is 600/min and `MONACA_IP_RATE_LIMIT_PER_MINUTE=0` disables
+it. It is a flood gate, not a deployment-wide quota: two instances each allow up to the limit. A
+rejected request returns the existing `429` + `Retry-After` contract (`MONACA_TOO_MANY_ATTEMPTS`);
+the ceiling and the window are exposed on `GET /v1/rate-limits` as `ip`.
+
+`X-Forwarded-For` is attacker-controlled unless the socket peer is a configured proxy.
+`MONACA_TRUSTED_PROXY_CIDRS` is the boundary: outside production it defaults to loopback (the dev
+and CI gateway is on the same host); in production it defaults to **empty**, and an empty list
+means the header is ignored and the peer is the client (with a startup warning). When the peer is
+trusted, the header is read right to left, trusted hops are skipped, and the first untrusted address
+wins, so a forged value at the left cannot outweigh what the last proxy saw. Unparseable entries are
+skipped and an unusable header falls back to the peer. The dev gateway appends the peer address it
+observed, so a browser cannot pre-fill the header. IPv4-mapped IPv6 peers are normalised before
+matching either an IPv4 CIDR or the bucket key.
+
+Negative and positive coverage: unit tests in `client_ip.rs` (untrusted peer ignores a forged
+header, trusted peer adopts it, forged prefix loses to the rightmost address, unparseable header
+falls back, IPv4-mapped peer matches an IPv4 network) and in `ip_limit.rs` (per-address and
+per-endpoint buckets, window reset, `/64` aggregation); acceptance step 66 reads the configured
+limit, sends `limit+1` token requests for a nonexistent tenant from distinct addresses via
+`X-Forwarded-For`, and checks the first `404`, the final `429` + `Retry-After`, a different address
+still reaching `404`, the same address on `authorize` still reaching `404` (separate bucket), and
+the header shape of the `429`.
+
+### Console rate-limit page
+
+`/rate-limits` in the existing console shows the four built-in endpoint defaults
+(`authorize`, `token`, `userinfo`, `management`), the per-IP layer and its scope, the configured
+tenant/client overrides with add/delete, and the live counters with a `Limited` / `OK` badge and
+the retry hint. A save replaces the whole override list, which is the API's semantic; the page
+therefore also clears an override by deleting its row. It reads and writes through the existing
+BFF (`GET`/`PATCH /bff/api/rate-limits`), uses the shared TanStack Query keys and i18n strings, and
+has a mock implementation so the console can be developed without a server. It is reachable from
+the sidebar and needs no new deployment knob.
+
+### Typed OpenAPI for the management resources
+
+The document already listed every mounted path; the management resources a third-party SDK
+actually provisions were still summary-only. This batch gives 21 operations real request and
+response schemas (utoipa `ToSchema` view structs, `IntoParams` for the list query):
+
+| family | operations | why |
+|---|---|---|
+| accounts | `GET`/`POST /v1/accounts`, `GET`/`PATCH /v1/accounts/{id}` | the user lifecycle every tenant integrates first; `roles` is a typed sub-object |
+| roles | `GET`/`POST /v1/roles` | tenant-role provisioning is needed to create accounts with a role |
+| sessions | `GET`/`DELETE /v1/accounts/{id}/sessions`, `DELETE …/sessions/{session}` | session/device inventory and revocation is the operation support desks call |
+| clients | `GET`/`POST /v1/clients`, `GET`/`PATCH /v1/clients/{client}`, `POST …/secret` | application registration, rotation and the one-time secret response |
+| orgs | `GET`/`POST /v1/orgs`, `GET`/`PATCH /v1/orgs/{org}` | tenant-level organization provisioning |
+| connectors | `GET`/`POST /v1/connectors`, `PATCH /v1/connectors/{connector}` | social sign-in configuration, including the built-in provider mapping |
+| rate limits | `GET`/`PATCH /v1/rate-limits` | the document the console page consumes, now including `ip` and `status` |
+
+Delete operations, membership/invitation/agent/grant/audit/webhook/email/SSO/resource families
+keep their summary-only overlay entries; they are the next slice rather than a 70-operation sweep.
+`packages/sdk/src/schema.gen.ts` is regenerated from `spec/openapi.json`, so the SDK gains the same
+types, and the codegen drift check compares both.
+
+### Mailer cadence at 400 connectors
+
+Not changed in this batch. Today one loop visits tenants sequentially every 5 s
+(`POLL_INTERVAL`), claims up to 20 rows per tenant, and posts them one at a time. With all 400
+tenants carrying a connector a tick takes ~100 s in the bench (2 ticks in 200 s), and
+`MissedTickBehavior::Delay` simply starts the next tick late; delivery latency is unbounded when
+the backlog grows. The options, with their real costs:
+
+| option | change | cost | verdict |
+|---|---|---|---|
+| lower `MONACA_TENANT_POOL_SIZE` | 5 → 2 shrinks each pool's live connections | cuts tenant-request concurrency (bursts queue behind 2 connections) and does **not** remove the 400 sequential visits, so a tick stays ~100 s | emergency lever for a connection ceiling only |
+| poller budget | visit tenants with bounded concurrency (8–16) and stop claiming at a per-tick deadline, resuming from a round-robin cursor next tick | needs a connection budget for the concurrent pools (e.g. 16 × 2 = 32 extra), provider rate limits must be respected, delivery order per tenant still FIFO | **recommended**; bounds latency to one deadline + one batch and keeps the connection peak measurable |
+| separate poller process/instance | a dedicated worker running `SKIP LOCKED` claims, own pool cache and connection budget | another deployment unit and config surface, still ~128–400 connections, and no benefit at 400 tenants beyond isolating the poller from the request path | do it when tenant count or provider throughput outgrows one worker |
+
+The recommendation is the poller budget first: it is a local change, it preserves `SKIP LOCKED`
+semantics for multiple workers, and it turns "a tick takes 100 s" into a declared deadline that
+the next tick continues from. `MONACA_TENANT_POOL_SIZE` stays an operational knob, not a fix.
+
+### Verification
+
+Local: `cargo test -p monaca-store` (19 tests, including the three new cache tests),
+`cargo clippy --workspace --all-targets` (no new warnings in the changed files),
+`bun run typecheck`, `bun test` (329 tests), `bun run build`, and the acceptance walk-through on a
+fresh database (68 steps, all pass; the four skips are the `/mcp/demo` steps and the two
+restart/multi-instance steps that need environment this local shell does not export). CI is not
+run in this batch because the branch was not pushed.
 
 ## Not in these batches
 
-Consent/interaction storage beyond the three state tables, per-IP limiting, Redis-backed rate
-limiting (the database counter is the M0 shared gate), WAL/PITR, KMS-backed KEK, KMS key rotation,
-and a console UI for rate-limit configuration. They are either follow-ups to B/C or require
-infrastructure decisions outside this repository.
+Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the
+database counter is the M0 shared gate), WAL/PITR, KMS-backed KEK, KMS key rotation. Per-IP
+limiting and a console UI for rate-limit configuration moved into Batch F above. The rest are
+either follow-ups to B/C or require infrastructure decisions outside this repository.

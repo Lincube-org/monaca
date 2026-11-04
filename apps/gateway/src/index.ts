@@ -22,6 +22,7 @@ import {
   type Kernel,
   type Module,
 } from "@monaca/kernel";
+import { getConnInfo } from "hono/bun";
 import { AUDIT_SINK_TOKEN, mcpDemoModule } from "@monaca/module-mcp-demo";
 import type { ToolAuditSink } from "@monaca/mcp";
 import { createHttpAuditSink } from "./audit.ts";
@@ -125,7 +126,17 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
         for (const prefix of ["/t", "/v1", "/.well-known"]) {
           app.all(`${prefix}/*`, (c) => {
             const upstream = new URL(`${c.req.path}${new URL(c.req.url).search}`, target);
-            return forward(c.req.raw, upstream);
+            // Append the peer this gateway saw. The server trusts the header only when the
+            // immediate peer is in MONACA_TRUSTED_PROXY_CIDRS and reads the rightmost untrusted
+            // hop, so a client-supplied prefix cannot choose its bucket.
+            const peer = getConnInfo(c).remote.address;
+            const forwarded = c.req.header("x-forwarded-for");
+            const chain = [forwarded, peer].filter((value) => value !== undefined && value !== "").join(", ");
+            return forward(
+              c.req.raw,
+              upstream,
+              chain === "" ? undefined : { "x-forwarded-for": chain },
+            );
           });
         }
         logger.info("dev proxy enabled", { prefixes: ["/t/*", "/v1/*", "/.well-known/*"], target: config.serverUrl });

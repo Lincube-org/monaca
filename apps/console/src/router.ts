@@ -66,6 +66,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Sign-in experience" },
   },
   {
+    path: "/rate-limits",
+    name: "rate-limits",
+    component: () => import("@/pages/RateLimitsPage.vue"),
+    meta: { title: "Rate limits" },
+  },
+  {
     path: "/email-templates",
     name: "email-templates",
     component: () => import("@/pages/EmailTemplatesPage.vue"),

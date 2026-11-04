@@ -661,6 +661,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "GET /healthz returns status ok, GET /v1/rate-limits returns the four defaults, and a typed PATCH " +
       "of the same path restores an empty item list",
   },
+  {
+    step: "66",
+    title: "per-IP rate limits",
+    assertion:
+      "the returned per-IP default is used to send limit+1 token requests for a made-up tenant from one " +
+      "X-Forwarded-For address: the first limit are 404 and the next is 429 with Retry-After and " +
+      "MONACA_TOO_MANY_ATTEMPTS; a second address is not limited, and the exhausted address can still " +
+      "reach authorize because the buckets are per endpoint",
+  },
 ];
 
 interface StepResult {
@@ -7140,6 +7149,24 @@ async function rateLimitFlow(
       limited(third),
     ]);
 
+    const live = await call(`${base}/v1/rate-limits`, { headers });
+    const liveStatus =
+      (live.body as {
+        status?: { endpoint?: unknown; client_id?: unknown; count?: unknown; limited?: unknown }[];
+      } | undefined)?.status ?? [];
+    checks.push([
+      "the live status names the token/client counter and reports it limited",
+      live.status === 200 &&
+        liveStatus.some(
+          (item) =>
+            item.endpoint === "token" &&
+            item.client_id === ADMIN_CLIENT_ID &&
+            typeof item.count === "number" &&
+            item.count > 2 &&
+            item.limited === true,
+        ),
+    ]);
+
     const tenantRow = await patch([{ endpoint: "authorize", limit: 1, window_secs: 60 }]);
     const firstAuthorize = await authorize("first");
     const secondAuthorize = await authorize("second");
@@ -7176,6 +7203,107 @@ async function rateLimitFlow(
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: defaults → four 400s → client token limit 2 → third 429+Retry-After → tenant authorize limit 1 → second 429 → cleared`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 66 — the per-IP gate (§6.2).
+ *
+ * The tenant and client layers need a real tenant; this layer runs before the tenant lookup, so
+ * the cheapest flooding target is a name that does not exist. The step reads the configured
+ * per-IP limit from the management document instead of hard-coding it, exhausts one address and
+ * proves that another address, and the same address on another endpoint, are unaffected.
+ */
+async function ipRateLimitFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  const runId = Date.now().toString(36);
+  let detail = "";
+
+  const retryAfter = (result: HttpResult): number | undefined => {
+    const raw = result.headers.get("retry-after");
+    if (raw === null) return undefined;
+    const value = Number(raw);
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+  };
+  const limited = (result: HttpResult): boolean =>
+    result.status === 429 &&
+    (result.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+      "MONACA_TOO_MANY_ATTEMPTS" &&
+    retryAfter(result) !== undefined;
+
+  const missingTenant = `ip-limit-${runId}`;
+  const token = (address: string): Promise<HttpResult> =>
+    call(`${base}/t/${missingTenant}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-forwarded-for": address,
+      },
+      body: "grant_type=client_credentials",
+    });
+  const authorize = (address: string): Promise<HttpResult> =>
+    call(`${base}/t/${missingTenant}/oauth2/authorize?client_id=no-such-client`, {
+      headers: { "x-forwarded-for": address },
+      redirect: "manual",
+    });
+
+  try {
+    const read = await call(`${base}/v1/rate-limits`, { headers });
+    const ip = (read.body as { ip?: { limit?: number; window_secs?: number; scope?: string } })
+      ?.ip;
+    const limit = ip?.limit ?? 0;
+    checks.push([
+      "GET /v1/rate-limits reports the per-IP layer and its limit",
+      read.status === 200 && limit > 0 && ip?.window_secs === 60 && ip?.scope !== undefined,
+    ]);
+    if (limit <= 0) return { step: "66", title: "per-IP rate limits", status: "fail", ms: Math.round(performance.now() - t), detail: "the per-IP layer is disabled; enable MONACA_IP_RATE_LIMIT_PER_MINUTE" };
+
+    const first = await token(`203.0.113.${Math.floor(Math.random() * 200) + 20}`);
+    checks.push([
+      "the first request from an address reaches the tenant lookup (404, not 429)",
+      first.status === 404,
+    ]);
+
+    // The address is fresh. Send one more than the limit; the last request must be refused.
+    const address = `198.51.100.${Math.floor(Math.random() * 200) + 20}`;
+    let last: HttpResult | undefined;
+    for (let i = 0; i <= limit; i++) last = await token(address);
+    checks.push([
+      "the address is limited after exactly the configured number of requests",
+      last !== undefined && limited(last),
+    ]);
+
+    const other = await token(`192.0.2.${Math.floor(Math.random() * 200) + 20}`);
+    checks.push([
+      "a second address is not limited by the first address's bucket",
+      other.status === 404,
+    ]);
+    checks.push([
+      "the same address still reaches another endpoint (buckets are per endpoint)",
+      (await authorize(address)).status === 404,
+    ]);
+    checks.push([
+      "the 429 carries Retry-After between 1 and 60 seconds",
+      retryAfter(last ?? other) !== undefined &&
+        (retryAfter(last ?? other) ?? 0) >= 1 &&
+        (retryAfter(last ?? other) ?? 0) <= 60,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "66",
+    title: "per-IP rate limits",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: default read → first 404 → limit+1 429 → other address → other endpoint → Retry-After`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -14726,6 +14854,7 @@ async function main(): Promise<number> {
   push(await socialProvidersFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await revocationFlow(base, parsed.adminSecret));
   push(await rateLimitFlow(base, adminToken, parsed.adminSecret));
+  push(await ipRateLimitFlow(base, adminToken));
   push(await persistenceFlow(base, adminToken, parsed.consoleSecret));
   push(await sharedRateLimitFlow(base, adminToken, parsed.adminSecret));
   push(await metricsFlow(base, parsed.internalSecret));

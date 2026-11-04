@@ -17,14 +17,15 @@ use monaca_oidc::{is_absolute_http_url, valid_scope};
 use monaca_store::{ClientRow, TenantRow};
 use monaca_types::{ClientId, EventId, TypedId};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::error::{ApiError, kinds};
 use crate::management::{authorize_admin, ts, validate_custom_css};
+use crate::schemas::{ClientList, ClientSecretView, ClientView, CreatedClientView};
 use crate::state::AppState;
 
 /// The body of `POST /v1/clients`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateClientBody {
     /// The protocol id that appears in authorize URLs.
     pub client_id: String,
@@ -50,7 +51,7 @@ pub struct CreateClientBody {
 }
 
 /// The body of `PATCH /v1/clients/{client}`; absent fields are left alone.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateClientBody {
     /// New display name.
     pub name: Option<String>,
@@ -67,6 +68,18 @@ pub struct UpdateClientBody {
 }
 
 /// `POST /v1/clients` — register an application.
+#[utoipa::path(
+    post,
+    path = "/v1/clients",
+    tag = "management",
+    summary = "Create an application",
+    request_body = CreateClientBody,
+    responses(
+        (status = 201, description = "The created application and its one-time secret.", body = CreatedClientView),
+        (status = 400, description = "The client id, kind, URI, scope or origin is invalid."),
+        (status = 409, description = "The client id is already registered.")
+    )
+)]
 pub async fn create_client(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -151,18 +164,23 @@ pub async fn create_client(
         tracing::warn!(%err, "could not append client.created audit event");
     }
 
-    let mut body = client_json(&row, &redirect_uris, &post_logout_redirect_uris);
-    if let Some((secret, _)) = secret {
-        body["client_secret"] = json!(secret);
-    }
-    Ok((StatusCode::CREATED, Json(body)).into_response())
+    let view = client_json(&row, &redirect_uris, &post_logout_redirect_uris);
+    let created = CreatedClientView::from_view(view, secret.map(|(secret, _)| secret));
+    Ok((StatusCode::CREATED, Json(created)).into_response())
 }
 
 /// `GET /v1/clients` — every application in the tenant.
+#[utoipa::path(
+    get,
+    path = "/v1/clients",
+    tag = "management",
+    summary = "List applications",
+    responses((status = 200, description = "The applications.", body = ClientList))
+)]
 pub async fn list_clients(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ClientList>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let rows = state.store.clients(&tenant).await?;
     let mut items = Vec::with_capacity(rows.len());
@@ -170,15 +188,26 @@ pub async fn list_clients(
         let (redirect_uris, post_logout) = registered_uris(&state, &tenant, row).await?;
         items.push(client_json(row, &redirect_uris, &post_logout));
     }
-    Ok(Json(json!({ "items": items, "next": null })))
+    Ok(Json(ClientList { items, next: None }))
 }
 
 /// `GET /v1/clients/{client}`.
+#[utoipa::path(
+    get,
+    path = "/v1/clients/{client}",
+    tag = "management",
+    summary = "Read an application",
+    params(("client" = String, Path, description = "The protocol client id or the `cli_…` id.")),
+    responses(
+        (status = 200, description = "The application.", body = ClientView),
+        (status = 404, description = "No such application.")
+    )
+)]
 pub async fn get_client(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(client): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ClientView>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let row = load_client(&state, &tenant, &client).await?;
     let (redirect_uris, post_logout) = registered_uris(&state, &tenant, &row).await?;
@@ -186,12 +215,25 @@ pub async fn get_client(
 }
 
 /// `PATCH /v1/clients/{client}` — rename it or replace its URIs, scopes or consent policy.
+#[utoipa::path(
+    patch,
+    path = "/v1/clients/{client}",
+    tag = "management",
+    summary = "Update an application",
+    params(("client" = String, Path, description = "The protocol client id or the `cli_…` id.")),
+    request_body = UpdateClientBody,
+    responses(
+        (status = 200, description = "The updated application.", body = ClientView),
+        (status = 400, description = "A URI, scope, origin or CSS value is invalid."),
+        (status = 404, description = "No such application.")
+    )
+)]
 pub async fn update_client(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(client): Path<String>,
     Json(body): Json<UpdateClientBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ClientView>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let row = load_client(&state, &tenant, &client).await?;
 
@@ -275,11 +317,23 @@ pub async fn update_client(
 }
 
 /// `POST /v1/clients/{client}/secret` — replace the secret; the previous one stops working.
+#[utoipa::path(
+    post,
+    path = "/v1/clients/{client}/secret",
+    tag = "management",
+    summary = "Rotate an application secret",
+    params(("client" = String, Path, description = "The protocol client id or the `cli_…` id.")),
+    responses(
+        (status = 200, description = "The new secret.", body = ClientSecretView),
+        (status = 400, description = "The application is public and has no secret."),
+        (status = 404, description = "No such application.")
+    )
+)]
 pub async fn rotate_client_secret(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(client): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ClientSecretView>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let row = load_client(&state, &tenant, &client).await?;
     if !row.secret_hash.is_some() {
@@ -315,10 +369,10 @@ pub async fn rotate_client_secret(
         tracing::warn!(%err, "could not append client.secret_rotated audit event");
     }
 
-    Ok(Json(json!({
-        "client_id": row.client_id,
-        "client_secret": secret,
-    })))
+    Ok(Json(ClientSecretView {
+        client_id: row.client_id,
+        client_secret: secret,
+    }))
 }
 
 /// `DELETE /v1/clients/{client}` — remove the application with its codes and refresh tokens.
@@ -380,21 +434,21 @@ async fn registered_uris(
     Ok((redirect_uris, post_logout))
 }
 
-fn client_json(row: &ClientRow, redirect_uris: &[String], post_logout: &[String]) -> Value {
-    json!({
-        "id": ClientId::from_uuid(row.id).to_typed_string(),
-        "client_id": row.client_id,
-        "name": row.name,
-        "kind": row.kind,
-        "token_auth_method": row.token_auth_method,
-        "scopes": row.scopes,
-        "redirect_uris": redirect_uris,
-        "post_logout_redirect_uris": post_logout,
-        "cors_allowed_origins": row.cors_allowed_origins,
-        "custom_css": row.custom_css,
-        "is_third_party": row.is_third_party,
-        "created_at": ts(row.created_at),
-    })
+fn client_json(row: &ClientRow, redirect_uris: &[String], post_logout: &[String]) -> ClientView {
+    ClientView {
+        id: ClientId::from_uuid(row.id).to_typed_string(),
+        client_id: row.client_id.clone(),
+        name: row.name.clone(),
+        kind: row.kind.clone(),
+        token_auth_method: row.token_auth_method.clone(),
+        scopes: row.scopes.clone(),
+        redirect_uris: redirect_uris.to_vec(),
+        post_logout_redirect_uris: post_logout.to_vec(),
+        cors_allowed_origins: row.cors_allowed_origins.clone(),
+        custom_css: row.custom_css.clone(),
+        is_third_party: row.is_third_party,
+        created_at: ts(row.created_at),
+    }
 }
 
 /// The protocol id rule: lowercase, digits and `-`, 2–32 characters.

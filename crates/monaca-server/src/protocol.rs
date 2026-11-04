@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::client_ip::ClientIp;
 use crate::error::{ApiError, kinds};
 use crate::session;
 use crate::state::AppState;
@@ -132,7 +133,11 @@ pub async fn authorize(
     Path(tenant_slug): Path<String>,
     Query(mut params): Query<AuthorizeParams>,
     headers: HeaderMap,
+    client_ip: ClientIp,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "authorize")
+        .await?;
     let tenant = state.tenant(&tenant_slug).await?;
 
     // RFC 9126: a pushed request replaces the inline parameters entirely.
@@ -563,9 +568,13 @@ pub struct SignInBody {
 pub async fn sign_in(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(body): Json<SignInBody>,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let tenant = state.tenant(&tenant_slug).await?;
     let interaction = state
         .peek_interaction(&tenant, &iid)
@@ -1680,9 +1689,13 @@ async fn complete_sign_up(
 pub async fn sign_up(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(body): Json<SignUpBody>,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.sign_up_enabled {
@@ -1832,8 +1845,12 @@ pub async fn sign_up_verify(
 pub async fn sign_in_code(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (_interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.email_code_sign_in_enabled {
@@ -1858,9 +1875,13 @@ pub async fn sign_in_code(
 pub async fn sign_in_code_verify(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(body): Json<CodeVerifyBody>,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     if !state
         .store
@@ -1899,8 +1920,12 @@ pub async fn sign_in_code_verify(
 pub async fn sign_in_link(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (_interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.email_code_sign_in_enabled {
@@ -2239,9 +2264,13 @@ async fn refuse_mfa_code(
 pub async fn mfa_verify(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(body): Json<MfaVerifyBody>,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
         .mfa_pending(&tenant, &iid)
@@ -2634,9 +2663,13 @@ pub async fn passkey_sign_in_options(
 pub async fn passkey_sign_in_verify(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(body): Json<crate::passkey::CeremonyBody>,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (interaction, tenant) = passkey_sign_in_interaction(&state, &tenant_slug, &iid).await?;
     let Some(challenge) = state
         .take_passkey_challenge(&tenant, &format!("in:{iid}"))
@@ -2782,9 +2815,13 @@ pub async fn mfa_passkey_options(
 pub async fn mfa_passkey_verify(
     State(state): State<Arc<AppState>>,
     Path((tenant_slug, iid)): Path<(String, String)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(body): Json<crate::passkey::CeremonyBody>,
 ) -> Result<Response, ApiError> {
+    state
+        .enforce_ip_rate_limit(client_ip.0, "interaction")
+        .await?;
     let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
         .mfa_pending(&tenant, &iid)
@@ -3448,8 +3485,10 @@ pub async fn token(
     State(state): State<Arc<AppState>>,
     Path(tenant_slug): Path<String>,
     headers: HeaderMap,
+    client_ip: ClientIp,
     Form(form): Form<TokenForm>,
 ) -> Result<Response, ApiError> {
+    state.enforce_ip_rate_limit(client_ip.0, "token").await?;
     let tenant = state.tenant(&tenant_slug).await?;
     let request = TokenRequest::parse(&form)
         .map_err(|code| ApiError::token(code, "the token request is malformed"))?;

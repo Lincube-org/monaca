@@ -24,13 +24,14 @@ mod runtime_state;
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use monaca_types::{OrgCtx, OrgId, TenantId};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
@@ -209,9 +210,9 @@ pub struct PoolStats {
 /// A point-in-time copy of [`PoolStats`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PoolStatsSnapshot {
-    /// Lookups answered from the cache.
+    /// Lookups answered by an existing pool or an in-flight creation.
     pub hits: u64,
-    /// Lookups that created a pool.
+    /// Lookups that started a new pool; a concurrent waiter for the same key counts as a hit.
     pub misses: u64,
     /// Time spent in the cache lookup, including waiting for the map lock.
     pub lookup_nanos: u64,
@@ -231,9 +232,14 @@ impl PoolStats {
 }
 
 /// One cached tenant pool plus the tick at which it was last used, for LRU eviction.
+///
+/// The pool is created through a per-entry [`OnceCell`], so concurrent misses for the same tenant
+/// share one `connect` instead of serialising behind the map lock or opening a pool each. The
+/// cell also keeps a failed attempt visible to the callers that were already waiting: they see the
+/// same error, and only a later request starts a new attempt.
 struct CachedPool {
-    pool: PgPool,
-    last_used: u64,
+    init: Arc<OnceCell<Result<PgPool, StoreError>>>,
+    last_used: AtomicU64,
 }
 
 /// The database handle: one control-plane pool, one provisioning pool, one pool per tenant.
@@ -287,66 +293,105 @@ impl Store {
     }
 
     /// The pool for one tenant database, created on first use and cached.
+    ///
+    /// Only the map lookup and the insertion run under the map lock. A miss installs an empty
+    /// [`OnceCell`] and connects outside the lock; another request for the same tenant that arrives
+    /// while the connection is being established joins the same cell instead of opening a second
+    /// pool. If that attempt fails, every waiter receives the same error and the entry is removed,
+    /// so a retry is a new attempt rather than a burst of concurrent ones.
     pub async fn tenant_pool(&self, db_name: &str) -> Result<PgPool, StoreError> {
         validate_database_name(db_name)?;
+        self.cached_pool(db_name, || async {
+            let base = self
+                .config
+                .app_url
+                .as_deref()
+                .unwrap_or(&self.config.control_url);
+            let options = PgConnectOptions::from_str(base)
+                .map_err(|err| StoreError::Database(format!("tenant pool URL: {err}")))?
+                .database(db_name);
+            let connect_started = Instant::now();
+            let connected = PgPoolOptions::new()
+                .max_connections(self.config.tenant_pool_size)
+                .acquire_timeout(Duration::from_secs(10))
+                .idle_timeout(Duration::from_secs(300))
+                .connect_with(options)
+                .await;
+            self.stats.connect_nanos.fetch_add(
+                connect_started.elapsed().as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+            connected.map_err(StoreError::from)
+        })
+        .await
+    }
 
+    /// The cache and single-flight mechanism behind [`Self::tenant_pool`].
+    ///
+    /// `connect` runs outside the map lock and only for the caller that installed the entry; every
+    /// concurrent caller for the same key awaits that one attempt instead of starting its own.
+    async fn cached_pool<F, Fut>(&self, db_name: &str, connect: F) -> Result<PgPool, StoreError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<PgPool, StoreError>>,
+    {
         let tick = self.pool_tick.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
-        let mut pools = self.tenants.lock().await;
-        let lookup = started.elapsed();
-        if let Some(entry) = pools.get_mut(db_name) {
-            entry.last_used = tick;
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+        let init = {
+            let mut pools = self.tenants.lock().await;
+            let lookup = started.elapsed();
             self.stats
                 .lookup_nanos
                 .fetch_add(lookup.as_nanos() as u64, Ordering::Relaxed);
-            return Ok(entry.pool.clone());
-        }
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .lookup_nanos
-            .fetch_add(lookup.as_nanos() as u64, Ordering::Relaxed);
+            if let Some(entry) = pools.get(db_name) {
+                entry.last_used.store(tick, Ordering::Relaxed);
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                Arc::clone(&entry.init)
+            } else {
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                let init = Arc::new(OnceCell::new());
 
-        let base = self
-            .config
-            .app_url
-            .as_deref()
-            .unwrap_or(&self.config.control_url);
-        let options = PgConnectOptions::from_str(base)
-            .map_err(|err| StoreError::Database(format!("tenant pool URL: {err}")))?
-            .database(db_name);
-        let connect_started = Instant::now();
-        let pool = PgPoolOptions::new()
-            .max_connections(self.config.tenant_pool_size)
-            .acquire_timeout(Duration::from_secs(10))
-            .idle_timeout(Duration::from_secs(300))
-            .connect_with(options)
-            .await?;
-        self.stats.connect_nanos.fetch_add(
-            connect_started.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+                // Evict the least recently used pool when the cache is full. A pool that is still
+                // connecting is never chosen: removing it would let the next request start a
+                // second pool for the same tenant, which is exactly what the cell prevents. If
+                // every entry is connecting, the cap is exceeded briefly.
+                if pools.len() >= self.config.tenant_pool_cache
+                    && let Some(oldest) = pools
+                        .iter()
+                        .filter(|(_, entry)| entry.init.get().is_some())
+                        .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+                        .map(|(key, _)| key.clone())
+                {
+                    pools.remove(&oldest);
+                }
+                pools.insert(
+                    db_name.to_owned(),
+                    CachedPool {
+                        init: Arc::clone(&init),
+                        last_used: AtomicU64::new(tick),
+                    },
+                );
+                init
+            }
+        };
 
-        // Evict the least recently used pool when the cache is full. Pools are cheap to rebuild
-        // and the cap is what keeps an unbounded tenant count from exhausting PostgreSQL's
-        // connection slots. Scanning the map on a miss is cheap at the deployed cache sizes; the
-        // hit path only touches the entry it already found.
-        if pools.len() >= self.config.tenant_pool_cache
-            && let Some(oldest) = pools
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(key, _)| key.clone())
-        {
-            pools.remove(&oldest);
+        let result = init.get_or_init(connect).await;
+
+        match result {
+            Ok(pool) => Ok(pool.clone()),
+            Err(err) => {
+                // Drop only this attempt's entry: a concurrent caller may already have replaced
+                // it after another failure, and removing that one would break its single flight.
+                let mut pools = self.tenants.lock().await;
+                if pools
+                    .get(db_name)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.init, &init))
+                {
+                    pools.remove(db_name);
+                }
+                Err(err.clone())
+            }
         }
-        pools.insert(
-            db_name.to_owned(),
-            CachedPool {
-                pool: pool.clone(),
-                last_used: tick,
-            },
-        );
-        Ok(pool)
     }
 
     /// Open an org transaction: `BEGIN`, `search_path`, and (when enabled) `SET LOCAL ROLE`.
@@ -522,10 +567,7 @@ impl Store {
 
     /// Record that a tenant has an email connector row. Called before the tenant-database write on
     /// the create path, so a failed index write cannot leave a connector that the mailer never sees.
-    pub async fn mark_email_connector_present(
-        &self,
-        tenant: &TenantRow,
-    ) -> Result<(), StoreError> {
+    pub async fn mark_email_connector_present(&self, tenant: &TenantRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO tenant_email_connectors (tenant_id) VALUES ($1)
              ON CONFLICT (tenant_id) DO UPDATE SET updated_at = now()",
@@ -537,10 +579,7 @@ impl Store {
     }
 
     /// Remove a tenant from the email-connector index.
-    pub async fn forget_email_connector_index(
-        &self,
-        tenant: &TenantRow,
-    ) -> Result<(), StoreError> {
+    pub async fn forget_email_connector_index(&self, tenant: &TenantRow) -> Result<(), StoreError> {
         sqlx::query("DELETE FROM tenant_email_connectors WHERE tenant_id = $1")
             .bind(tenant.id)
             .execute(&self.control)
@@ -709,5 +748,148 @@ mod tests {
         assert!(validate_schema_name("org_ab-cd").is_err());
         assert!(validate_role_name("tabcd_oefgh").is_ok());
         assert!(validate_role_name("tabcd\"oefgh").is_err());
+    }
+
+    /// A store whose pools are never opened: the cache tests below touch no database.
+    fn test_store(tenant_pool_cache: usize) -> Store {
+        let pool = || {
+            PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgres://monaca:monaca@127.0.0.1:54329/monaca_control")
+                .expect("a valid URL")
+        };
+        Store {
+            control: pool(),
+            admin: pool(),
+            config: StoreConfig {
+                tenant_pool_cache,
+                ..StoreConfig::default()
+            },
+            tenants: Mutex::new(HashMap::new()),
+            pool_tick: AtomicU64::new(0),
+            stats: PoolStats::default(),
+        }
+    }
+
+    fn lazy_pool(name: &str) -> PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&format!("postgres://monaca:monaca@127.0.0.1:54329/{name}"))
+            .expect("a valid URL")
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_share_one_connection_attempt() {
+        use std::sync::atomic::AtomicUsize;
+
+        let store = Arc::new(test_store(64));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+
+        let attempt = {
+            let store = Arc::clone(&store);
+            let calls = Arc::clone(&calls);
+            tokio::spawn(async move {
+                store
+                    .cached_pool("mt_shared", || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let _ = started.send(());
+                        // Long enough that the second caller joins this cell, not a new one.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Ok(lazy_pool("mt_shared"))
+                    })
+                    .await
+            })
+        };
+        started_rx.await.expect("the first attempt starts");
+
+        // The second caller arrives while the first is still connecting.
+        let joined = store
+            .cached_pool("mt_shared", || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(lazy_pool("mt_shared"))
+            })
+            .await
+            .expect("the shared attempt succeeds");
+
+        let first = attempt.await.expect("the task finishes").expect("succeeds");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one connect for two callers"
+        );
+        assert_eq!(
+            store.pool_stats().misses,
+            1,
+            "the waiter counts as a hit, not a miss"
+        );
+        assert_eq!(
+            first.connect_options().get_database(),
+            joined.connect_options().get_database()
+        );
+    }
+
+    #[tokio::test]
+    async fn waiters_share_the_error_of_a_failed_attempt_and_the_entry_is_dropped() {
+        let store = Arc::new(test_store(64));
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+
+        let attempt = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .cached_pool("mt_broken", || async move {
+                        let _ = started.send(());
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Err(StoreError::UnknownTenant("mt_broken".into()))
+                    })
+                    .await
+            })
+        };
+        started_rx.await.expect("the first attempt starts");
+
+        let joined = store
+            .cached_pool("mt_broken", || async {
+                Err(StoreError::UnknownTenant(
+                    "a second attempt must not run".into(),
+                ))
+            })
+            .await;
+
+        let first = attempt.await.expect("the task finishes");
+        let expected = StoreError::UnknownTenant("mt_broken".into());
+        assert_eq!(first.err(), Some(expected.clone()));
+        assert_eq!(
+            joined.err(),
+            Some(expected),
+            "the waiter sees the attempt's error"
+        );
+
+        // The failed entry is gone, so the next request is a fresh attempt.
+        assert!(store.tenants.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_later_request_retries_after_a_failure() {
+        use std::sync::atomic::AtomicUsize;
+
+        let store = test_store(64);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let failure = store
+            .cached_pool("mt_retry", || async {
+                Err(StoreError::UnknownTenant("mt_retry".into()))
+            })
+            .await;
+        assert!(failure.is_err());
+
+        let retry = store
+            .cached_pool("mt_retry", || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(lazy_pool("mt_retry"))
+            })
+            .await;
+        assert!(retry.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.pool_stats().misses, 2, "a retry is a new miss");
     }
 }

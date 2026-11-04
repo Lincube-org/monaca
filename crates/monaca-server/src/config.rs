@@ -13,6 +13,7 @@
 //! The struct deliberately does not derive `Debug`: it holds the KEK and the seeded credentials,
 //! and a derived `Debug` is how a key ends up in a log line.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// The dev/ci default for `MONACA_INTERNAL_SECRET`. `MONACA_ENV=prod` refuses it.
@@ -82,6 +83,82 @@ pub struct Config {
     /// An optional second listener that serves only `/metrics` (`MONACA_METRICS_ADDR`).
     /// Empty disables it; the main server still answers `/metrics` on its own address.
     pub metrics_addr: Option<String>,
+    /// Peers allowed to speak for the client through `X-Forwarded-For`
+    /// (`MONACA_TRUSTED_PROXY_CIDRS`, comma-separated CIDRs). Empty means the header is ignored
+    /// and the socket peer is the client. Defaults to loopback outside `prod`, because the dev
+    /// and CI gateway is on the same host.
+    pub trusted_proxies: Vec<TrustedProxy>,
+    /// Per-IP requests per minute for the authentication endpoints
+    /// (`MONACA_IP_RATE_LIMIT_PER_MINUTE`, 600). `0` disables the IP layer.
+    pub ip_rate_limit_per_minute: u32,
+}
+
+/// One entry of the `X-Forwarded-For` trust boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustedProxy {
+    /// The network's base address.
+    addr: IpAddr,
+    /// Network prefix length in bits.
+    prefix: u8,
+}
+
+impl TrustedProxy {
+    /// Parse `address` or `address/prefix`; a missing prefix means the whole address (`/32` or
+    /// `/128`).
+    pub fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let (addr, prefix) = match raw.split_once('/') {
+            Some((addr, prefix)) => (addr.parse::<IpAddr>().ok()?, prefix.parse::<u8>().ok()?),
+            None => {
+                let addr = raw.parse::<IpAddr>().ok()?;
+                let prefix = match addr {
+                    IpAddr::V4(_) => 32,
+                    IpAddr::V6(_) => 128,
+                };
+                (addr, prefix)
+            }
+        };
+        match addr {
+            IpAddr::V4(_) if prefix > 32 => return None,
+            IpAddr::V6(_) if prefix > 128 => return None,
+            _ => {}
+        }
+        Some(Self { addr, prefix })
+    }
+
+    /// Whether `ip` falls inside this network. An IPv4-mapped IPv6 address is matched as IPv4.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = unmap(ip);
+        match (self.addr, ip) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                (u32::from(network) & mask) == (u32::from(ip) & mask)
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                (u128::from(network) & mask) == (u128::from(ip) & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Convert an IPv4-mapped IPv6 address to IPv4 so one CIDR list covers both spellings.
+pub fn unmap(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        IpAddr::V4(_) => ip,
+    }
 }
 
 impl Config {
@@ -110,6 +187,31 @@ impl Config {
             );
             "11".repeat(32)
         };
+
+        let trusted_proxies = match env("MONACA_TRUSTED_PROXY_CIDRS") {
+            Some(raw) => raw
+                .split(',')
+                .filter_map(|entry| {
+                    let entry = entry.trim();
+                    let parsed = TrustedProxy::parse(entry);
+                    if parsed.is_none() && !entry.is_empty() {
+                        tracing::warn!(%entry, "ignoring an unparseable MONACA_TRUSTED_PROXY_CIDRS entry");
+                    }
+                    parsed
+                })
+                .collect(),
+            None if production => Vec::new(),
+            None => vec![
+                TrustedProxy::parse("127.0.0.1/32").expect("literal CIDR"),
+                TrustedProxy::parse("::1/128").expect("literal CIDR"),
+            ],
+        };
+        if production && trusted_proxies.is_empty() {
+            tracing::warn!(
+                "MONACA_TRUSTED_PROXY_CIDRS is empty; X-Forwarded-For is ignored and the socket \
+                 peer is treated as the client"
+            );
+        }
 
         Self {
             public_base_url,
@@ -158,6 +260,10 @@ impl Config {
                 .then(|| env("MONACA_SOCIAL_PROVIDER_BASE_URL"))
                 .flatten(),
             metrics_addr: env("MONACA_METRICS_ADDR"),
+            trusted_proxies,
+            ip_rate_limit_per_minute: env("MONACA_IP_RATE_LIMIT_PER_MINUTE")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(600),
         }
     }
 
@@ -350,6 +456,11 @@ mod tests {
             captcha_siteverify_url: None,
             social_provider_base_url: None,
             metrics_addr: None,
+            trusted_proxies: vec![
+                TrustedProxy::parse("127.0.0.1/32").expect("literal CIDR"),
+                TrustedProxy::parse("::1/128").expect("literal CIDR"),
+            ],
+            ip_rate_limit_per_minute: 600,
         }
     }
 

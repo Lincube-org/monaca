@@ -5104,6 +5104,20 @@ impl Store {
         Ok(row)
     }
 
+    /// The tenant's live fixed-window counters, for the management status view.
+    pub async fn rate_limit_counters(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<(String, i64, OffsetDateTime)>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, (String, i64, OffsetDateTime)>(
+            "SELECT bucket_key, count, window_start
+             FROM tenant.rate_limit_counters ORDER BY bucket_key",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
     /// Clear a tenant's shared counters. A configuration write starts every window fresh, so a
     /// lowered limit applies to the next request instead of inheriting an earlier count.
     pub async fn reset_rate_limit_counters(&self, tenant: &TenantRow) -> Result<(), StoreError> {

@@ -386,6 +386,10 @@ jobs:
       # Acceptance step 59 starts a local GitHub/Google mock on this base. The server accepts the
       # override only in dev/CI; a production process always calls the provider's real endpoints.
       MONACA_SOCIAL_PROVIDER_BASE_URL: http://127.0.0.1:38200
+      # The acceptance script calls the server directly on loopback, so that peer is a trusted
+      # proxy for the per-IP gate and the X-Forwarded-For negative/positive checks can name an
+      # address other than 127.0.0.1.
+      MONACA_TRUSTED_PROXY_CIDRS: 127.0.0.1/32,::1/128
     steps:
       - uses: actions/checkout@v4
 

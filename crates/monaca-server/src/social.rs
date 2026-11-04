@@ -41,6 +41,7 @@ use uuid::Uuid;
 use crate::account::signed_in_account;
 use crate::error::{ApiError, kinds};
 use crate::management::authorize_admin;
+use crate::schemas::{ConnectorList, ConnectorView};
 use crate::session;
 use crate::state::AppState;
 
@@ -133,7 +134,7 @@ fn github_emails_url(state: &AppState) -> String {
 }
 
 /// The body of `POST /v1/connectors` (§6.2).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateConnectorBody {
     /// The slug the protocol and the page use, e.g. `github`.
     pub connector_id: String,
@@ -164,6 +165,18 @@ pub struct CreateConnectorBody {
 }
 
 /// `POST /v1/connectors` — register a provider.
+#[utoipa::path(
+    post,
+    path = "/v1/connectors",
+    tag = "management",
+    summary = "Create a social connector",
+    request_body = CreateConnectorBody,
+    responses(
+        (status = 201, description = "The created connector without its secret.", body = ConnectorView),
+        (status = 400, description = "A field is invalid."),
+        (status = 409, description = "The connector id is already in use.")
+    )
+)]
 pub async fn create_connector(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -255,18 +268,25 @@ pub async fn create_connector(
 }
 
 /// `GET /v1/connectors` — every connector the tenant configured.
+#[utoipa::path(
+    get,
+    path = "/v1/connectors",
+    tag = "management",
+    summary = "List social connectors",
+    responses((status = 200, description = "The connectors, without secrets.", body = ConnectorList))
+)]
 pub async fn list_connectors(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ConnectorList>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let rows = state.store.social_connectors(&tenant).await?;
-    let items: Vec<Value> = rows.iter().map(connector_json).collect();
-    Ok(Json(json!({ "items": items, "next": null })))
+    let items: Vec<ConnectorView> = rows.iter().map(connector_json).collect();
+    Ok(Json(ConnectorList { items, next: None }))
 }
 
 /// The body of `PATCH /v1/connectors/{connector}` (§6.2).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 pub struct UpdateConnectorBody {
     /// The name the sign-in page shows.
     pub display_name: Option<String>,
@@ -294,12 +314,25 @@ impl UpdateConnectorBody {
 }
 
 /// `PATCH /v1/connectors/{connector}` — change the writable half of a connector.
+#[utoipa::path(
+    patch,
+    path = "/v1/connectors/{connector}",
+    tag = "management",
+    summary = "Update a social connector",
+    params(("connector" = String, Path, description = "The connector id.")),
+    request_body = UpdateConnectorBody,
+    responses(
+        (status = 200, description = "The updated connector without its secret.", body = ConnectorView),
+        (status = 400, description = "The patch is empty or a value is invalid."),
+        (status = 404, description = "No such connector.")
+    )
+)]
 pub async fn update_connector(
     State(state): State<Arc<AppState>>,
     Path(connector_id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<UpdateConnectorBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<ConnectorView>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     if body.is_empty() {
         return Err(ApiError::problem(
@@ -1741,20 +1774,20 @@ pub(crate) fn found(location: &str) -> Response {
 }
 
 /// The connector's management shape — never the sealed secret.
-fn connector_json(row: &SocialConnectorRow) -> Value {
-    json!({
-        "connector_id": row.connector_id,
-        "provider": row.provider,
-        "display_name": row.display_name,
-        "enabled": row.enabled,
-        "link_policy": row.link_policy,
-        "authorize_url": row.authorize_url,
-        "token_url": row.token_url,
-        "userinfo_url": row.userinfo_url,
-        "client_id": row.client_id,
-        "scopes": row.scopes,
-        "created_at": row.created_at.format(&Rfc3339).unwrap_or_default(),
-    })
+fn connector_json(row: &SocialConnectorRow) -> ConnectorView {
+    ConnectorView {
+        connector_id: row.connector_id.clone(),
+        provider: row.provider.clone(),
+        display_name: row.display_name.clone(),
+        enabled: row.enabled,
+        link_policy: row.link_policy.clone(),
+        authorize_url: row.authorize_url.clone(),
+        token_url: row.token_url.clone(),
+        userinfo_url: row.userinfo_url.clone(),
+        client_id: row.client_id.clone(),
+        scopes: row.scopes.clone(),
+        created_at: row.created_at.format(&Rfc3339).unwrap_or_default(),
+    }
 }
 
 /// A successful social sign-in on the tenant chain; the account is the subject.

@@ -80,6 +80,7 @@ import type {
   OrganizationInvitation,
   OrgRoleDetail,
   Page,
+  RateLimits,
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
@@ -93,6 +94,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateRateLimitsRequest,
   UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
@@ -137,6 +139,8 @@ class MockStore {
   private connectors: Connector[] = seedConnectors();
   private ssoConnectors: SsoConnector[] = seedSsoConnectors();
   private experience: SignInExperience = seedSignInExperience();
+  /** Tenant and client gate overrides; the four defaults are built into the document. */
+  private rateLimitItems: RateLimits["items"] = [];
   /** The tenant's language and custom copy; only the default is listed until one is added. */
   private signInCopy: SignInCopy = seedSignInCopy();
   /** One row per mail purpose; a default is what the server would send without a tenant override. */
@@ -1421,6 +1425,30 @@ class MockStore {
       captcha: { ...this.experience.captcha },
       branding: { ...this.experience.branding },
     };
+  }
+
+  getRateLimits(): RateLimits {
+    return {
+      defaults: [
+        { endpoint: "authorize", limit: 600, window_secs: 60 },
+        { endpoint: "token", limit: 600, window_secs: 60 },
+        { endpoint: "userinfo", limit: 1200, window_secs: 60 },
+        { endpoint: "management", limit: 600, window_secs: 60 },
+      ],
+      items: this.rateLimitItems.map((item) => ({ ...item })),
+      ip: { limit: 600, window_secs: 60, scope: "per address (IPv6: /64), per server instance" },
+      status: [],
+    };
+  }
+
+  async updateRateLimits(body: UpdateRateLimitsRequest): Promise<RateLimits> {
+    this.rateLimitItems = body.items.map((item) => ({
+      endpoint: item.endpoint,
+      client_id: item.client_id ?? null,
+      limit: item.limit,
+      window_secs: item.window_secs,
+    }));
+    return this.getRateLimits();
   }
 
   async updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience> {
@@ -3302,6 +3330,14 @@ export const mockApi: MonacaApi = {
   async getSignInExperience() {
     await delay();
     return store.getSignInExperience();
+  },
+  async getRateLimits() {
+    await delay();
+    return store.getRateLimits();
+  },
+  async updateRateLimits(body) {
+    await delay();
+    return store.updateRateLimits(body);
   },
   async updateSignInExperience(body) {
     await delay();

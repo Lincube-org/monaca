@@ -140,12 +140,14 @@ interface Args {
   readonly pool: boolean;
   readonly onlyPool: boolean;
   readonly allConnectors: boolean;
+  readonly clearConnectors: boolean;
   readonly reuse: boolean;
 }
 
 function usage(): string {
   return `usage: bun scripts/bench/run.ts [--profile smoke|full|scale] [--out <path>] [--archive <path>]
                                   [--no-app-role] [--no-pool] [--only-pool] [--all-connectors] [--reuse]
+                                  [--clear-connectors]
 
   smoke  10 tenants, 50 accounts, 10 clients, 100 measured iterations
   full   200 tenants, 200 accounts, 20 clients, 1000 measured iterations
@@ -165,6 +167,7 @@ function parseArgs(argv: readonly string[]): Args {
   let pool = true;
   let onlyPool = false;
   let allConnectors = false;
+  let clearConnectors = false;
   let reuse = false;
 
   for (let i = 0; i < argv.length; i++) {
@@ -207,11 +210,16 @@ function parseArgs(argv: readonly string[]): Args {
       appRole = false;
     } else if (arg === "--reuse") {
       reuse = true;
+    } else if (arg === "--clear-connectors") {
+      clearConnectors = true;
     } else {
       throw new Error(`unknown argument ${JSON.stringify(arg)}\n${usage()}`);
     }
   }
 
+  if (allConnectors && clearConnectors) {
+    throw new Error("--all-connectors and --clear-connectors are mutually exclusive");
+  }
   return {
     profile,
     out: out === "" ? join(ROOT, ".monaca", "reports", `bench-${profile.name}.json`) : out,
@@ -220,6 +228,7 @@ function parseArgs(argv: readonly string[]): Args {
     pool,
     onlyPool,
     allConnectors,
+    clearConnectors,
     reuse,
   };
 }
@@ -291,6 +300,9 @@ function serverEnv(pg: BenchPg, port: number, appRole: boolean): Record<string, 
     MONACA_CONSOLE_CLIENT_SECRET: CONSOLE_SECRET,
     MONACA_TENANT_POOL_SIZE: "5",
     MONACA_TENANT_POOL_CACHE: "64",
+    // The benchmark drives thousands of requests from one loopback address; the per-IP gate
+    // would reject the measurement itself, so it is disabled for the fixture.
+    MONACA_IP_RATE_LIMIT_PER_MINUTE: "0",
     MONACA_LOG_LEVEL: "warn",
     MONACA_METRICS_ADDR: "",
     // Never inherit a developer's app DSN into the control pass.
@@ -395,6 +407,31 @@ async function seedConnectors(
      ON CONFLICT (tenant_id) DO NOTHING`,
   );
   return rows.length;
+}
+
+/** Remove the all-connector fixture so a reused cluster measures the regular pool path again. */
+async function clearConnectors(
+  pg: BenchPg,
+  control: Bun.SQL,
+  slugs: readonly string[],
+): Promise<void> {
+  const rows = (await raw(
+    control,
+    `SELECT slug, db_name FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")})`,
+  )) as { slug: string; db_name: string }[];
+  for (const row of rows) {
+    const db = new Bun.SQL(withDatabase(pg.adminUrl, row.db_name));
+    try {
+      await raw(db, "DELETE FROM tenant.email_connector");
+    } finally {
+      await db.close();
+    }
+  }
+  await raw(
+    control,
+    `DELETE FROM tenant_email_connectors
+     WHERE tenant_id IN (SELECT id FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")}))`,
+  );
 }
 
 /** The bench tenant slugs already in the control plane, for `--reuse` after a prior scale run. */
@@ -1268,6 +1305,8 @@ async function main(): Promise<number> {
     let connectorCount = 0;
     if (args.allConnectors) {
       connectorCount = await seedConnectors(pg, control, allSlugs);
+    } else if (args.clearConnectors) {
+      await clearConnectors(pg, control, allSlugs);
     }
     if (args.pool) {
       const sizes = args.allConnectors ? [allSlugs.length] : args.profile.poolSizes;

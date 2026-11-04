@@ -53,6 +53,10 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Per-endpoint request gates (§6.2).
     pub rate_limit: RateLimiter,
+    /// Per-IP gates for the authentication endpoints. Counted in this process, not in the
+    /// database: the address space is much larger than the tenant set and a row per address would
+    /// tax every unauthenticated request.
+    pub ip_limit: crate::ip_limit::IpRateLimiter,
     /// Prometheus text metrics (§6.4).
     pub metrics: Metrics,
     /// Google's signing keys. Provider-global, so one cache serves every tenant connector.
@@ -79,6 +83,7 @@ impl AppState {
             signing: Mutex::new(HashMap::new()),
             http,
             rate_limit: RateLimiter::default(),
+            ip_limit: crate::ip_limit::IpRateLimiter::default(),
             metrics: Metrics::default(),
             google_jwks: Mutex::new(None),
         }))
@@ -141,6 +146,40 @@ impl AppState {
                     .record_rejection(&tenant.slug, endpoint, "client", Some(client));
                 return Err(ApiError::rate_limited(rejection.retry_after));
             }
+        }
+        Ok(())
+    }
+
+    /// Count one request against the per-IP layer for `endpoint` (§6.2).
+    ///
+    /// The address is already resolved through the trusted-proxy boundary by the caller. `None`
+    /// means the request has no socket peer (a router exercised directly in a unit test), in which
+    /// case the gate is skipped; a real connection always has one. `0`
+    /// (`MONACA_IP_RATE_LIMIT_PER_MINUTE`) disables the layer.
+    pub async fn enforce_ip_rate_limit(
+        &self,
+        ip: Option<std::net::IpAddr>,
+        endpoint: &'static str,
+    ) -> Result<(), ApiError> {
+        let Some(ip) = ip else {
+            return Ok(());
+        };
+        if self.config.ip_rate_limit_per_minute == 0 {
+            return Ok(());
+        }
+        if let Some(retry_after) = self
+            .ip_limit
+            .hit(
+                ip,
+                endpoint,
+                self.config.ip_rate_limit_per_minute,
+                std::time::Instant::now(),
+            )
+            .await
+        {
+            // The tenant is unknown at this point (the gate runs before tenant resolution).
+            self.metrics.record_rejection("-", endpoint, "ip", None);
+            return Err(ApiError::rate_limited(retry_after));
         }
         Ok(())
     }

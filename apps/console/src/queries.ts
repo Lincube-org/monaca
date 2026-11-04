@@ -42,6 +42,7 @@ import type {
   OrganizationInvitation,
   OrgRoleDetail,
   Page,
+  RateLimits,
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
@@ -49,13 +50,14 @@ import type {
   SignInExperience,
   SsoConnector,
   TenantRole,
+  UpdateSignInCopyRequest,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
-  UpdateSignInCopyRequest,
+  UpdateRateLimitsRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -561,6 +563,26 @@ export function useSignInExperience(): UseQueryReturnType<SignInExperience, Erro
     queryKey: queryKeys.signInExperience(),
     queryFn: () => api.getSignInExperience(),
     staleTime: STALE.slow,
+  });
+}
+
+export function useRateLimits(): UseQueryReturnType<RateLimits, Error> {
+  return useQuery({
+    queryKey: queryKeys.rateLimits(),
+    // The status field is a live counter; a short stale time keeps the page honest.
+    queryFn: () => api.getRateLimits(),
+    staleTime: STALE.fast,
+  });
+}
+
+export function useUpdateRateLimits() {
+  const client = useQueryClient();
+  return useMutation<RateLimits, Error, UpdateRateLimitsRequest>({
+    mutationFn: (body) => api.updateRateLimits(body),
+    onSuccess: (updated) => {
+      client.setQueryData(queryKeys.rateLimits(), updated);
+      invalidateTenantAudit(client);
+    },
   });
 }
 

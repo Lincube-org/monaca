@@ -631,45 +631,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List and create accounts */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Search accounts */
+        get: operations["list_accounts"];
         put?: never;
-        /** List and create accounts */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Create an account */
+        post: operations["create_account"];
         delete?: never;
         options?: never;
         head?: never;
@@ -683,49 +649,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read and update an account */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Read an account */
+        get: operations["get_account"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Read and update an account */
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /**
+         * Update an account
+         * @description Suspension is immediate: every live session and refresh token is revoked with the state
+         *     change, so the browser is signed out and no new access token can be minted. Repeating the
+         *     current state is a no-op that answers with the unchanged account. A profile edit writes
+         *     `account.updated`; a username another account holds is `409 MONACA_USERNAME_TAKEN`.
+         */
+        patch: operations["update_account"];
         trace?: never;
     };
     "/v1/accounts/{id}/mfa": {
@@ -889,46 +827,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Account sessions */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List an account's sessions */
+        get: operations["list_account_sessions"];
         put?: never;
         post?: never;
-        /** Account sessions */
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Revoke every session of an account */
+        delete: operations["revoke_account_sessions"];
         options?: never;
         head?: never;
         patch?: never;
@@ -945,24 +849,7 @@ export interface paths {
         put?: never;
         post?: never;
         /** Revoke one session */
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        delete: operations["revoke_account_session"];
         options?: never;
         head?: never;
         patch?: never;
@@ -975,45 +862,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** OAuth clients */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List applications */
+        get: operations["list_clients"];
         put?: never;
-        /** OAuth clients */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Create an application */
+        post: operations["create_client"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1027,25 +880,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** One OAuth client */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Read an application */
+        get: operations["get_client"];
         put?: never;
         post?: never;
         /** One OAuth client */
@@ -1069,25 +905,8 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        /** One OAuth client */
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Update an application */
+        patch: operations["update_client"];
         trace?: never;
     };
     "/v1/clients/{client}/secret": {
@@ -1099,25 +918,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rotate a client secret */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Rotate an application secret */
+        post: operations["rotate_client_secret"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1131,45 +933,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Social connectors */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List social connectors */
+        get: operations["list_connectors"];
         put?: never;
-        /** Social connectors */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Create a social connector */
+        post: operations["create_connector"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1207,25 +975,8 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        /** One social connector */
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Update a social connector */
+        patch: operations["update_connector"];
         trace?: never;
     };
     "/v1/email-connector": {
@@ -1391,45 +1142,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List and create organizations */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List organizations */
+        get: operations["list_orgs"];
         put?: never;
-        /** List and create organizations */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Create an organization */
+        post: operations["create_org"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1443,49 +1160,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read and update an organization */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Read an organization */
+        get: operations["get_org"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Read and update an organization */
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Archive or reactivate an organization */
+        patch: operations["update_org"];
         trace?: never;
     };
     "/v1/orgs/{org}/agents": {
@@ -2381,45 +2064,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Tenant roles */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** List tenant roles */
+        get: operations["list_roles"];
         put?: never;
-        /** Tenant roles */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description See docs/contracts/m0.md for the body. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** Create a tenant role */
+        post: operations["create_role"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2843,10 +2492,261 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description The account detail shape; it also carries the sign-in username. */
+        AccountDetailView: {
+            /** @description An absolute avatar URL, or `null`. */
+            avatar_url?: string | null;
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description The display name. */
+            display_name: string;
+            /** @description The primary email. */
+            email: string;
+            /** @description The `acc_…` id. */
+            id: string;
+            /** @description Roles assigned to the account. */
+            roles: components["schemas"]["RoleRef"][];
+            /** @description `active` or `disabled`. */
+            state: string;
+            /** @description The sign-in username, or `null`. */
+            username?: string | null;
+        };
+        /** @description `GET /v1/accounts`. */
+        AccountList: {
+            /** @description The matched accounts. */
+            items: components["schemas"]["AccountView"][];
+            /** @description Cursor for the next page; always `null` in M0. */
+            next?: string | null;
+        };
+        /** @description `GET /v1/accounts` row and the `GET`/`PATCH` shapes. */
+        AccountView: {
+            /** @description An absolute avatar URL, or `null`. */
+            avatar_url?: string | null;
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description The display name. */
+            display_name: string;
+            /** @description The primary email. */
+            email: string;
+            /** @description The `acc_…` id. */
+            id: string;
+            /** @description Roles assigned to the account. */
+            roles: components["schemas"]["RoleRef"][];
+            /** @description `active` or `disabled`. */
+            state: string;
+        };
+        /** @description `GET /v1/clients`. */
+        ClientList: {
+            /** @description The applications. */
+            items: components["schemas"]["ClientView"][];
+            /** @description Cursor for the next page; always `null` in M0. */
+            next?: string | null;
+        };
+        /** @description `GET /v1/clients/{client}/secret`. */
+        ClientSecretView: {
+            /** @description The protocol client id. */
+            client_id: string;
+            /** @description The new plaintext secret, returned once. */
+            client_secret: string;
+        };
+        /** @description `GET /v1/clients` row and the `GET`/`PATCH` shapes. */
+        ClientView: {
+            /** @description The protocol client id used in authorize URLs. */
+            client_id: string;
+            /** @description Browser origins allowed to call the protocol endpoints. */
+            cors_allowed_origins: string[];
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description Application CSS, or `null`. */
+            custom_css?: string | null;
+            /** @description The `cli_…` row id. */
+            id: string;
+            /** @description Whether the consent screen is mandatory. */
+            is_third_party: boolean;
+            /** @description `public` or `confidential`. */
+            kind: string;
+            /** @description The application name. */
+            name: string;
+            /** @description RP-initiated-logout targets. */
+            post_logout_redirect_uris: string[];
+            /** @description Registered redirect URIs. */
+            redirect_uris: string[];
+            /** @description Scopes the application may request. */
+            scopes: string[];
+            /** @description `none` or `client_secret_basic`. */
+            token_auth_method: string;
+        };
+        /** @description `GET /v1/connectors`. */
+        ConnectorList: {
+            /** @description The connectors. */
+            items: components["schemas"]["ConnectorView"][];
+            /** @description Cursor for the next page; always `null` in M0. */
+            next?: string | null;
+        };
+        /** @description `GET /v1/connectors` row. */
+        ConnectorView: {
+            /** @description The provider authorization endpoint. */
+            authorize_url: string;
+            /** @description The provider client id. */
+            client_id: string;
+            /** @description The connector slug. */
+            connector_id: string;
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description The name shown on the sign-in page. */
+            display_name: string;
+            /** @description Whether the connector is offered. */
+            enabled: boolean;
+            /** @description `auto_link_verified_email`, `confirm_link` or `create_new_only`. */
+            link_policy: string;
+            /** @description `generic`, `github` or `google`. */
+            provider: string;
+            /** @description The scopes sent to the provider. */
+            scopes: string[];
+            /** @description The provider token endpoint. */
+            token_url: string;
+            /** @description The provider userinfo endpoint. */
+            userinfo_url: string;
+        };
+        /** @description `POST /v1/accounts` body. */
+        CreateAccountBody: {
+            /** @description Display name. */
+            display_name: string;
+            /** @description Primary email. */
+            email: string;
+            /** @description Initial password. */
+            password: string;
+        };
+        /** @description The body of `POST /v1/clients`. */
+        CreateClientBody: {
+            /** @description The protocol id that appears in authorize URLs. */
+            client_id: string;
+            /** @description Browser origins that may call the tenant's protocol endpoints from this application. */
+            cors_allowed_origins?: string[];
+            /** @description A third-party application must show the consent screen. */
+            is_third_party?: boolean;
+            /** @description `public` (no secret, PKCE only) or `confidential` (`client_secret_basic`). */
+            kind: string;
+            /** @description Human-readable application name. */
+            name: string;
+            /** @description RP-initiated-logout targets. */
+            post_logout_redirect_uris?: string[];
+            /** @description Where authorization codes may be sent. */
+            redirect_uris?: string[];
+            /** @description Scopes this application may ask for. */
+            scopes?: string[];
+        };
+        /** @description The body of `POST /v1/connectors` (§6.2). */
+        CreateConnectorBody: {
+            /** @description The provider's authorization endpoint; required for `generic`. */
+            authorize_url?: string | null;
+            /** @description The client id registered at the provider. */
+            client_id: string;
+            /** @description The client secret; sealed before it reaches the store. */
+            client_secret: string;
+            /** @description The slug the protocol and the page use, e.g. `github`. */
+            connector_id: string;
+            /** @description The name the sign-in page shows. */
+            display_name: string;
+            /** @description Whether the connector is offered immediately. */
+            enabled?: boolean | null;
+            /** @description `auto_link_verified_email` | `confirm_link` | `create_new_only`. */
+            link_policy?: string | null;
+            /** @description `generic` | `github` | `google`; defaults to `generic`, the pre-existing behaviour. */
+            provider?: string | null;
+            /** @description Scopes to request; built-in providers own their scopes and ignore this. */
+            scopes?: string[];
+            /** @description The provider's token endpoint; required for `generic`. */
+            token_url?: string | null;
+            /** @description The provider's userinfo endpoint; required for `generic`. */
+            userinfo_url?: string | null;
+        };
+        /** @description The body of `POST /v1/orgs`. */
+        CreateOrgBody: {
+            /** @description The org slug: lowercase, digits and `-`, 2–31 characters. */
+            slug: string;
+        };
+        /** @description The body of `POST /v1/roles`. */
+        CreateRoleBody: {
+            /** @description Free-form description. */
+            description?: string;
+            /** @description The unique name the id_token carries. */
+            name: string;
+            /** @description Permission scopes the role grants. */
+            permissions?: string[];
+        };
+        /** @description `POST /v1/clients`; the secret appears only for a confidential client and only here. */
+        CreatedClientView: {
+            /** @description The protocol client id. */
+            client_id: string;
+            /** @description The plaintext secret, returned once; absent for a public client. */
+            client_secret?: string | null;
+            /** @description Browser origins allowed to call the protocol endpoints. */
+            cors_allowed_origins: string[];
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description Application CSS, or `null`. */
+            custom_css?: string | null;
+            /** @description The `cli_…` row id. */
+            id: string;
+            /** @description Whether the consent screen is mandatory. */
+            is_third_party: boolean;
+            /** @description `public` or `confidential`. */
+            kind: string;
+            /** @description The application name. */
+            name: string;
+            /** @description RP-initiated-logout targets. */
+            post_logout_redirect_uris: string[];
+            /** @description Registered redirect URIs. */
+            redirect_uris: string[];
+            /** @description Scopes the application may request. */
+            scopes: string[];
+            /** @description `none` or `client_secret_basic`. */
+            token_auth_method: string;
+        };
         /** @description The `/healthz` body — §6.1. */
         HealthResponse: {
             /** @description Always `"ok"`; the endpoint does not answer otherwise. */
             status: string;
+        };
+        /**
+         * @description The per-IP layer as the console sees it. It is a server setting, not a tenant row: the
+         *     address space is much larger than the tenant set, so it is counted in a bounded per-process
+         *     map rather than in PostgreSQL.
+         */
+        IpLimitView: {
+            /**
+             * Format: int32
+             * @description Requests allowed per window, per address (`0` disables the layer).
+             */
+            limit: number;
+            /** @description How addresses are grouped and where the counter lives. */
+            scope: string;
+            /**
+             * Format: int32
+             * @description Window length in seconds.
+             */
+            window_secs: number;
+        };
+        /** @description `GET /v1/orgs`. */
+        OrgList: {
+            /** @description The orgs. */
+            items: components["schemas"]["OrgView"][];
+            /** @description Cursor for the next page; always `null` in M0. */
+            next?: string | null;
+        };
+        /** @description `GET /v1/orgs` row. */
+        OrgView: {
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description The `org_…` id. */
+            id: string;
+            /** @description Whether this is the tenant's default org. */
+            is_default: boolean;
+            /** @description The org slug. */
+            slug: string;
+            /** @description `active` or `archived`. */
+            state: string;
         };
         /** @description A built-in default in the `/v1/rate-limits` document. */
         RateLimitDefaultView: {
@@ -2880,6 +2780,37 @@ export interface components {
              */
             window_secs: number;
         };
+        /** @description One live fixed-window counter, so the console can show "is this layer rejecting now?". */
+        RateLimitStatusView: {
+            /** @description The protocol client id, or `null` for the tenant-wide layer. */
+            client_id?: string | null;
+            /**
+             * Format: int64
+             * @description Requests counted in the current window.
+             */
+            count: number;
+            /** @description The endpoint class. */
+            endpoint: string;
+            /**
+             * Format: int32
+             * @description The effective limit for this layer.
+             */
+            limit: number;
+            /** @description Whether the next request would be rejected. */
+            limited: boolean;
+            /**
+             * Format: int64
+             * @description Whole seconds until the window ends.
+             */
+            retry_after: number;
+            /**
+             * Format: int32
+             * @description Window length in seconds.
+             */
+            window_secs: number;
+            /** @description When the current window started (RFC 3339). */
+            window_started_at: string;
+        };
         /** @description One configured row in the `/v1/rate-limits` document. */
         RateLimitView: {
             /** @description The protocol client id, or `null` for the tenant-wide layer. */
@@ -2901,13 +2832,127 @@ export interface components {
         RateLimitsDocument: {
             /** @description The built-in defaults, always present. */
             defaults: components["schemas"]["RateLimitDefaultView"][];
+            /** @description The per-IP layer. */
+            ip: components["schemas"]["IpLimitView"];
             /** @description Every configured layer. */
             items: components["schemas"]["RateLimitView"][];
+            /** @description Counters that exist in the current or a recently started window. */
+            status: components["schemas"]["RateLimitStatusView"][];
         };
         /** @description `PATCH /v1/rate-limits` body. */
         RateLimitsPatch: {
             /** @description The complete replacement set. An empty list restores the built-in defaults. */
             items: components["schemas"]["RateLimitItem"][];
+        };
+        /** @description `DELETE /v1/accounts/{id}/sessions`. */
+        RevokedSessionsView: {
+            /**
+             * Format: int64
+             * @description How many sessions were revoked.
+             */
+            revoked: number;
+        };
+        /** @description `GET /v1/roles`. */
+        RoleList: {
+            /** @description The roles. */
+            items: components["schemas"]["RoleView"][];
+            /** @description Cursor for the next page; always `null` in M0. */
+            next?: string | null;
+        };
+        /** @description A role reference embedded in an account row. */
+        RoleRef: {
+            /** @description The `role_…` id. */
+            id: string;
+            /** @description The role name. */
+            name: string;
+        };
+        /** @description `GET /v1/roles` row. */
+        RoleView: {
+            /** @description RFC 3339 creation time. */
+            created_at: string;
+            /** @description A free-form description. */
+            description: string;
+            /** @description The `role_…` id. */
+            id: string;
+            /** @description The role name. */
+            name: string;
+            /** @description Permission scopes the role grants. */
+            permissions: string[];
+        };
+        /** @description `GET /v1/accounts/{id}/sessions`. */
+        SessionList: {
+            /** @description The active sessions. */
+            items: components["schemas"]["SessionView"][];
+            /** @description Cursor for the next page; always `null` in M0. */
+            next?: string | null;
+        };
+        /** @description One user session in `GET /v1/accounts/{id}/sessions`. */
+        SessionView: {
+            /** @description The owning account. */
+            account_id: string;
+            /** @description The client the session was created for, or `null`. */
+            client_id?: string | null;
+            /** @description RFC 3339 expiry time. */
+            expires_at: string;
+            /** @description The `ses_…` id. */
+            id: string;
+            /** @description RFC 3339 issue time. */
+            issued_at: string;
+            /** @description RFC 3339 last-seen time. */
+            last_seen_at: string;
+            /** @description The browser user agent, or `null`. */
+            user_agent?: string | null;
+        };
+        /**
+         * @description The body of `PATCH /v1/accounts/{id}`.
+         *
+         *     Any subset may be sent: `state` suspends or reactivates, while `display_name` and `username`
+         *     edit the profile an administrator sees in the directory and the account can edit itself.
+         */
+        UpdateAccountBody: {
+            /** @description An absolute http(s) avatar URL; an empty string clears it. */
+            avatar_url?: string | null;
+            /** @description The new display name. */
+            display_name?: string | null;
+            /** @description `active` | `disabled`. */
+            state?: string | null;
+            /** @description The new username, a second sign-in identifier (§6.1). */
+            username?: string | null;
+        };
+        /** @description The body of `PATCH /v1/clients/{client}`; absent fields are left alone. */
+        UpdateClientBody: {
+            /** @description Replacement CORS origins (an empty array clears them). */
+            cors_allowed_origins?: string[] | null;
+            /** @description Application CSS for the hosted page; an empty string clears it. */
+            custom_css?: string | null;
+            /** @description New display name. */
+            name?: string | null;
+            /** @description Replacement RP-initiated-logout targets. */
+            post_logout_redirect_uris?: string[] | null;
+            /** @description Replacement redirect URIs (an empty array clears them). */
+            redirect_uris?: string[] | null;
+            /** @description Replacement scope set. */
+            scopes?: string[] | null;
+        };
+        /** @description The body of `PATCH /v1/connectors/{connector}` (§6.2). */
+        UpdateConnectorBody: {
+            /** @description The client id; omitted keeps it. */
+            client_id?: string | null;
+            /** @description The client secret; omitted keeps the sealed value, an empty string is refused. */
+            client_secret?: string | null;
+            /** @description The name the sign-in page shows. */
+            display_name?: string | null;
+            /** @description Whether the connector is offered publicly. */
+            enabled?: boolean | null;
+            /** @description `auto_link_verified_email` | `confirm_link` | `create_new_only`. */
+            link_policy?: string | null;
+            /** @description Scopes; generic connectors only. */
+            scopes?: string[] | null;
+        };
+        /** @description The body of `PATCH /v1/orgs/{org}`. */
+        UpdateOrgBody: {
+            /** @description `active` | `archived`. */
+            state?: string | null;
         };
         /** @description The `/version` body. */
         VersionResponse: {
@@ -2965,6 +3010,617 @@ export interface operations {
             };
         };
     };
+    list_accounts: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring of the email or display name. */
+                query?: string | null;
+                /** @description Page size, default 50, max 200. */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The matched accounts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountList"];
+                };
+            };
+        };
+    };
+    create_account: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAccountBody"];
+            };
+        };
+        responses: {
+            /** @description The created account. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountView"];
+                };
+            };
+            /** @description The email, display name or password is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_account: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `acc_…` id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The account with its username. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountDetailView"];
+                };
+            };
+            /** @description No such account. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_account: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `acc_…` id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAccountBody"];
+            };
+        };
+        responses: {
+            /** @description The updated account. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountDetailView"];
+                };
+            };
+            /** @description Nothing to update or a value is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such account. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_account_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `acc_…` id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active sessions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionList"];
+                };
+            };
+            /** @description No such account. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_account_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `acc_…` id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description How many sessions were revoked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedSessionsView"];
+                };
+            };
+            /** @description No such account. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_account_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `acc_…` id. */
+                id: string;
+                /** @description The `ses_…` id. */
+                session: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The session was revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such session for this account. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_clients: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The applications. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientList"];
+                };
+            };
+        };
+    };
+    create_client: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateClientBody"];
+            };
+        };
+        responses: {
+            /** @description The created application and its one-time secret. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedClientView"];
+                };
+            };
+            /** @description The client id, kind, URI, scope or origin is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The client id is already registered. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_client: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The protocol client id or the `cli_…` id. */
+                client: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The application. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientView"];
+                };
+            };
+            /** @description No such application. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_client: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The protocol client id or the `cli_…` id. */
+                client: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateClientBody"];
+            };
+        };
+        responses: {
+            /** @description The updated application. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientView"];
+                };
+            };
+            /** @description A URI, scope, origin or CSS value is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such application. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    rotate_client_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The protocol client id or the `cli_…` id. */
+                client: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new secret. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientSecretView"];
+                };
+            };
+            /** @description The application is public and has no secret. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such application. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_connectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The connectors, without secrets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorList"];
+                };
+            };
+        };
+    };
+    create_connector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConnectorBody"];
+            };
+        };
+        responses: {
+            /** @description The created connector without its secret. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorView"];
+                };
+            };
+            /** @description A field is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The connector id is already in use. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_connector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The connector id. */
+                connector: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateConnectorBody"];
+            };
+        };
+        responses: {
+            /** @description The updated connector without its secret. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorView"];
+                };
+            };
+            /** @description The patch is empty or a value is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such connector. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_orgs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The organizations. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgList"];
+                };
+            };
+        };
+    };
+    create_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOrgBody"];
+            };
+        };
+        responses: {
+            /** @description The created organization. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgView"];
+                };
+            };
+            /** @description The slug is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The slug is already in use. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The org slug or the `org_…` id. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The organization. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgView"];
+                };
+            };
+            /** @description No such organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The org slug or the `org_…` id. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOrgBody"];
+            };
+        };
+        responses: {
+            /** @description The updated organization. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgView"];
+                };
+            };
+            /** @description state is not active or archived. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_rate_limits: {
         parameters: {
             query?: never;
@@ -3008,6 +3664,57 @@ export interface operations {
                 };
             };
             /** @description An endpoint, limit, window or client id is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_roles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant roles. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleList"];
+                };
+            };
+        };
+    };
+    create_role: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRoleBody"];
+            };
+        };
+        responses: {
+            /** @description The created role. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleView"];
+                };
+            };
+            /** @description The name or a permission is invalid. */
             400: {
                 headers: {
                     [name: string]: unknown;

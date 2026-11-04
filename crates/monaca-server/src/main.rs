@@ -11,6 +11,7 @@ mod account;
 mod bootstrap;
 mod captcha;
 mod cli;
+mod client_ip;
 mod clients;
 mod config;
 mod copy;
@@ -19,6 +20,7 @@ mod email_connector;
 mod email_templates;
 mod error;
 mod internal;
+mod ip_limit;
 mod mailer;
 mod management;
 mod metrics;
@@ -31,6 +33,7 @@ mod protocol;
 mod rate_limit;
 mod resources;
 mod routes;
+mod schemas;
 mod session;
 mod social;
 mod sso;
@@ -113,10 +116,13 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
         });
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("the server stopped with an error")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("the server stopped with an error")
 }
 
 /// `monaca-server migrate`.

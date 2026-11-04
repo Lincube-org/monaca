@@ -757,6 +757,56 @@ export interface ListAuditQuery {
   action?: string;
 }
 
+export interface RateLimitDefault {
+  endpoint: string;
+  limit: number;
+  window_secs: number;
+}
+
+/** One configured tenant-wide or per-client layer. `client_id: null` is the tenant layer. */
+export interface RateLimitRow {
+  endpoint: string;
+  client_id: string | null;
+  limit: number;
+  window_secs: number;
+}
+
+export interface RateLimitItem {
+  endpoint: string;
+  client_id?: string | null;
+  limit: number;
+  window_secs: number;
+}
+
+export interface RateLimitIp {
+  limit: number;
+  window_secs: number;
+  scope: string;
+}
+
+/** A live fixed-window counter: the console's "is this layer rejecting now?" signal. */
+export interface RateLimitStatus {
+  endpoint: string;
+  client_id: string | null;
+  count: number;
+  limit: number;
+  window_secs: number;
+  window_started_at: string;
+  retry_after: number;
+  limited: boolean;
+}
+
+export interface RateLimits {
+  defaults: RateLimitDefault[];
+  items: RateLimitRow[];
+  ip: RateLimitIp;
+  status: RateLimitStatus[];
+}
+
+export interface UpdateRateLimitsRequest {
+  items: RateLimitItem[];
+}
+
 /**
  * RFC 9457 problem+json, the shape of every non-token error (§6.1). `monaca_error_code` is the
  * stable machine code; `title` is the only part safe to show a user unmodified.

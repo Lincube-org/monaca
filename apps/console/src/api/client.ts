@@ -40,6 +40,7 @@ import type {
   OrgRoleDetail,
   Page,
   ProblemDetails,
+  RateLimits,
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
@@ -53,6 +54,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateRateLimitsRequest,
   UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
@@ -310,6 +312,17 @@ export const httpApi: MonacaApi = {
 
   updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience> {
     return request<SignInExperience>("/sign-in-experience", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  getRateLimits(): Promise<RateLimits> {
+    return request<RateLimits>("/rate-limits");
+  },
+
+  updateRateLimits(body: UpdateRateLimitsRequest): Promise<RateLimits> {
+    return request<RateLimits>("/rate-limits", {
       method: "PATCH",
       body: JSON.stringify(body),
     });

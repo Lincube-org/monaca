@@ -30,6 +30,9 @@ point `[400]`. This is the worst-case connection scenario, not an optimization t
 `--reuse` attaches to the tenant databases a prior `scale` run left in the embedded cluster (`bench-*`
 rows in `monaca_control`) instead of provisioning 400 databases again; combine it with
 `--profile scale --only-pool` so the fixture is defined by that earlier run.
+`--clear-connectors` is its inverse fixture: it deletes every `tenant.email_connector` row and the
+control-plane index entry left by an `--all-connectors` run, without re-provisioning the databases.
+It is mutually exclusive with `--all-connectors`; together they produce the two comparison fixtures.
 
 ## Compare two runs
 

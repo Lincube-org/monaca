@@ -21,17 +21,18 @@ use time::Duration;
 
 use crate::error::{ApiError, kinds};
 use crate::management::{authorize_admin, ts};
+use crate::schemas::{OrgList, OrgView};
 use crate::state::AppState;
 
 /// The body of `POST /v1/orgs`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateOrgBody {
     /// The org slug: lowercase, digits and `-`, 2–31 characters.
     pub slug: String,
 }
 
 /// The body of `PATCH /v1/orgs/{org}`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateOrgBody {
     /// `active` | `archived`.
     pub state: Option<String>,
@@ -45,6 +46,18 @@ pub struct AddDomainBody {
 }
 
 /// `POST /v1/orgs` — provision an organization.
+#[utoipa::path(
+    post,
+    path = "/v1/orgs",
+    tag = "management",
+    summary = "Create an organization",
+    request_body = CreateOrgBody,
+    responses(
+        (status = 201, description = "The created organization.", body = OrgView),
+        (status = 400, description = "The slug is invalid."),
+        (status = 409, description = "The slug is already in use.")
+    )
+)]
 pub async fn create_org(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -88,34 +101,65 @@ pub async fn create_org(
 }
 
 /// `GET /v1/orgs` — every org in the tenant, archived included.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs",
+    tag = "management",
+    summary = "List organizations",
+    responses((status = 200, description = "The organizations.", body = OrgList))
+)]
 pub async fn list_orgs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<OrgList>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let rows = state.store.all_orgs(&tenant).await?;
-    let items: Vec<Value> = rows.iter().map(org_json).collect();
-    Ok(Json(json!({ "items": items, "next": null })))
+    let items: Vec<OrgView> = rows.iter().map(org_json).collect();
+    Ok(Json(OrgList { items, next: None }))
 }
 
 /// `GET /v1/orgs/{org}` — a slug or an `org_…` id, in either state.
+#[utoipa::path(
+    get,
+    path = "/v1/orgs/{org}",
+    tag = "management",
+    summary = "Read an organization",
+    params(("org" = String, Path, description = "The org slug or the `org_…` id.")),
+    responses(
+        (status = 200, description = "The organization.", body = OrgView),
+        (status = 404, description = "No such organization.")
+    )
+)]
 pub async fn get_org(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(org): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<OrgView>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let row = load_org(&state, &tenant, &org).await?;
     Ok(Json(org_json(&row)))
 }
 
 /// `PATCH /v1/orgs/{org}` — archive or reactivate.
+#[utoipa::path(
+    patch,
+    path = "/v1/orgs/{org}",
+    tag = "management",
+    summary = "Archive or reactivate an organization",
+    params(("org" = String, Path, description = "The org slug or the `org_…` id.")),
+    request_body = UpdateOrgBody,
+    responses(
+        (status = 200, description = "The updated organization.", body = OrgView),
+        (status = 400, description = "state is not active or archived."),
+        (status = 404, description = "No such organization.")
+    )
+)]
 pub async fn update_org(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(org): Path<String>,
     Json(body): Json<UpdateOrgBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<OrgView>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let Some(target) = body.state.as_deref() else {
         return Err(ApiError::problem(
@@ -480,14 +524,14 @@ async fn load_org(state: &AppState, tenant: &TenantRow, raw: &str) -> Result<Org
     }
 }
 
-fn org_json(row: &OrgRow) -> Value {
-    json!({
-        "id": row.org_id().to_typed_string(),
-        "slug": row.slug,
-        "state": row.state,
-        "is_default": row.is_default,
-        "created_at": ts(row.created_at),
-    })
+fn org_json(row: &OrgRow) -> OrgView {
+    OrgView {
+        id: row.org_id().to_typed_string(),
+        slug: row.slug.clone(),
+        state: row.state.clone(),
+        is_default: row.is_default,
+        created_at: ts(row.created_at),
+    }
 }
 
 /// The slug rule the `tenant.organizations` CHECK constraint fixes: lowercase, digits and `-`,

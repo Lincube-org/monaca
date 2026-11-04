@@ -29,6 +29,10 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::error::{ApiError, kinds};
+use crate::schemas::{
+    AccountDetailView, AccountList, AccountView, RoleList, RoleRef, RoleView, SessionList,
+    SessionView,
+};
 use crate::state::AppState;
 
 /// Who called the management API.
@@ -75,7 +79,7 @@ pub struct AuditQuery {
 }
 
 /// `POST /v1/accounts` body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateAccountBody {
     /// Primary email.
     pub email: String,
@@ -265,7 +269,7 @@ pub async fn authorize_admin(
 }
 
 /// The query string of `GET /v1/accounts`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AccountsQuery {
     /// Case-insensitive substring of the email or display name.
     pub query: Option<String>,
@@ -274,11 +278,19 @@ pub struct AccountsQuery {
 }
 
 /// `GET /v1/accounts` — search the tenant's accounts (§6.2).
+#[utoipa::path(
+    get,
+    path = "/v1/accounts",
+    tag = "management",
+    summary = "Search accounts",
+    params(AccountsQuery),
+    responses((status = 200, description = "The matched accounts.", body = AccountList))
+)]
 pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<AccountsQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<AccountList>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let needle = query
@@ -292,10 +304,21 @@ pub async fn list_accounts(
         let roles = state.store.account_roles(&tenant, row.account_id()).await?;
         items.push(account_json(row, &roles));
     }
-    Ok(Json(json!({ "items": items, "next": null })))
+    Ok(Json(AccountList { items, next: None }))
 }
 
 /// `POST /v1/accounts`.
+#[utoipa::path(
+    post,
+    path = "/v1/accounts",
+    tag = "management",
+    summary = "Create an account",
+    request_body = CreateAccountBody,
+    responses(
+        (status = 201, description = "The created account.", body = AccountView),
+        (status = 400, description = "The email, display name or password is invalid.")
+    )
+)]
 pub async fn create_account(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -351,11 +374,22 @@ pub async fn create_account(
 }
 
 /// `GET /v1/accounts/{id}`.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{id}",
+    tag = "management",
+    summary = "Read an account",
+    params(("id" = String, Path, description = "The `acc_…` id.")),
+    responses(
+        (status = 200, description = "The account with its username.", body = AccountDetailView),
+        (status = 404, description = "No such account.")
+    )
+)]
 pub async fn get_account(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<AccountDetailView>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let id = AccountId::parse(&id)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))?;
@@ -380,7 +414,7 @@ pub async fn get_account(
 ///
 /// Any subset may be sent: `state` suspends or reactivates, while `display_name` and `username`
 /// edit the profile an administrator sees in the directory and the account can edit itself.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateAccountBody {
     /// `active` | `disabled`.
     pub state: Option<String>,
@@ -393,6 +427,19 @@ pub struct UpdateAccountBody {
 }
 
 /// `PATCH /v1/accounts/{id}` — suspend/reactivate or edit the profile (§6.2).
+#[utoipa::path(
+    patch,
+    path = "/v1/accounts/{id}",
+    tag = "management",
+    summary = "Update an account",
+    params(("id" = String, Path, description = "The `acc_…` id.")),
+    request_body = UpdateAccountBody,
+    responses(
+        (status = 200, description = "The updated account.", body = AccountDetailView),
+        (status = 400, description = "Nothing to update or a value is invalid."),
+        (status = 404, description = "No such account.")
+    )
+)]
 ///
 /// Suspension is immediate: every live session and refresh token is revoked with the state
 /// change, so the browser is signed out and no new access token can be minted. Repeating the
@@ -403,7 +450,7 @@ pub async fn update_account(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<UpdateAccountBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<AccountDetailView>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let account_id = parse_account(&id)?;
     if body.state.is_none()
@@ -1383,7 +1430,7 @@ fn is_hex_color(value: &str) -> bool {
 }
 
 /// The body of `POST /v1/roles`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateRoleBody {
     /// The unique name the id_token carries.
     pub name: String,
@@ -1396,6 +1443,17 @@ pub struct CreateRoleBody {
 }
 
 /// `POST /v1/roles` — define a role.
+#[utoipa::path(
+    post,
+    path = "/v1/roles",
+    tag = "management",
+    summary = "Create a tenant role",
+    request_body = CreateRoleBody,
+    responses(
+        (status = 201, description = "The created role.", body = RoleView),
+        (status = 400, description = "The name or a permission is invalid.")
+    )
+)]
 pub async fn create_role(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1450,14 +1508,21 @@ pub async fn create_role(
 }
 
 /// `GET /v1/roles` — every role the tenant defined.
+#[utoipa::path(
+    get,
+    path = "/v1/roles",
+    tag = "management",
+    summary = "List tenant roles",
+    responses((status = 200, description = "The tenant roles.", body = RoleList))
+)]
 pub async fn list_roles(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RoleList>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let rows = state.store.roles(&tenant).await?;
-    let items: Vec<Value> = rows.iter().map(role_json).collect();
-    Ok(Json(json!({ "items": items, "next": null })))
+    let items: Vec<RoleView> = rows.iter().map(role_json).collect();
+    Ok(Json(RoleList { items, next: None }))
 }
 
 /// `DELETE /v1/roles/{role}` — remove a role and every assignment of it.
@@ -1551,22 +1616,33 @@ pub async fn unassign_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn role_json(role: &RoleRow) -> Value {
-    json!({
-        "id": role.role_id().to_typed_string(),
-        "name": role.name,
-        "description": role.description,
-        "permissions": role.permissions,
-        "created_at": ts(role.created_at),
-    })
+fn role_json(role: &RoleRow) -> RoleView {
+    RoleView {
+        id: role.role_id().to_typed_string(),
+        name: role.name.clone(),
+        description: role.description.clone(),
+        permissions: role.permissions.clone(),
+        created_at: ts(role.created_at),
+    }
 }
 
 /// `GET /v1/accounts/{id}/sessions`.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{id}/sessions",
+    tag = "management",
+    summary = "List an account's sessions",
+    params(("id" = String, Path, description = "The `acc_…` id.")),
+    responses(
+        (status = 200, description = "The active sessions.", body = SessionList),
+        (status = 404, description = "No such account.")
+    )
+)]
 pub async fn list_account_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SessionList>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let account_id = parse_account(&id)?;
     state
@@ -1576,11 +1652,25 @@ pub async fn list_account_sessions(
         .ok_or_else(|| ApiError::not_found("account"))?;
 
     let sessions = state.store.list_sessions(&tenant, account_id).await?;
-    let items: Vec<Value> = sessions.iter().map(session_json).collect();
-    Ok(Json(json!({ "items": items, "next": null })))
+    let items: Vec<SessionView> = sessions.iter().map(session_json).collect();
+    Ok(Json(SessionList { items, next: None }))
 }
 
 /// `DELETE /v1/accounts/{id}/sessions/{session}`.
+#[utoipa::path(
+    delete,
+    path = "/v1/accounts/{id}/sessions/{session}",
+    tag = "management",
+    summary = "Revoke one session",
+    params(
+        ("id" = String, Path, description = "The `acc_…` id."),
+        ("session" = String, Path, description = "The `ses_…` id.")
+    ),
+    responses(
+        (status = 204, description = "The session was revoked."),
+        (status = 404, description = "No such session for this account.")
+    )
+)]
 pub async fn revoke_account_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1623,11 +1713,22 @@ pub async fn revoke_account_session(
 }
 
 /// `DELETE /v1/accounts/{id}/sessions` — revoke every live session of the account.
+#[utoipa::path(
+    delete,
+    path = "/v1/accounts/{id}/sessions",
+    tag = "management",
+    summary = "Revoke every session of an account",
+    params(("id" = String, Path, description = "The `acc_…` id.")),
+    responses(
+        (status = 200, description = "How many sessions were revoked.", body = crate::schemas::RevokedSessionsView),
+        (status = 404, description = "No such account.")
+    )
+)]
 pub async fn revoke_account_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::schemas::RevokedSessionsView>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let account_id = parse_account(&id)?;
     state
@@ -1657,7 +1758,7 @@ pub async fn revoke_account_sessions(
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
         tracing::warn!(%err, "could not append session.revoked_all audit event");
     }
-    Ok(Json(json!({ "revoked": revoked })))
+    Ok(Json(crate::schemas::RevokedSessionsView { revoked }))
 }
 
 pub(crate) fn parse_account(raw: &str) -> Result<AccountId, ApiError> {
@@ -2437,41 +2538,56 @@ pub struct AuditBounds {
     pub to: Option<i64>,
 }
 
-fn account_json(account: &AccountRow, roles: &[RoleRow]) -> Value {
-    json!({
-        "id": account.account_id().to_typed_string(),
-        "email": account.primary_email,
-        "display_name": account.display_name,
-        "avatar_url": account.avatar_url,
-        "state": account.state,
-        "created_at": ts(account.created_at),
-        "roles": roles
+fn account_json(account: &AccountRow, roles: &[RoleRow]) -> AccountView {
+    AccountView {
+        id: account.account_id().to_typed_string(),
+        email: account.primary_email.clone(),
+        display_name: account.display_name.clone(),
+        avatar_url: account.avatar_url.clone(),
+        state: account.state.clone(),
+        created_at: ts(account.created_at),
+        roles: roles
             .iter()
-            .map(|role| json!({ "id": role.role_id().to_typed_string(), "name": role.name }))
-            .collect::<Vec<_>>(),
-    })
+            .map(|role| RoleRef {
+                id: role.role_id().to_typed_string(),
+                name: role.name.clone(),
+            })
+            .collect(),
+    }
 }
 
 /// The detail shape, which also names the sign-in username. Lists omit it to avoid a second
 /// identifier read per row; `GET` and `PATCH` are where an edit form reads it.
-fn account_detail_json(account: &AccountRow, roles: &[RoleRow], username: Option<&str>) -> Value {
-    let mut value = account_json(account, roles);
-    value["username"] = json!(username);
-    value
+fn account_detail_json(
+    account: &AccountRow,
+    roles: &[RoleRow],
+    username: Option<&str>,
+) -> AccountDetailView {
+    let view = account_json(account, roles);
+    AccountDetailView {
+        id: view.id,
+        email: view.email,
+        display_name: view.display_name,
+        avatar_url: view.avatar_url,
+        state: view.state,
+        created_at: view.created_at,
+        roles: view.roles,
+        username: username.map(str::to_owned),
+    }
 }
 
-fn session_json(session: &SessionRow) -> Value {
-    json!({
-        "id": session.session_id().to_typed_string(),
-        "account_id": AccountId::from_uuid(session.account_id).to_typed_string(),
-        "client_id": session
+fn session_json(session: &SessionRow) -> SessionView {
+    SessionView {
+        id: session.session_id().to_typed_string(),
+        account_id: AccountId::from_uuid(session.account_id).to_typed_string(),
+        client_id: session
             .client_id
             .map(|id| monaca_types::ClientId::from_uuid(id).to_typed_string()),
-        "issued_at": ts(session.issued_at),
-        "expires_at": ts(session.expires_at),
-        "last_seen_at": ts(session.last_seen_at),
-        "user_agent": session.user_agent,
-    })
+        issued_at: ts(session.issued_at),
+        expires_at: ts(session.expires_at),
+        last_seen_at: ts(session.last_seen_at),
+        user_agent: session.user_agent.clone(),
+    }
 }
 
 fn agent_json(org: &monaca_store::OrgRow, agent: &AgentRow, keys: &[AgentKeyRow]) -> Value {
@@ -2606,6 +2722,40 @@ pub struct RateLimitView {
     pub window_secs: i32,
 }
 
+/// The per-IP layer as the console sees it. It is a server setting, not a tenant row: the
+/// address space is much larger than the tenant set, so it is counted in a bounded per-process
+/// map rather than in PostgreSQL.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct IpLimitView {
+    /// Requests allowed per window, per address (`0` disables the layer).
+    pub limit: i32,
+    /// Window length in seconds.
+    pub window_secs: i32,
+    /// How addresses are grouped and where the counter lives.
+    pub scope: String,
+}
+
+/// One live fixed-window counter, so the console can show "is this layer rejecting now?".
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RateLimitStatusView {
+    /// The endpoint class.
+    pub endpoint: String,
+    /// The protocol client id, or `null` for the tenant-wide layer.
+    pub client_id: Option<String>,
+    /// Requests counted in the current window.
+    pub count: i64,
+    /// The effective limit for this layer.
+    pub limit: i32,
+    /// Window length in seconds.
+    pub window_secs: i32,
+    /// When the current window started (RFC 3339).
+    pub window_started_at: String,
+    /// Whole seconds until the window ends.
+    pub retry_after: u64,
+    /// Whether the next request would be rejected.
+    pub limited: bool,
+}
+
 /// `GET`/`PATCH /v1/rate-limits` response — §6.2.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RateLimitsDocument {
@@ -2613,6 +2763,10 @@ pub struct RateLimitsDocument {
     pub defaults: Vec<RateLimitDefaultView>,
     /// Every configured layer.
     pub items: Vec<RateLimitView>,
+    /// The per-IP layer.
+    pub ip: IpLimitView,
+    /// Counters that exist in the current or a recently started window.
+    pub status: Vec<RateLimitStatusView>,
 }
 
 /// `GET /v1/rate-limits` — the effective defaults plus every configured row.
@@ -2632,7 +2786,8 @@ pub async fn get_rate_limits(
 ) -> Result<Json<RateLimitsDocument>, ApiError> {
     let (tenant, _) = authorize_admin(&state, &headers).await?;
     let rows = state.store.rate_limits(&tenant).await?;
-    Ok(Json(rate_limits_document(&rows)))
+    let counters = state.store.rate_limit_counters(&tenant).await?;
+    Ok(Json(rate_limits_document(&state, &rows, &counters)))
 }
 
 /// `PATCH /v1/rate-limits` — replace the tenant's whole gate configuration.
@@ -2701,10 +2856,15 @@ pub async fn update_rate_limits(
     state.store.reset_rate_limit_counters(&tenant).await?;
     state.invalidate_rate_limits(&tenant).await;
     let saved = state.store.rate_limits(&tenant).await?;
-    Ok(Json(rate_limits_document(&saved)))
+    Ok(Json(rate_limits_document(&state, &saved, &[])))
 }
 
-fn rate_limits_document(rows: &[RateLimitRow]) -> RateLimitsDocument {
+fn rate_limits_document(
+    state: &AppState,
+    rows: &[RateLimitRow],
+    counters: &[(String, i64, OffsetDateTime)],
+) -> RateLimitsDocument {
+    let now = state.now();
     RateLimitsDocument {
         defaults: crate::rate_limit::defaults()
             .into_iter()
@@ -2723,7 +2883,57 @@ fn rate_limits_document(rows: &[RateLimitRow]) -> RateLimitsDocument {
                 window_secs: row.window_secs,
             })
             .collect(),
+        ip: IpLimitView {
+            limit: state.config.ip_rate_limit_per_minute as i32,
+            window_secs: crate::ip_limit::WINDOW.as_secs() as i32,
+            scope: "per address (IPv6: /64), per server instance".to_owned(),
+        },
+        status: counters
+            .iter()
+            .filter_map(|(key, count, window_start)| {
+                status_row(rows, key, *count, *window_start, now)
+            })
+            .collect(),
     }
+}
+
+/// One live counter. A window that has already ended is omitted: the next hit resets it, so
+/// reporting it as "limited" would be wrong.
+fn status_row(
+    rows: &[RateLimitRow],
+    key: &str,
+    count: i64,
+    window_start: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Option<RateLimitStatusView> {
+    let mut parts = key.splitn(3, '|');
+    let endpoint = parts.next()?;
+    let client = match parts.next()? {
+        "tenant" => None,
+        "client" => Some(parts.next()?.to_owned()),
+        _ => return None,
+    };
+    let ((tenant_limit, tenant_window), client_layer) =
+        crate::rate_limit::layer_limits(rows, endpoint, client.as_deref());
+    let (limit, window_secs) = match (&client, client_layer) {
+        (Some(_), Some(layer)) => layer,
+        (Some(_), None) => (tenant_limit, tenant_window),
+        (None, _) => (tenant_limit, tenant_window),
+    };
+    let window_end = window_start + time::Duration::seconds(i64::from(window_secs));
+    if now >= window_end {
+        return None;
+    }
+    Some(RateLimitStatusView {
+        endpoint: endpoint.to_owned(),
+        client_id: client,
+        count,
+        limit: limit as i32,
+        window_secs: window_secs as i32,
+        window_started_at: window_start.format(&Rfc3339).unwrap_or_default(),
+        retry_after: (window_end - now).whole_seconds().max(1) as u64,
+        limited: count > i64::from(limit),
+    })
 }
 
 /// RFC 7638 thumbprint: SHA-256 hex of the canonical `{crv,kty,x,y}` object.

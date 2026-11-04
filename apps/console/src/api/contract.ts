@@ -39,6 +39,7 @@ import type {
   OrgRoleDetail,
   Page,
   ProblemDetails,
+  RateLimits,
   RegisterAgentKeyRequest,
   RevokedSessions,
   SessionInfo,
@@ -52,6 +53,7 @@ import type {
   UpdateEmailTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
+  UpdateRateLimitsRequest,
   UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
   UpdateWebhookRequest,
@@ -156,6 +158,13 @@ export interface MonacaApi {
    */
   getSignInExperience(): Promise<SignInExperience>;
   updateSignInExperience(body: UpdateSignInExperienceRequest): Promise<SignInExperience>;
+
+  /**
+   * The request gates (§6.2): the four built-in endpoint defaults, every configured tenant or
+   * client row, the per-IP layer and the live counters. A patch replaces the whole item list.
+   */
+  getRateLimits(): Promise<RateLimits>;
+  updateRateLimits(body: UpdateRateLimitsRequest): Promise<RateLimits>;
 
   /**
    * The hosted page's language and custom copy. A phrase is addressed by the same dotted key the
