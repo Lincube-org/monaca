@@ -269,6 +269,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "per-endpoint tenant and client rate limits (M1)",
         include_str!("../migrations/tenant_46.sql"),
     ),
+    (
+        47,
+        "row-backed interaction, TOTP enrollment and passkey challenge state (M1)",
+        include_str!("../migrations/tenant_47.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

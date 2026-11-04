@@ -296,7 +296,7 @@ pub async fn sso_authorize(
         return Err(ApiError::not_found("SSO connector"));
     };
     let interaction = state
-        .peek_interaction(&query.interaction)
+        .peek_interaction(&tenant, &query.interaction)
         .await
         .map_err(ApiError::Interaction)?;
     if interaction.tenant != tenant.slug {
@@ -419,7 +419,7 @@ pub async fn sso_callback(
     }
 
     let interaction = state
-        .peek_interaction(&pending.interaction_id)
+        .peek_interaction(&tenant, &pending.interaction_id)
         .await
         .map_err(ApiError::Interaction)?;
     if interaction.tenant != tenant.slug {

@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use monaca_audit::AuditEvent;
-use monaca_crypto::{Argon2Params, EnvKeyProvider, KeyProvider, SigningKeyPair, seal};
+use monaca_crypto::{Argon2Params, EnvKeyProvider, KeyProvider, SigningKeyPair, open, seal};
 use monaca_oidc::Interaction as InteractionRequest;
-use monaca_store::{OrgRow, Store, TenantRow};
+use monaca_store::{InteractionRow, OrgRow, Store, TenantRow};
 use monaca_types::{Clock, KeyId, OrgCtx, SystemClock};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -17,35 +17,9 @@ use crate::config::Config;
 use crate::error::ApiError;
 use crate::rate_limit::RateLimiter;
 
-/// An interaction plus whether it has been redeemed.
-#[derive(Debug)]
-pub struct StoredInteraction {
-    /// The authorize request as captured.
-    pub interaction: InteractionRequest,
-    /// Set the moment sign-in succeeds, so a replay is a 409 rather than a 404.
-    pub consumed: bool,
-    /// The account that signed in, when the flow is waiting for consent.
-    pub signed_in_account: Option<Uuid>,
-    /// The SSO session the sign-in established, carried into the authorization code.
-    pub session_id: Option<Uuid>,
-    /// The account that passed the primary factor and still owes a TOTP code (§6.1 `mfa`).
-    pub mfa_account: Option<Uuid>,
-    /// The account that must enroll a second factor before the sign-in can finish (§6.1 `mfa`).
-    pub mfa_enrollment: Option<Uuid>,
-    /// Set when an enrollment proved itself, so completion does not challenge again.
-    pub mfa_satisfied: bool,
-    /// Wrong TOTP codes tried on this interaction; five ends it.
-    pub mfa_attempts: u32,
-}
-
-/// One in-flight WebAuthn challenge, keyed by the ceremony it belongs to.
-#[derive(Debug, Clone)]
-struct PasskeyChallenge {
-    /// The 32 random bytes the browser must echo in `clientDataJSON.challenge`.
-    challenge: Vec<u8>,
-    /// When the challenge stops being accepted.
-    expires_at: OffsetDateTime,
-}
+/// Upper bound on the decoded signing keys kept in memory. One entry is a few kilobytes and the
+/// cache is a speed-up, not a source of truth, so evicting the oldest loaded tenant is safe.
+const SIGNING_CACHE_CAP: usize = 256;
 
 /// Everything a handler needs.
 pub struct AppState {
@@ -60,17 +34,6 @@ pub struct AppState {
     pub argon: Argon2Params,
     /// Time.
     pub clock: Arc<dyn Clock>,
-    /// Pending logins, keyed by `int_…`. In-memory in M0: the gateway is a single process, and an
-    /// interaction is short-lived by design. M1 moves this to a table so the server can scale out.
-    interactions: Mutex<HashMap<String, StoredInteraction>>,
-    /// In-flight TOTP enrollments, keyed by account: the secret generated for a setup page that has
-    /// not been confirmed yet. In-memory for the same reason as `interactions` — an enrollment is
-    /// one continuous visit (§6.1 `mfa`).
-    totp_enrollments: Mutex<HashMap<Uuid, (Vec<u8>, OffsetDateTime)>>,
-    /// Pending passkey challenges, keyed `reg:{account}`, `in:{iid}` or `mfa:{iid}`. Each key names
-    /// exactly one ceremony, so a challenge minted for a registration can never be replayed as an
-    /// assertion and two interactions cannot share one.
-    passkey_challenges: Mutex<HashMap<String, PasskeyChallenge>>,
     /// The active signing key per tenant, decoded. Cached because every token needs it and the
     /// private half is sealed at rest.
     signing: Mutex<HashMap<Uuid, Arc<SigningKeyPair>>>,
@@ -98,9 +61,6 @@ impl AppState {
             keys: Arc::new(keys),
             argon: Argon2Params::from_env(),
             clock: Arc::new(SystemClock),
-            interactions: Mutex::new(HashMap::new()),
-            totp_enrollments: Mutex::new(HashMap::new()),
-            passkey_challenges: Mutex::new(HashMap::new()),
             signing: Mutex::new(HashMap::new()),
             http,
             rate_limit: RateLimiter::default(),
@@ -194,10 +154,15 @@ impl AppState {
         };
 
         let key = Arc::new(key);
-        self.signing
-            .lock()
-            .await
-            .insert(tenant.id, Arc::clone(&key));
+        let mut cache = self.signing.lock().await;
+        if !cache.contains_key(&tenant.id) && cache.len() >= SIGNING_CACHE_CAP {
+            // The cache is a speed-up, not the source of truth: dropping any one entry only costs
+            // the next request for that tenant a database read.
+            if let Some(oldest) = cache.keys().next().copied() {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(tenant.id, Arc::clone(&key));
         Ok(key)
     }
 
@@ -218,117 +183,101 @@ impl AppState {
         Ok(rows.into_iter().map(|row| row.public_jwk).collect())
     }
 
-    /// Store a freshly minted interaction, sweeping expired ones first.
-    pub async fn put_interaction(&self, interaction: InteractionRequest) {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        map.retain(|_, stored| !stored.interaction.is_expired(now));
-        let id = interaction.interaction_id.to_string();
-        map.insert(
-            id,
-            StoredInteraction {
-                interaction,
-                consumed: false,
-                signed_in_account: None,
-                session_id: None,
-                mfa_account: None,
-                mfa_enrollment: None,
-                mfa_satisfied: false,
-                mfa_attempts: 0,
-            },
-        );
+    /// Store a freshly minted interaction and its expiry.
+    pub async fn put_interaction(
+        &self,
+        tenant: &TenantRow,
+        interaction: InteractionRequest,
+    ) -> Result<(), ApiError> {
+        let payload = serde_json::to_value(&interaction).map_err(ApiError::internal)?;
+        self.store
+            .interaction_put(
+                tenant,
+                &interaction.interaction_id.to_string(),
+                &payload,
+                interaction.expires_at,
+            )
+            .await
+            .map_err(ApiError::internal)
     }
 
     /// Read an interaction without consuming it.
     pub async fn peek_interaction(
         &self,
+        tenant: &TenantRow,
         id: &str,
     ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
-        Ok(self.peek_interaction_state(id).await?.0)
+        Ok(self.peek_interaction_state(tenant, id).await?.0)
     }
 
     /// Read an interaction and whether sign-in already happened (for the consent-only page).
     pub async fn peek_interaction_state(
         &self,
+        tenant: &TenantRow,
         id: &str,
     ) -> Result<(InteractionRequest, Option<Uuid>), monaca_oidc::InteractionError> {
-        let now = self.now();
-        let map = self.interactions.lock().await;
-        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        Ok((stored.interaction.clone(), stored.signed_in_account))
+        let row = self.interaction_row(tenant, id).await?;
+        Ok((interaction_payload(&row)?, row.signed_in_account))
     }
 
     /// Mark an interaction consumed, returning it. A second call is `Consumed`.
     pub async fn consume_interaction(
         &self,
+        tenant: &TenantRow,
         id: &str,
     ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
+        match self
+            .store
+            .interaction_consume(tenant, id)
+            .await
+            .map_err(interaction_store_error)?
+        {
+            Some(row) => interaction_payload(&row),
+            None => Err(self.interaction_failure(tenant, id).await),
         }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        stored.consumed = true;
-        Ok(stored.interaction.clone())
     }
 
     /// Record that `account` authenticated, leaving the interaction redeemable by the consent step.
     pub async fn mark_interaction_signed_in(
         &self,
+        tenant: &TenantRow,
         id: &str,
         account: Uuid,
         session_id: Uuid,
     ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        stored.signed_in_account = Some(account);
-        stored.session_id = Some(session_id);
-        Ok(stored.interaction.clone())
+        let row = self
+            .require_interaction_update(
+                self.store
+                    .interaction_mark_signed_in(tenant, id, account, session_id)
+                    .await,
+                tenant,
+                id,
+            )
+            .await?;
+        interaction_payload(&row)
     }
 
     /// Redeem an interaction that has signed in, returning the account awaiting consent and the
     /// session it authenticated.
     pub async fn take_signed_in_interaction(
         &self,
+        tenant: &TenantRow,
         id: &str,
     ) -> Result<(InteractionRequest, Uuid, Option<Uuid>), monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
+        match self
+            .store
+            .interaction_take_signed_in(tenant, id)
+            .await
+            .map_err(interaction_store_error)?
+        {
+            Some(row) => {
+                let account = row
+                    .signed_in_account
+                    .ok_or(monaca_oidc::InteractionError::NotSignedIn)?;
+                Ok((interaction_payload(&row)?, account, row.session_id))
+            }
+            None => Err(self.take_failure(tenant, id).await),
         }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        let account = stored
-            .signed_in_account
-            .ok_or(monaca_oidc::InteractionError::NotSignedIn)?;
-        stored.consumed = true;
-        Ok((stored.interaction.clone(), account, stored.session_id))
     }
 
     /// Remember that the primary factor passed and a TOTP code is still owed.
@@ -337,25 +286,16 @@ impl AppState {
     /// challenge rather than a fresh sign-in form.
     pub async fn mark_mfa_pending(
         &self,
+        tenant: &TenantRow,
         id: &str,
         account: Uuid,
     ) -> Result<(), monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        if stored.mfa_account != Some(account) {
-            stored.mfa_attempts = 0;
-        }
-        stored.mfa_account = Some(account);
-        stored.mfa_enrollment = None;
+        self.require_interaction_update(
+            self.store.interaction_mfa_pending(tenant, id, account).await,
+            tenant,
+            id,
+        )
+        .await?;
         Ok(())
     }
 
@@ -363,182 +303,233 @@ impl AppState {
     /// policy requires one before the sign-in may finish.
     pub async fn mark_mfa_enrollment(
         &self,
+        tenant: &TenantRow,
         id: &str,
         account: Uuid,
     ) -> Result<(), monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        stored.mfa_account = None;
-        stored.mfa_enrollment = Some(account);
-        stored.mfa_satisfied = false;
+        self.require_interaction_update(
+            self.store.interaction_mfa_enrollment(tenant, id, account).await,
+            tenant,
+            id,
+        )
+        .await?;
         Ok(())
     }
 
     /// The account an enrollment step belongs to, if the interaction is parked on one.
     pub async fn mfa_enrollment_pending(
         &self,
+        tenant: &TenantRow,
         id: &str,
     ) -> Result<Option<Uuid>, monaca_oidc::InteractionError> {
-        let now = self.now();
-        let map = self.interactions.lock().await;
-        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        Ok(stored.mfa_enrollment)
+        Ok(self.interaction_row(tenant, id).await?.mfa_enrollment)
     }
 
     /// The account waiting for a TOTP code on this interaction, if any.
     pub async fn mfa_pending(
         &self,
+        tenant: &TenantRow,
         id: &str,
     ) -> Result<Option<Uuid>, monaca_oidc::InteractionError> {
-        let now = self.now();
-        let map = self.interactions.lock().await;
-        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        Ok(stored.mfa_account)
+        Ok(self.interaction_row(tenant, id).await?.mfa_account)
     }
 
     /// Count a rejected TOTP code, returning the running total.
-    pub async fn record_mfa_failure(&self, id: &str) -> Result<u32, monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
+    pub async fn record_mfa_failure(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> Result<u32, monaca_oidc::InteractionError> {
+        match self
+            .store
+            .interaction_record_mfa_failure(tenant, id)
+            .await
+            .map_err(interaction_store_error)?
+        {
+            Some(attempts) => Ok(attempts.max(0) as u32),
+            None => Err(self.interaction_failure(tenant, id).await),
         }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        stored.mfa_attempts += 1;
-        Ok(stored.mfa_attempts)
     }
 
     /// Drop the challenge once a code verified, so the sign-in can finish.
-    pub async fn clear_mfa_pending(&self, id: &str) -> Result<(), monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        stored.mfa_account = None;
-        stored.mfa_attempts = 0;
+    pub async fn clear_mfa_pending(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> Result<(), monaca_oidc::InteractionError> {
+        self.require_interaction_update(
+            self.store.interaction_clear_mfa_pending(tenant, id).await,
+            tenant,
+            id,
+        )
+        .await?;
         Ok(())
     }
 
     /// Mark this interaction's second factor as satisfied by a completed enrollment.
-    pub async fn mark_mfa_satisfied(&self, id: &str) -> Result<(), monaca_oidc::InteractionError> {
-        let now = self.now();
-        let mut map = self.interactions.lock().await;
-        let stored = map
-            .get_mut(id)
-            .ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        stored.mfa_account = None;
-        stored.mfa_enrollment = None;
-        stored.mfa_attempts = 0;
-        stored.mfa_satisfied = true;
+    pub async fn mark_mfa_satisfied(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> Result<(), monaca_oidc::InteractionError> {
+        self.require_interaction_update(
+            self.store.interaction_mfa_satisfied(tenant, id).await,
+            tenant,
+            id,
+        )
+        .await?;
         Ok(())
     }
 
     /// Whether a completed enrollment has already satisfied this interaction's second factor.
-    pub async fn mfa_satisfied(&self, id: &str) -> Result<bool, monaca_oidc::InteractionError> {
-        let now = self.now();
-        let map = self.interactions.lock().await;
-        let stored = map.get(id).ok_or(monaca_oidc::InteractionError::NotFound)?;
-        if stored.interaction.is_expired(now) {
-            return Err(monaca_oidc::InteractionError::Expired);
-        }
-        if stored.consumed {
-            return Err(monaca_oidc::InteractionError::Consumed);
-        }
-        Ok(stored.mfa_satisfied)
+    pub async fn mfa_satisfied(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> Result<bool, monaca_oidc::InteractionError> {
+        Ok(self.interaction_row(tenant, id).await?.mfa_satisfied)
     }
 
     /// Hold the unconfirmed secret of a TOTP setup until the user proves the app works.
+    ///
+    /// The secret is sealed with the tenant DEK before it reaches the database, exactly like the
+    /// enrolled credential next to it.
     pub async fn put_totp_enrollment(
         &self,
+        tenant: &TenantRow,
         account: Uuid,
         secret: Vec<u8>,
         expires_at: OffsetDateTime,
-    ) {
-        let now = self.now();
-        let mut map = self.totp_enrollments.lock().await;
-        map.retain(|_, (_, expiry)| *expiry > now);
-        map.insert(account, (secret, expires_at));
+    ) -> Result<(), ApiError> {
+        let dek = self.tenant_dek(tenant)?;
+        let sealed = seal(&dek, &secret)
+            .map_err(|err| ApiError::internal(format!("totp enrollment: {err}")))?;
+        self.store
+            .totp_enrollment_put(tenant, account, &sealed, expires_at)
+            .await
+            .map_err(ApiError::internal)
     }
 
     /// The pending TOTP secret of a setup, if it has not expired.
-    pub async fn totp_enrollment(&self, account: Uuid) -> Option<Vec<u8>> {
-        let now = self.now();
-        let mut map = self.totp_enrollments.lock().await;
-        map.retain(|_, (_, expiry)| *expiry > now);
-        map.get(&account).map(|(secret, _)| secret.clone())
+    pub async fn totp_enrollment(&self, tenant: &TenantRow, account: Uuid) -> Option<Vec<u8>> {
+        let sealed = match self.store.totp_enrollment_get(tenant, account).await {
+            Ok(sealed) => sealed?,
+            Err(err) => {
+                tracing::warn!(%err, "could not read a pending TOTP enrollment");
+                return None;
+            }
+        };
+        let dek = match self.tenant_dek(tenant) {
+            Ok(dek) => dek,
+            Err(err) => {
+                tracing::warn!(%err, "could not derive the TOTP enrollment DEK");
+                return None;
+            }
+        };
+        match open(&dek, &sealed) {
+            Ok(secret) => Some(secret),
+            Err(err) => {
+                tracing::warn!(%err, "could not open a pending TOTP enrollment");
+                None
+            }
+        }
     }
 
     /// Forget a pending setup, e.g. when the account removes or replaces it.
-    pub async fn drop_totp_enrollment(&self, account: Uuid) {
-        self.totp_enrollments.lock().await.remove(&account);
+    pub async fn drop_totp_enrollment(&self, tenant: &TenantRow, account: Uuid) {
+        if let Err(err) = self.store.totp_enrollment_delete(tenant, account).await {
+            tracing::warn!(%err, "could not drop a pending TOTP enrollment");
+        }
     }
 
     /// Remember a freshly generated WebAuthn challenge until its ceremony completes.
     pub async fn put_passkey_challenge(
         &self,
+        tenant: &TenantRow,
         key: String,
         challenge: Vec<u8>,
         expires_at: OffsetDateTime,
-    ) {
-        let now = self.now();
-        let mut map = self.passkey_challenges.lock().await;
-        map.retain(|_, stored| stored.expires_at > now);
-        map.insert(
-            key,
-            PasskeyChallenge {
-                challenge,
-                expires_at,
-            },
-        );
+    ) -> Result<(), ApiError> {
+        self.store
+            .passkey_challenge_put(tenant, &key, &challenge, expires_at)
+            .await
+            .map_err(ApiError::internal)
     }
 
     /// Redeem a challenge: it is removed whether it is valid or not, so every ceremony is one-shot.
-    pub async fn take_passkey_challenge(&self, key: &str) -> Option<Vec<u8>> {
-        let now = self.now();
-        let mut map = self.passkey_challenges.lock().await;
-        map.retain(|_, stored| stored.expires_at > now);
-        map.remove(key)
-            .filter(|stored| stored.expires_at > now)
-            .map(|stored| stored.challenge)
+    pub async fn take_passkey_challenge(&self, tenant: &TenantRow, key: &str) -> Option<Vec<u8>> {
+        match self.store.passkey_challenge_take(tenant, key).await {
+            Ok(challenge) => challenge,
+            Err(err) => {
+                tracing::warn!(%err, "could not read a passkey challenge");
+                None
+            }
+        }
+    }
+
+    /// Read a live interaction row, classifying a missing, expired or consumed one.
+    async fn interaction_row(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> Result<InteractionRow, monaca_oidc::InteractionError> {
+        let row = self
+            .store
+            .interaction_get(tenant, id)
+            .await
+            .map_err(interaction_store_error)?
+            .ok_or(monaca_oidc::InteractionError::NotFound)?;
+        interaction_status(&row, self.now())?;
+        Ok(row)
+    }
+
+    /// A conditional update that matched nothing: classify the row we can still read.
+    async fn interaction_failure(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> monaca_oidc::InteractionError {
+        match self.store.interaction_get(tenant, id).await {
+            Ok(Some(row)) => interaction_status(&row, self.now())
+                .err()
+                .unwrap_or(monaca_oidc::InteractionError::Consumed),
+            Ok(None) => monaca_oidc::InteractionError::NotFound,
+            Err(err) => interaction_store_error(err),
+        }
+    }
+
+    /// `take_signed_in` failing on a live row means it was never signed in.
+    async fn take_failure(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> monaca_oidc::InteractionError {
+        match self.store.interaction_get(tenant, id).await {
+            Ok(Some(row)) => {
+                if let Err(err) = interaction_status(&row, self.now()) {
+                    return err;
+                }
+                if row.signed_in_account.is_none() {
+                    monaca_oidc::InteractionError::NotSignedIn
+                } else {
+                    monaca_oidc::InteractionError::Consumed
+                }
+            }
+            Ok(None) => monaca_oidc::InteractionError::NotFound,
+            Err(err) => interaction_store_error(err),
+        }
+    }
+
+    async fn require_interaction_update(
+        &self,
+        result: Result<Option<InteractionRow>, monaca_store::StoreError>,
+        tenant: &TenantRow,
+        id: &str,
+    ) -> Result<InteractionRow, monaca_oidc::InteractionError> {
+        match result.map_err(interaction_store_error)? {
+            Some(row) => Ok(row),
+            None => Err(self.interaction_failure(tenant, id).await),
+        }
     }
 
     /// Append an audit event to an org chain in its own transaction.
@@ -564,4 +555,31 @@ impl AppState {
         crate::webhooks::dispatch(self, tenant.tenant_id(), &tenant.db_name, event).await;
         Ok(())
     }
+}
+
+fn interaction_payload(
+    row: &InteractionRow,
+) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
+    serde_json::from_value(row.payload.clone()).map_err(|err| {
+        tracing::error!(%err, "stored interaction payload is not readable");
+        monaca_oidc::InteractionError::NotFound
+    })
+}
+
+fn interaction_status(
+    row: &InteractionRow,
+    now: OffsetDateTime,
+) -> Result<(), monaca_oidc::InteractionError> {
+    if now >= row.expires_at {
+        return Err(monaca_oidc::InteractionError::Expired);
+    }
+    if row.consumed {
+        return Err(monaca_oidc::InteractionError::Consumed);
+    }
+    Ok(())
+}
+
+fn interaction_store_error(err: monaca_store::StoreError) -> monaca_oidc::InteractionError {
+    tracing::error!(%err, "interaction state store failed");
+    monaca_oidc::InteractionError::NotFound
 }

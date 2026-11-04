@@ -14,6 +14,7 @@
 //   4  `list_notes` succeeds; 4b `delete_note` is refused with `insufficient_scope`
 //   5  the audit page shows account → grant → agent → token(jti) → tool and the chain verifies
 import { createHmac } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describeNetError } from "../lib/net.ts";
@@ -617,6 +618,17 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "requests through and answers the third 429 MONACA_TOO_MANY_ATTEMPTS with Retry-After; a tenant-wide " +
       "authorize row at 1 lets one authorize through and refuses the next with the same shape; items:[] restores " +
       "the defaults and a token request succeeds again",
+  },
+  {
+    step: "62",
+    title: "flow state survives a restart",
+    assertion:
+      "a second server process starts from the same binary and database; an authorize interaction created on " +
+      "it answers GET /interaction/{iid} with signed_in=false after that process is killed and restarted; a " +
+      "password sign-in completes (consent is honoured when the client asks), the code exchanges for a token " +
+      "whose sub is the test account, a replay is 409 MONACA_INTERACTION_CONSUMED and an unknown id is 404; a " +
+      "TOTP enrollment started before another restart verifies after it; a passkey registration challenge " +
+      "issued before a third restart completes after it",
   },
 ];
 
@@ -6841,6 +6853,294 @@ async function rateLimitFlow(
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: defaults → four 400s → client token limit 2 → third 429+Retry-After → tenant authorize limit 1 → second 429 → cleared`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 62 — the three short-lived flow states survive a server restart (§6.1).
+ *
+ * A second server process shares the database with the walk-through. An interaction, a pending
+ * TOTP enrollment and a WebAuthn registration challenge are each started on one process and
+ * finished on another; a replay after the restart must still be `409`, not a fresh flow.
+ */
+async function persistenceFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const headers = managementHeaders(adminToken);
+  const runId = Date.now().toString(36);
+  const email = `restart-${runId}@demo.localhost`;
+  const password = `pw-${runId}-restart`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const origin = new URL(process.env.MONACA_AUTH_UI_URL ?? "http://localhost:5174").origin;
+  const serverBin =
+    process.env.MONACA_SERVER_BIN ??
+    join(ROOT, ".monaca", "bin", process.platform === "win32" ? "monaca-server.exe" : "monaca-server");
+  const port = 8083;
+  const second = `http://127.0.0.1:${port}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  let proc: ReturnType<typeof Bun.spawn> | undefined;
+
+  const skip = (why: string): StepResult => ({
+    step: "62",
+    title: "flow state survives a restart",
+    status: "skip",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+  if (!existsSync(serverBin)) {
+    return skip(`no server binary at ${serverBin}; set MONACA_SERVER_BIN or run bun run fetch:native`);
+  }
+  if (
+    process.env.MONACA_CONTROL_DATABASE_URL === undefined ||
+    process.env.MONACA_ADMIN_DATABASE_URL === undefined
+  ) {
+    return skip("MONACA_CONTROL_DATABASE_URL / MONACA_ADMIN_DATABASE_URL are not in this environment");
+  }
+
+  const startServer = async (): Promise<boolean> => {
+    proc = Bun.spawn([serverBin, "serve"], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        MONACA_SERVER_ADDR: `127.0.0.1:${port}`,
+        MONACA_SERVER_URL: second,
+        MONACA_LOG_LEVEL: "warn",
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    for (let i = 0; i < 120; i++) {
+      try {
+        const response = await fetch(`${second}/healthz`, { signal: AbortSignal.timeout(2_000) });
+        if (response.ok) return true;
+      } catch {
+        // not listening yet
+      }
+      await Bun.sleep(250);
+    }
+    return false;
+  };
+  const stopServer = async (): Promise<void> => {
+    if (proc === undefined) return;
+    proc.kill();
+    await proc.exited;
+    proc = undefined;
+    await Bun.sleep(250);
+  };
+  const restart = async (): Promise<boolean> => {
+    await stopServer();
+    return startServer();
+  };
+  const sessionCookie = (result: HttpResult): string | undefined =>
+    /monaca_session=([0-9a-f-]{36})/.exec(result.headers.get("set-cookie") ?? "")?.[1];
+  const cookieHeaders = (cookie: string | undefined): Record<string, string> =>
+    cookie === undefined ? {} : { cookie: `monaca_session=${cookie}` };
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Restart flow", password }),
+    });
+    const accountId = (created.body as { id?: string } | undefined)?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      detail = `POST /v1/accounts → ${created.status} ${text(created.body)}`;
+      checks.push(["the test account is created", false]);
+      throw new Error(detail);
+    }
+    const member = await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    checks.push([
+      "the test account is created and joined to acme",
+      member.status === 201,
+    ]);
+
+    if (!(await startServer())) {
+      checks.push(["the second server starts", false]);
+      throw new Error(`second server did not answer ${second}/healthz`);
+    }
+    const verifier = `restart-${runId}-${"y".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${second}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "monaca-console",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `restart-${runId}`,
+        nonce: `restart-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        organization: ORG,
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(authorize.headers.get("location") ?? "", second).searchParams.get(
+      "interaction",
+    );
+    checks.push([
+      "the second server creates an interaction",
+      authorize.status === 302 && interaction !== null,
+    ]);
+    if (interaction === null) throw new Error(`authorize → ${authorize.status}`);
+    const iid = encodeURIComponent(interaction);
+
+    if (!(await restart())) {
+      checks.push(["the second server restarts", false]);
+      throw new Error(`second server did not answer ${second}/healthz after a restart`);
+    }
+    const details = await call(`${second}/t/${TENANT}/interaction/${iid}`);
+    const detailBody = details.body as
+      | { signed_in?: unknown; client?: { client_id?: unknown } }
+      | undefined;
+    checks.push([
+      "the interaction survives the restart",
+      details.status === 200 &&
+        detailBody?.signed_in === false &&
+        detailBody?.client?.client_id === "monaca-console",
+    ]);
+
+    const signIn = await call(`${second}/t/${TENANT}/interaction/${iid}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    const cookie = sessionCookie(signIn);
+    checks.push(["password sign-in completes after the restart", signIn.status === 200]);
+    let redirectTo = (signIn.body as { redirect_to?: string } | undefined)?.redirect_to;
+    if (redirectTo === undefined) {
+      const consent = await call(`${second}/t/${TENANT}/interaction/${iid}/consent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...cookieHeaders(cookie) },
+        body: JSON.stringify({ decision: "allow" }),
+      });
+      redirectTo = (consent.body as { redirect_to?: string } | undefined)?.redirect_to;
+    }
+    const code = new URL(redirectTo ?? "http://invalid", second).searchParams.get("code");
+    const exchanged = await tokenCall(
+      second,
+      {
+        grant_type: "authorization_code",
+        code: code ?? "",
+        redirect_uri: redirectUri,
+        client_id: "monaca-console",
+        code_verifier: verifier,
+      },
+      btoa(`monaca-console:${consoleSecret}`),
+    );
+    const claims = jwtClaims((exchanged.body as { id_token?: unknown } | undefined)?.id_token);
+    checks.push([
+      "the code minted after the restart exchanges for the test account",
+      exchanged.status === 200 && claims?.sub === accountId,
+    ]);
+
+    const replay = await call(`${second}/t/${TENANT}/interaction/${iid}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: email, password }),
+    });
+    checks.push([
+      "a consumed interaction is 409 after the restart",
+      replay.status === 409 &&
+        (replay.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_INTERACTION_CONSUMED",
+    ]);
+    const unknown = await call(
+      `${second}/t/${TENANT}/interaction/int_00000000000000000000000000`,
+    );
+    checks.push([
+      "an unknown interaction is 404",
+      unknown.status === 404 &&
+        (unknown.body as { monaca_error_code?: unknown } | undefined)?.monaca_error_code ===
+          "MONACA_INTERACTION_NOT_FOUND",
+    ]);
+
+    // --- a pending TOTP enrollment survives another restart -------------------------------------
+    const begin = await call(`${second}/t/${TENANT}/account/mfa/totp`, {
+      method: "POST",
+      headers: cookieHeaders(cookie),
+    });
+    const secret = (begin.body as { secret?: string } | undefined)?.secret;
+    checks.push([
+      "a TOTP enrollment starts",
+      begin.status === 200 && typeof secret === "string" && secret.length > 0,
+    ]);
+    if (secret === undefined) throw new Error(`TOTP setup → ${begin.status}`);
+    if (!(await restart())) {
+      checks.push(["the second server restarts again", false]);
+      throw new Error(`second server did not answer ${second}/healthz after the TOTP restart`);
+    }
+    const verified = await call(`${second}/t/${TENANT}/account/mfa/totp/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...cookieHeaders(cookie) },
+      body: JSON.stringify({ code: totpFromBase32(secret) }),
+    });
+    checks.push([
+      "the pending TOTP enrollment verifies after the restart",
+      verified.status === 200,
+    ]);
+    await call(`${second}/t/${TENANT}/account/mfa/totp`, {
+      method: "DELETE",
+      headers: cookieHeaders(cookie),
+    });
+
+    // --- a WebAuthn registration challenge survives a third restart ------------------------------
+    const options = await call(`${second}/t/${TENANT}/account/passkeys/options`, {
+      method: "POST",
+      headers: cookieHeaders(cookie),
+    });
+    const creation = options.body as CreationOptionsJSON | undefined;
+    checks.push([
+      "passkey registration options are issued",
+      options.status === 200 && creation?.challenge !== undefined && creation?.rp?.id !== undefined,
+    ]);
+    if (creation === undefined) throw new Error(`passkey options → ${options.status}`);
+    if (!(await restart())) {
+      checks.push(["the second server restarts for the passkey", false]);
+      throw new Error(`second server did not answer ${second}/healthz after the passkey restart`);
+    }
+    const authenticator = await createSoftwareAuthenticator();
+    const registered = await call(`${second}/t/${TENANT}/account/passkeys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...cookieHeaders(cookie) },
+      body: JSON.stringify(await buildRegistration(authenticator, creation, origin, "Restart key")),
+    });
+    const passkeyId = (registered.body as { id?: string } | undefined)?.id;
+    checks.push([
+      "the challenge survives the restart and the passkey registers",
+      registered.status === 201 && passkeyId !== undefined,
+    ]);
+    if (passkeyId !== undefined) {
+      await call(`${second}/t/${TENANT}/account/passkeys/${passkeyId}`, {
+        method: "DELETE",
+        headers: cookieHeaders(cookie),
+      });
+    }
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    await stopServer();
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "62",
+    title: "flow state survives a restart",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: interaction after restart → sign-in+consent+exchange → replay 409 → unknown 404 → TOTP across restart → passkey across restart`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -13854,6 +14154,7 @@ async function main(): Promise<number> {
   push(await socialProvidersFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await revocationFlow(base, parsed.adminSecret));
   push(await rateLimitFlow(base, adminToken, parsed.adminSecret));
+  push(await persistenceFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

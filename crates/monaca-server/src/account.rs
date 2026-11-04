@@ -873,11 +873,12 @@ pub async fn begin_totp(
     let secret = generate_totp_secret();
     state
         .put_totp_enrollment(
+            &tenant,
             account.id,
             secret.clone(),
             state.now() + Duration::seconds(ENROLLMENT_TTL_SECS),
         )
-        .await;
+        .await?;
 
     Ok(Json(json!({
         "secret": totp_base32(&secret),
@@ -905,7 +906,7 @@ pub async fn verify_totp_enrollment(
     Json(body): Json<TotpCodeBody>,
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
-    let Some(secret) = state.totp_enrollment(account.id).await else {
+    let Some(secret) = state.totp_enrollment(&tenant, account.id).await else {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "no TOTP enrollment is pending; start again",
@@ -924,7 +925,7 @@ pub async fn verify_totp_enrollment(
         .store
         .set_totp_secret(&tenant, account.account_id(), &sealed)
         .await?;
-    state.drop_totp_enrollment(account.id).await;
+    state.drop_totp_enrollment(&tenant, account.id).await;
     Ok(Json(json!({ "enabled": true })))
 }
 
@@ -948,7 +949,7 @@ pub async fn disable_totp(
         .store
         .delete_backup_codes(&tenant, account.account_id())
         .await?;
-    state.drop_totp_enrollment(account.id).await;
+    state.drop_totp_enrollment(&tenant, account.id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1076,11 +1077,12 @@ pub async fn begin_passkey_registration(
     let challenge = generate_challenge();
     state
         .put_passkey_challenge(
+            &tenant,
             format!("reg:{}", account.id),
             challenge.clone(),
             state.now() + Duration::seconds(crate::passkey::CHALLENGE_TTL_SECS),
         )
-        .await;
+        .await?;
     let exclude = existing
         .iter()
         .map(crate::passkey::credential_descriptor)
@@ -1110,7 +1112,7 @@ pub async fn register_passkey(
     }
 
     let Some(challenge) = state
-        .take_passkey_challenge(&format!("reg:{}", account.id))
+        .take_passkey_challenge(&tenant, &format!("reg:{}", account.id))
         .await
     else {
         return Err(ApiError::problem(

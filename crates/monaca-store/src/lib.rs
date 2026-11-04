@@ -20,6 +20,7 @@
 mod migrate;
 mod provision;
 mod repo;
+mod runtime_state;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -32,6 +33,7 @@ use tokio::sync::Mutex;
 
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
+pub use runtime_state::InteractionRow;
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
     BrandingRow, ClientRow, ConsentRow, EmailConnectorRow, EmailTemplateRow, GrantRow,

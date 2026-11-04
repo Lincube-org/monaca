@@ -477,7 +477,7 @@ pub async fn connector_authorize(
         return Err(ApiError::not_found("connector"));
     }
     let interaction = state
-        .peek_interaction(&query.interaction)
+        .peek_interaction(&tenant, &query.interaction)
         .await
         .map_err(ApiError::Interaction)?;
     if interaction.tenant != tenant.slug {
@@ -678,7 +678,7 @@ pub async fn connector_callback(
                     "the state carries no interaction",
                 ));
             };
-            let interaction = match state.peek_interaction(iid).await {
+            let interaction = match state.peek_interaction(&tenant, iid).await {
                 Ok(interaction) => interaction,
                 Err(err) => {
                     audit_failed(&state, &tenant, &connector_id, "state_invalid").await;
@@ -898,7 +898,7 @@ pub async fn confirm_social_link(
         return Err(ApiError::not_found("connector"));
     };
     let interaction = state
-        .peek_interaction(&pending.interaction_id)
+        .peek_interaction(&tenant, &pending.interaction_id)
         .await
         .map_err(ApiError::Interaction)?;
     if interaction.tenant != tenant.slug {

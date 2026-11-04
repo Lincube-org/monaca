@@ -314,9 +314,12 @@ pub async fn authorize(
                     // this interaction's authentication, and let the page render its consent step.
                     let interaction =
                         build_interaction(&state, &tenant, &client, &request, &org, true);
-                    state.put_interaction(interaction.clone()).await;
+                    state
+                        .put_interaction(&tenant, interaction.clone())
+                        .await?;
                     state
                         .mark_interaction_signed_in(
+                            &tenant,
                             &interaction.interaction_id.to_string(),
                             account.id,
                             session.id,
@@ -379,7 +382,7 @@ pub async fn authorize(
     let consent_required = request.requires_consent(client.is_third_party);
     let interaction = build_interaction(&state, &tenant, &client, &request, &org, consent_required);
     let location = sign_in_location(&state, &tenant, &interaction);
-    state.put_interaction(interaction).await;
+    state.put_interaction(&tenant, interaction).await?;
     Ok(found(&location))
 }
 
@@ -469,14 +472,15 @@ fn sign_in_location(state: &AppState, tenant: &TenantRow, interaction: &Interact
 /// `GET /t/{tenant}/interaction/{iid}`.
 pub async fn interaction_details(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
     let (interaction, signed_in) = state
-        .peek_interaction_state(&iid)
+        .peek_interaction_state(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     let pending = state
-        .mfa_pending(&iid)
+        .mfa_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     let mut body = interaction.to_public_json(signed_in.is_some());
@@ -503,7 +507,7 @@ pub async fn interaction_details(
     // A mandatory policy parks the flow on an enrollment step instead; the page needs to know
     // which of the two it is rendering.
     let enrollment = state
-        .mfa_enrollment_pending(&iid)
+        .mfa_enrollment_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     body["mfa_enrollment_required"] = json!(enrollment.is_some());
@@ -565,15 +569,15 @@ pub struct SignInBody {
 /// `POST /t/{tenant}/interaction/{iid}/sign-in`.
 pub async fn sign_in(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<SignInBody>,
 ) -> Result<Response, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
     let interaction = state
-        .peek_interaction(&iid)
+        .peek_interaction(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
-    let tenant = state.tenant(&interaction.tenant).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.password_sign_in_enabled {
         return Err(ApiError::problem(
@@ -769,7 +773,7 @@ pub(crate) async fn finish_sign_in(
     // enrolled authenticator is not demanded either — the administrator turned the step off.
     let experience = state.store.sign_in_experience(&tenant).await?;
     let satisfied = state
-        .mfa_satisfied(iid)
+        .mfa_satisfied(&tenant, iid)
         .await
         .map_err(ApiError::Interaction)?;
     if experience.mfa_enabled && !satisfied {
@@ -799,7 +803,7 @@ pub(crate) async fn finish_sign_in(
             }
 
             state
-                .mark_mfa_pending(iid, account.id)
+                .mark_mfa_pending(&tenant, iid, account.id)
                 .await
                 .map_err(ApiError::Interaction)?;
             return Ok(Json(json!({
@@ -812,7 +816,7 @@ pub(crate) async fn finish_sign_in(
             // No factor is enrolled and the tenant requires one: the flow pauses on a setup step
             // instead of silently letting a weaker sign-in through.
             state
-                .mark_mfa_enrollment(iid, account.id)
+                .mark_mfa_enrollment(&tenant, iid, account.id)
                 .await
                 .map_err(ApiError::Interaction)?;
             return Ok(Json(json!({
@@ -972,7 +976,7 @@ async fn complete_sign_in(
                 .is_some_and(|grant| consent_covers(grant, &interaction.scopes));
         if !approved {
             state
-                .mark_interaction_signed_in(iid, account.id, session_id)
+                .mark_interaction_signed_in(&tenant, iid, account.id, session_id)
                 .await
                 .map_err(ApiError::Interaction)?;
             let response = Json(json!({ "consent_required": true })).into_response();
@@ -987,7 +991,7 @@ async fn complete_sign_in(
 
     // Consume only after authentication succeeds, so a typo does not burn the interaction.
     let interaction = state
-        .consume_interaction(iid)
+        .consume_interaction(&tenant, iid)
         .await
         .map_err(ApiError::Interaction)?;
 
@@ -1378,13 +1382,15 @@ pub(crate) fn check_username(
 /// The interaction and its tenant, or the interaction error the page should render.
 async fn interaction_and_tenant(
     state: &Arc<AppState>,
+    tenant_slug: &str,
     iid: &str,
 ) -> Result<(Interaction, TenantRow), ApiError> {
+    // Interactions are stored in the tenant's own database, so the path's tenant is the address.
+    let tenant = state.tenant(tenant_slug).await?;
     let interaction = state
-        .peek_interaction(iid)
+        .peek_interaction(&tenant, iid)
         .await
         .map_err(ApiError::Interaction)?;
-    let tenant = state.tenant(&interaction.tenant).await?;
     Ok((interaction, tenant))
 }
 
@@ -1680,11 +1686,11 @@ async fn complete_sign_up(
 /// signs in, because there is nothing left to prove.
 pub async fn sign_up(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<SignUpBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.sign_up_enabled {
         return Err(ApiError::problem(
@@ -1767,11 +1773,11 @@ pub async fn sign_up(
 /// `POST /t/{tenant}/interaction/{iid}/sign-up/verify` — prove the address and sign in.
 pub async fn sign_up_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<SignUpVerifyBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.sign_up_enabled {
         return Err(ApiError::problem(
@@ -1828,10 +1834,10 @@ pub async fn sign_up_verify(
 /// `POST /t/{tenant}/interaction/{iid}/sign-in/code` — request a passwordless sign-in code.
 pub async fn sign_in_code(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (_interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.email_code_sign_in_enabled {
         return Err(ApiError::problem(
@@ -1854,11 +1860,11 @@ pub async fn sign_in_code(
 /// `POST /t/{tenant}/interaction/{iid}/sign-in/code/verify`.
 pub async fn sign_in_code_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<CodeVerifyBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     if !state
         .store
         .sign_in_experience(&tenant)
@@ -1895,10 +1901,10 @@ pub async fn sign_in_code_verify(
 /// address is, and the throttle matches the six-digit code path.
 pub async fn sign_in_link(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (_interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.email_code_sign_in_enabled {
         return Err(ApiError::problem(
@@ -2048,7 +2054,7 @@ pub async fn sign_in_link_verify(
     }
 
     let interaction = state
-        .peek_interaction(&iid)
+        .peek_interaction(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     if interaction.tenant != tenant.slug {
@@ -2080,10 +2086,10 @@ pub async fn sign_in_link_verify(
 /// `POST /t/{tenant}/interaction/{iid}/password/forgot` — request a reset code.
 pub async fn password_forgot(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     Json(body): Json<EmailBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (_interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.password_sign_in_enabled {
         return Err(ApiError::problem(
@@ -2106,11 +2112,11 @@ pub async fn password_forgot(
 /// `POST /t/{tenant}/interaction/{iid}/password/reset` — prove the address, set a new password.
 pub async fn password_reset(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<PasswordResetBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     if !experience.password_sign_in_enabled {
         return Err(ApiError::problem(
@@ -2206,9 +2212,13 @@ async fn issue_trusted_device(
 ///
 /// Both factors share one counter: trying five backup codes must not leave the TOTP form with a
 /// fresh budget.
-async fn refuse_mfa_code(state: &AppState, iid: &str) -> Result<ApiError, ApiError> {
+async fn refuse_mfa_code(
+    state: &AppState,
+    tenant: &TenantRow,
+    iid: &str,
+) -> Result<ApiError, ApiError> {
     let attempts = state
-        .record_mfa_failure(iid)
+        .record_mfa_failure(tenant, iid)
         .await
         .map_err(ApiError::Interaction)?;
     if attempts >= MAX_MFA_ATTEMPTS {
@@ -2231,13 +2241,13 @@ async fn refuse_mfa_code(state: &AppState, iid: &str) -> Result<ApiError, ApiErr
 /// for that account. A backup code is burned on use, so the same sheet cannot be replayed.
 pub async fn mfa_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<MfaVerifyBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
-        .mfa_pending(&iid)
+        .mfa_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?
     else {
@@ -2252,10 +2262,10 @@ pub async fn mfa_verify(
         .account_by_id(&tenant, AccountId::from_uuid(account_id))
         .await?
     else {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     };
     if account.state != "active" {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     }
 
     match body.factor.as_deref().unwrap_or("totp") {
@@ -2265,14 +2275,14 @@ pub async fn mfa_verify(
                 .totp_secret(&tenant, account.account_id())
                 .await?
             else {
-                return Err(refuse_mfa_code(&state, &iid).await?);
+                return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
             };
             let dek = state.tenant_dek(&tenant)?;
             let secret = open(&dek, &sealed)
                 .map_err(|err| ApiError::internal(format!("totp secret: {err}")))?;
 
             if !verify_totp(&secret, &body.code, state.now()) {
-                return Err(refuse_mfa_code(&state, &iid).await?);
+                return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
             }
             state
                 .store
@@ -2284,14 +2294,14 @@ pub async fn mfa_verify(
             // attempt and the same `401`.
             let Some(hash) = normalize_backup_code(&body.code).map(|code| hash_secret(&code))
             else {
-                return Err(refuse_mfa_code(&state, &iid).await?);
+                return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
             };
             if !state
                 .store
                 .consume_backup_code(&tenant, account.account_id(), &hash)
                 .await?
             {
-                return Err(refuse_mfa_code(&state, &iid).await?);
+                return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
             }
         }
         _ => {
@@ -2303,7 +2313,7 @@ pub async fn mfa_verify(
     }
 
     state
-        .clear_mfa_pending(&iid)
+        .clear_mfa_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
 
@@ -2337,11 +2347,11 @@ pub struct MfaEnrollmentBody {
 /// account this interaction is parked on. It is written to `credentials` only by the verify step.
 pub async fn mfa_enroll_start(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (_interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
-        .mfa_enrollment_pending(&iid)
+        .mfa_enrollment_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?
     else {
@@ -2375,11 +2385,12 @@ pub async fn mfa_enroll_start(
     let secret = generate_totp_secret();
     state
         .put_totp_enrollment(
+            &tenant,
             account.id,
             secret.clone(),
             state.now() + Duration::seconds(MFA_ENROLLMENT_TTL_SECS),
         )
-        .await;
+        .await?;
     Ok(Json(json!({
         "secret": totp_base32(&secret),
         "otpauth_url": totp_otpauth_url(crate::account::ISSUER, &account.primary_email, &secret),
@@ -2393,13 +2404,13 @@ pub async fn mfa_enroll_start(
 /// once, and every later sign-in is challenged normally.
 pub async fn mfa_enroll_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<MfaEnrollmentBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
-        .mfa_enrollment_pending(&iid)
+        .mfa_enrollment_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?
     else {
@@ -2408,7 +2419,7 @@ pub async fn mfa_enroll_verify(
             "this interaction is not waiting for an enrollment",
         ));
     };
-    let Some(secret) = state.totp_enrollment(account_id).await else {
+    let Some(secret) = state.totp_enrollment(&tenant, account_id).await else {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "no enrollment is pending; start again",
@@ -2439,9 +2450,11 @@ pub async fn mfa_enroll_verify(
         .store
         .set_totp_secret(&tenant, account_id, &sealed)
         .await?;
-    state.drop_totp_enrollment(account_id.uuid()).await;
     state
-        .mark_mfa_satisfied(&iid)
+        .drop_totp_enrollment(&tenant, account_id.uuid())
+        .await;
+    state
+        .mark_mfa_satisfied(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
 
@@ -2493,9 +2506,10 @@ async fn audit_passkey_denial(
 /// the page is currently asking for, so both are refused rather than silently accepted.
 async fn passkey_sign_in_interaction(
     state: &Arc<AppState>,
+    tenant_slug: &str,
     iid: &str,
 ) -> Result<(Interaction, TenantRow), ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(state, iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(state, tenant_slug, iid).await?;
     // The tenant's switch gates both halves of the ceremony: a disabled method must not hand the
     // browser assertion options, and a stale challenge must not still complete a sign-in.
     if !state
@@ -2510,7 +2524,7 @@ async fn passkey_sign_in_interaction(
         ));
     }
     let (_, signed_in) = state
-        .peek_interaction_state(iid)
+        .peek_interaction_state(&tenant, iid)
         .await
         .map_err(ApiError::Interaction)?;
     if signed_in.is_some() {
@@ -2520,7 +2534,7 @@ async fn passkey_sign_in_interaction(
         ));
     }
     if state
-        .mfa_pending(iid)
+        .mfa_pending(&tenant, iid)
         .await
         .map_err(ApiError::Interaction)?
         .is_some()
@@ -2596,18 +2610,19 @@ async fn record_passkey_counter(
 /// the discoverable passkeys it holds for this host and reports the user handle with the result.
 pub async fn passkey_sign_in_options(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    passkey_sign_in_interaction(&state, &iid).await?;
+    let (_, tenant) = passkey_sign_in_interaction(&state, &tenant_slug, &iid).await?;
     let rp = crate::passkey::relying_party(&state.config)?;
     let challenge = generate_challenge();
     state
         .put_passkey_challenge(
+            &tenant,
             format!("in:{iid}"),
             challenge.clone(),
             state.now() + Duration::seconds(crate::passkey::CHALLENGE_TTL_SECS),
         )
-        .await;
+        .await?;
     Ok(Json(crate::passkey::assertion_options(
         &rp.id,
         &challenge,
@@ -2623,12 +2638,15 @@ pub async fn passkey_sign_in_options(
 /// still honours an enrolled second factor.
 pub async fn passkey_sign_in_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<crate::passkey::CeremonyBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = passkey_sign_in_interaction(&state, &iid).await?;
-    let Some(challenge) = state.take_passkey_challenge(&format!("in:{iid}")).await else {
+    let (interaction, tenant) = passkey_sign_in_interaction(&state, &tenant_slug, &iid).await?;
+    let Some(challenge) = state
+        .take_passkey_challenge(&tenant, &format!("in:{iid}"))
+        .await
+    else {
         return Err(ApiError::problem(
             kinds::INVALID_CREDENTIALS,
             "no passkey sign-in is pending; start again",
@@ -2719,11 +2737,11 @@ pub async fn passkey_sign_in_verify(
 /// cannot answer with someone else's credential.
 pub async fn mfa_passkey_options(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let (_, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (_, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
-        .mfa_pending(&iid)
+        .mfa_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?
     else {
@@ -2747,11 +2765,12 @@ pub async fn mfa_passkey_options(
     let challenge = generate_challenge();
     state
         .put_passkey_challenge(
+            &tenant,
             format!("mfa:{iid}"),
             challenge.clone(),
             state.now() + Duration::seconds(crate::passkey::CHALLENGE_TTL_SECS),
         )
-        .await;
+        .await?;
     let allow = rows
         .iter()
         .map(crate::passkey::credential_descriptor)
@@ -2767,13 +2786,13 @@ pub async fn mfa_passkey_options(
 /// five-attempt budget, so a passkey cannot be used to reset the TOTP counter (or the reverse).
 pub async fn mfa_passkey_verify(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<crate::passkey::CeremonyBody>,
 ) -> Result<Response, ApiError> {
-    let (interaction, tenant) = interaction_and_tenant(&state, &iid).await?;
+    let (interaction, tenant) = interaction_and_tenant(&state, &tenant_slug, &iid).await?;
     let Some(account_id) = state
-        .mfa_pending(&iid)
+        .mfa_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?
     else {
@@ -2783,50 +2802,53 @@ pub async fn mfa_passkey_verify(
         ));
     };
 
-    let Some(challenge) = state.take_passkey_challenge(&format!("mfa:{iid}")).await else {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+    let Some(challenge) = state
+        .take_passkey_challenge(&tenant, &format!("mfa:{iid}"))
+        .await
+    else {
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     };
     let Some(assertion) = crate::passkey::parse_assertion(&body) else {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     };
     let Some(account) = state
         .store
         .account_by_id(&tenant, AccountId::from_uuid(account_id))
         .await?
     else {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     };
     if account.state != "active" {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     }
     let Some(row) = state
         .store
         .passkey_by_credential_id(&tenant, &assertion.credential_id)
         .await?
     else {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     };
     // The credential must belong to the account this interaction is proving; otherwise a valid
     // passkey of a different account would satisfy the challenge.
     if row.account_id != account.id {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     }
     if let Some(handle) = assertion.user_handle.as_deref()
         && !Uuid::from_slice(handle).is_ok_and(|handle| handle == account.id)
     {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     }
 
     let rp = crate::passkey::relying_party(&state.config)?;
     let Some(sign_count) =
         verify_passkey_assertion(&state, &tenant, &row, &assertion, &challenge, &rp)?
     else {
-        return Err(refuse_mfa_code(&state, &iid).await?);
+        return Err(refuse_mfa_code(&state, &tenant, &iid).await?);
     };
     record_passkey_counter(&state, &tenant, &row, sign_count).await?;
 
     state
-        .clear_mfa_pending(&iid)
+        .clear_mfa_pending(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     complete_sign_in(state, tenant, interaction, &iid, &headers, account).await
@@ -2903,9 +2925,10 @@ pub struct ConsentBody {
 /// `POST /t/{tenant}/interaction/{iid}/consent` — the second half of the login/consent challenge.
 pub async fn consent(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
     Json(body): Json<ConsentBody>,
 ) -> Result<Response, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
     if body.decision != "allow" && body.decision != "deny" {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
@@ -2914,7 +2937,7 @@ pub async fn consent(
     }
     if body.decision == "deny" {
         let interaction = state
-            .consume_interaction(&iid)
+            .consume_interaction(&tenant, &iid)
             .await
             .map_err(ApiError::Interaction)?;
         return Ok(Json(json!({
@@ -2929,7 +2952,7 @@ pub async fn consent(
     // Peek first: a scope list outside the request, or every scope refused, must not leave the
     // interaction half-answerable. Only an actual approval consumes it.
     let (interaction, _) = state
-        .peek_interaction_state(&iid)
+        .peek_interaction_state(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     let approved: Vec<String> = match body.allowed_scopes.as_deref() {
@@ -2956,7 +2979,7 @@ pub async fn consent(
         // Refusing every scope is the same decision as `deny`: the client gets `access_denied`
         // and no code is minted, so a refusal can never leave a partial grant behind.
         let interaction = state
-            .consume_interaction(&iid)
+            .consume_interaction(&tenant, &iid)
             .await
             .map_err(ApiError::Interaction)?;
         return Ok(Json(json!({
@@ -2969,10 +2992,9 @@ pub async fn consent(
     }
 
     let (interaction, account_id, session_id) = state
-        .take_signed_in_interaction(&iid)
+        .take_signed_in_interaction(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
-    let tenant = state.tenant(&interaction.tenant).await?;
     let account = state
         .store
         .account_by_id(&tenant, AccountId::from_uuid(account_id))
@@ -3252,10 +3274,11 @@ async fn issue_code(
 /// `POST /t/{tenant}/interaction/{iid}/abort`.
 pub async fn abort(
     State(state): State<Arc<AppState>>,
-    Path((_tenant, iid)): Path<(String, String)>,
+    Path((tenant_slug, iid)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
     let interaction = state
-        .consume_interaction(&iid)
+        .consume_interaction(&tenant, &iid)
         .await
         .map_err(ApiError::Interaction)?;
     Ok(Json(json!({

@@ -5,6 +5,7 @@
 //! to mint a code lives in this struct, so the auth-ui never sees (or has to echo) the flow's
 //! internals.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -12,7 +13,7 @@ use uuid::Uuid;
 use monaca_types::InteractionId;
 
 /// A pending authorize request, as stored between the redirect and the sign-in.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interaction {
     /// `int_…`, the bearer of this request.
     pub interaction_id: InteractionId,
