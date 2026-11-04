@@ -65,9 +65,9 @@ if [ -z "$out" ]; then
 fi
 
 sources=0
-[ -n "$dsn" ] && sources=$((sources + 1))
-[ -n "$container" ] && sources=$((sources + 1))
-[ -n "$compose_file" ] && sources=$((sources + 1))
+if [ -n "$dsn" ]; then sources=$((sources + 1)); fi
+if [ -n "$container" ]; then sources=$((sources + 1)); fi
+if [ -n "$compose_file" ]; then sources=$((sources + 1)); fi
 if [ "$sources" -ne 1 ]; then
   echo "backup.sh: pass exactly one of --dsn, --container or --compose-file." >&2
   exit 2

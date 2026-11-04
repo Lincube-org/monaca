@@ -75,9 +75,9 @@ case "$admin_db" in
 esac
 
 modes=0
-[ -n "$container" ] && modes=$((modes + 1))
-[ -n "$compose_file" ] && modes=$((modes + 1))
-[ -n "$dsn" ] && modes=$((modes + 1))
+if [ -n "$container" ]; then modes=$((modes + 1)); fi
+if [ -n "$compose_file" ]; then modes=$((modes + 1)); fi
+if [ -n "$dsn" ]; then modes=$((modes + 1)); fi
 if [ "$modes" -ne 1 ]; then
   echo "restore-drill.sh: pass exactly one of --container, --compose-file or --dsn." >&2
   exit 2
