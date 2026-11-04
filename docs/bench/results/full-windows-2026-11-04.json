@@ -1,0 +1,1816 @@
+{
+  "meta": {
+    "generated_at": "2026-11-04T11:10:16.276Z",
+    "profile": "full",
+    "commit": "748f83d52bb3d89a75c42d8ef580dd0a1401af05",
+    "host": {
+      "platform": "win32",
+      "release": "10.0.26200",
+      "arch": "x64",
+      "cpu": "Intel(R) Core(TM) Ultra 5 226V",
+      "memory_gb": 15.6,
+      "bun": "1.3.14"
+    },
+    "server": {
+      "binary": "C:\\git\\sso\\monaca\\.monaca\\bin\\monaca-server.exe",
+      "version": "0.0.0"
+    },
+    "pg": {
+      "source": "embedded",
+      "port": 5442,
+      "version": "18.4",
+      "settings": {
+        "fsync": "off",
+        "full_page_writes": "off",
+        "max_connections": "500",
+        "shared_buffers": "32768",
+        "synchronous_commit": "off",
+        "work_mem": "8192"
+      },
+      "stats_available": true,
+      "stats_error": ""
+    },
+    "fixtures": {
+      "tenants": 200,
+      "extra_tenants": 198,
+      "scenario_tenant": "demo",
+      "accounts": 200,
+      "accounts_in_demo": 201,
+      "clients": 20,
+      "instances": 1,
+      "tenant_pool_size": 5,
+      "tenant_pool_cache": 64
+    },
+    "iterations": {
+      "warmup": 50,
+      "measured": 1000,
+      "flow_warmup": 20,
+      "flow_measured": 200
+    },
+    "notes": [
+      "The PostgreSQL cluster is disposable: fsync=off, synchronous_commit=off, full_page_writes=off.",
+      "Numbers are comparative and machine-specific; the fixture and parameters are fixed per profile.",
+      "Metrics on /metrics are per process; this run uses one server instance at a time."
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "authorize",
+      "expected": [
+        302
+      ],
+      "measurement": {
+        "name": "authorize",
+        "requests": 1000,
+        "errors": 0,
+        "error_rate": 0,
+        "latency": {
+          "count": 1000,
+          "min_ms": 1.953,
+          "p50_ms": 4.941,
+          "p95_ms": 8.41,
+          "p99_ms": 16.292,
+          "max_ms": 54.731,
+          "mean_ms": 5.718
+        },
+        "throughput_rps": 168.998,
+        "first_error": ""
+      },
+      "db": {
+        "available": true,
+        "reason": "",
+        "statements": [
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT redirect_uri FROM tenant.redirect_uris WHERE client_id = $1",
+            "calls": 1000,
+            "rows": 2000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "DELETE FROM tenant.interactions WHERE expires_at <= now()",
+            "calls": 1000,
+            "rows": 0
+          },
+          {
+            "database": "monaca_control",
+            "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.interactions (id, payload, expires_at) VALUES ($1,$2,$3)\n             ON CONFLICT (id) DO NOTHING",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, endpoint, client_id, limit_count, window_secs\n             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+            "calls": 1,
+            "rows": 4
+          }
+        ],
+        "total_calls": 7001,
+        "queries_per_request": 7.001,
+        "named": {
+          "rate_limit_counter": 1000,
+          "revocation_lookup": 0,
+          "interaction_state": 2000,
+          "tenant_lookup": 1000,
+          "account_lookup": 0,
+          "rate_limit_config": 1,
+          "signing_keys": 0
+        }
+      }
+    },
+    {
+      "name": "token",
+      "expected": [
+        200
+      ],
+      "measurement": {
+        "name": "token",
+        "requests": 1000,
+        "errors": 0,
+        "error_rate": 0,
+        "latency": {
+          "count": 1000,
+          "min_ms": 29.917,
+          "p50_ms": 42.313,
+          "p95_ms": 53.18,
+          "p99_ms": 66.841,
+          "max_ms": 122.225,
+          "mean_ms": 43.015
+        },
+        "throughput_rps": 23.209,
+        "first_error": ""
+      },
+      "db": {
+        "available": true,
+        "reason": "",
+        "statements": [
+          {
+            "database": "monaca_control",
+            "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, endpoint, client_id, limit_count, window_secs\n             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+            "calls": 9,
+            "rows": 36
+          }
+        ],
+        "total_calls": 4009,
+        "queries_per_request": 4.009,
+        "named": {
+          "rate_limit_counter": 1000,
+          "revocation_lookup": 0,
+          "interaction_state": 0,
+          "tenant_lookup": 1000,
+          "account_lookup": 0,
+          "rate_limit_config": 9,
+          "signing_keys": 0
+        }
+      }
+    },
+    {
+      "name": "userinfo",
+      "expected": [
+        200
+      ],
+      "measurement": {
+        "name": "userinfo",
+        "requests": 1000,
+        "errors": 0,
+        "error_rate": 0,
+        "latency": {
+          "count": 1000,
+          "min_ms": 1.397,
+          "p50_ms": 2.62,
+          "p95_ms": 4.769,
+          "p99_ms": 5.394,
+          "max_ms": 10.93,
+          "mean_ms": 2.886
+        },
+        "throughput_rps": 344.78,
+        "first_error": ""
+      },
+      "db": {
+        "available": true,
+        "reason": "",
+        "statements": [
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts WHERE id = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+            "calls": 1000,
+            "rows": 0
+          },
+          {
+            "database": "monaca_control",
+            "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+            "calls": 1000,
+            "rows": 1000
+          }
+        ],
+        "total_calls": 5000,
+        "queries_per_request": 5,
+        "named": {
+          "rate_limit_counter": 1000,
+          "revocation_lookup": 1000,
+          "interaction_state": 0,
+          "tenant_lookup": 1000,
+          "account_lookup": 1000,
+          "rate_limit_config": 0,
+          "signing_keys": 1000
+        }
+      }
+    },
+    {
+      "name": "management",
+      "expected": [
+        200
+      ],
+      "measurement": {
+        "name": "management",
+        "requests": 1000,
+        "errors": 0,
+        "error_rate": 0,
+        "latency": {
+          "count": 1000,
+          "min_ms": 2.041,
+          "p50_ms": 3.734,
+          "p95_ms": 6.461,
+          "p99_ms": 15.836,
+          "max_ms": 33.408,
+          "mean_ms": 4.296
+        },
+        "throughput_rps": 231.837,
+        "first_error": ""
+      },
+      "db": {
+        "available": true,
+        "reason": "",
+        "statements": [
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts\n             WHERE $1::text IS NULL OR primary_email ILIKE $1 OR display_name ILIKE $1\n             ORDER BY created_at DESC, id DESC\n             LIMIT $2",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE id = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+            "calls": 1000,
+            "rows": 0
+          },
+          {
+            "database": "monaca_control",
+            "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE id = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT r.id, r.name, r.description, r.permissions, r.created_at\n             FROM tenant.roles r\n             JOIN tenant.account_roles a ON a.role_id = r.id\n             WHERE a.account_id = $1\n             ORDER BY r.name",
+            "calls": 1000,
+            "rows": 0
+          }
+        ],
+        "total_calls": 7000,
+        "queries_per_request": 7,
+        "named": {
+          "rate_limit_counter": 1000,
+          "revocation_lookup": 1000,
+          "interaction_state": 0,
+          "tenant_lookup": 1000,
+          "account_lookup": 1000,
+          "rate_limit_config": 0,
+          "signing_keys": 1000
+        }
+      }
+    },
+    {
+      "name": "management-revoked",
+      "expected": [
+        401
+      ],
+      "measurement": {
+        "name": "management-revoked",
+        "requests": 1000,
+        "errors": 0,
+        "error_rate": 0,
+        "latency": {
+          "count": 1000,
+          "min_ms": 1.129,
+          "p50_ms": 2.001,
+          "p95_ms": 4.381,
+          "p99_ms": 5.469,
+          "max_ms": 15.087,
+          "mean_ms": 2.309
+        },
+        "throughput_rps": 430.574,
+        "first_error": ""
+      },
+      "db": {
+        "available": true,
+        "reason": "",
+        "statements": [
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "monaca_control",
+            "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE id = $1",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+            "calls": 1000,
+            "rows": 1000
+          }
+        ],
+        "total_calls": 3000,
+        "queries_per_request": 3,
+        "named": {
+          "rate_limit_counter": 0,
+          "revocation_lookup": 1000,
+          "interaction_state": 0,
+          "tenant_lookup": 1000,
+          "account_lookup": 0,
+          "rate_limit_config": 0,
+          "signing_keys": 1000
+        }
+      }
+    },
+    {
+      "name": "flow",
+      "expected": [
+        200
+      ],
+      "measurement": {
+        "name": "flow",
+        "requests": 200,
+        "errors": 0,
+        "error_rate": 0,
+        "latency": {
+          "count": 200,
+          "min_ms": 84.937,
+          "p50_ms": 101.03,
+          "p95_ms": 132.652,
+          "p99_ms": 182.692,
+          "max_ms": 195.667,
+          "mean_ms": 104.446
+        },
+        "throughput_rps": 9.573,
+        "first_error": ""
+      },
+      "db": {
+        "available": true,
+        "reason": "",
+        "statements": [
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+            "calls": 1000,
+            "rows": 1000
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,\n                    passkey_sign_in_enabled, single_sign_on_enabled, mfa_enabled, mfa_policy,\n                    mfa_trusted_devices_enabled, mfa_trusted_device_ttl_days,\n                    password_min_length, password_min_character_types, password_reject_user_info,\n                    password_reject_repetition_and_sequence, password_rejected_words,\n                    session_ttl_secs, refresh_token_ttl_secs, sign_up_identifiers,\n                    sign_up_email_verification_required, username_case_sensitive,\n                    username_min_length, username_max_length, username_allowed_punctuation,\n                    username_allow_email_local_part, username_preserve_case,\n                    username_reserved_words, sign_up_profile_fields, language,\n                    captcha_enabled, captcha_provider, captcha_site_key, captcha_cap_base_url,\n                    captcha_secret_enc, captcha_on_sign_in, captcha_on_sign_up,\n                    captcha_on_password_reset,\n                    login_lockout_threshold, login_lockout_duration_secs, updated_at\n             FROM tenant.sign_in_experience WHERE singleton",
+            "calls": 800,
+            "rows": 800
+          },
+          {
+            "database": "monaca_control",
+            "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+            "calls": 600,
+            "rows": 600
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE id = $1",
+            "calls": 600,
+            "rows": 600
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "BEGIN",
+            "calls": 600,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+            "calls": 400,
+            "rows": 400
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT payload, consumed, signed_in_account, session_id, mfa_account, mfa_enrollment, mfa_satisfied, mfa_attempts, expires_at FROM tenant.interactions WHERE id = $1",
+            "calls": 400,
+            "rows": 400
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+            "calls": 400,
+            "rows": 400
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "ROLLBACK",
+            "calls": 400,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT secret_enc FROM tenant.credentials\n             WHERE account_id = $1 AND kind = 'password' LIMIT 1",
+            "calls": 400,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT redirect_uri FROM tenant.redirect_uris WHERE client_id = $1",
+            "calls": 200,
+            "rows": 400
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.sessions\n               (id, account_id, client_id, expires_at, last_seen_at, user_agent)\n             VALUES ($1,$2,$3,$4,now(),$5)",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.interactions (id, payload, expires_at) VALUES ($1,$2,$3)\n             ON CONFLICT (id) DO NOTHING",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT seq, hash FROM \"org_wken1pdq\".audit_chain_head WHERE singleton FOR UPDATE",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT account_id, client_id, scopes, kind, interaction_id, granted_at, updated_at\n             FROM tenant.consents\n             WHERE account_id = $1 AND client_id = $2 AND kind = 'remember'",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT r.id, r.name, r.description, r.permissions, r.created_at\n             FROM tenant.roles r\n             JOIN tenant.account_roles a ON a.role_id = r.id\n             WHERE a.account_id = $1\n             ORDER BY r.name",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT r.id, r.name, r.description, r.scopes, r.created_at\n             FROM member_roles m JOIN roles r ON r.id = m.role_id\n             WHERE m.account_id = $1 ORDER BY m.created_at",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.refresh_tokens\n               (id, token_hash, client_id, account_id, org_id, scope, resource, rotated_from,\n                family_id, dpop_jkt, auth_time, expires_at)\n             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "COMMIT",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE id = $1",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts WHERE id = $1",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT role FROM members WHERE account_id = $1",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, url, events, secret_enc, enabled, created_at, updated_at\n             FROM tenant.webhooks\n             WHERE enabled AND $1 = ANY(events)\n             ORDER BY created_at, id",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts WHERE lower(primary_email) = lower($1)",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, account_id, credential_id, secret_enc, sign_count, transports, name,\n                    aaguid, created_at, last_used_at\n             FROM tenant.credentials\n             WHERE account_id = $1 AND kind = 'passkey'\n             ORDER BY created_at",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "UPDATE tenant.auth_codes SET consumed_at = now()\n             WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()\n             RETURNING code_hash, client_id, account_id, org_id, redirect_uri, scope,\n                       code_challenge, nonce, resource, session_id, dpop_jkt, auth_time,\n                       expires_at, consumed_at",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "UPDATE \"org_wken1pdq\".audit_chain_head\n             SET seq = $1, hash = $2, updated_at = now() WHERE singleton",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO \"org_wken1pdq\".audit_events\n               (id, at, action, actor_chain, subject_type, subject_id, subject_ref, decision,\n                grant_id, jti, payload, prev_hash, hash)\n             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)\n             RETURNING seq",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "DELETE FROM tenant.interactions WHERE expires_at <= now()",
+            "calls": 200,
+            "rows": 0
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "INSERT INTO tenant.auth_codes\n               (id, code_hash, client_id, account_id, org_id, redirect_uri, scope,\n                code_challenge, nonce, resource, session_id, dpop_jkt, auth_time, expires_at)\n             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "UPDATE tenant.interactions SET consumed = true\n             WHERE id = $1 AND consumed = false AND expires_at > now()\n             RETURNING payload, consumed, signed_in_account, session_id, mfa_account, mfa_enrollment, mfa_satisfied, mfa_attempts, expires_at",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, account_id, client_id, issued_at, expires_at, revoked_at,\n                    last_seen_at, user_agent\n             FROM tenant.sessions WHERE id = $1",
+            "calls": 200,
+            "rows": 200
+          },
+          {
+            "database": "mt_mj4wgmzt",
+            "query": "SELECT id, endpoint, client_id, limit_count, window_secs\n             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+            "calls": 4,
+            "rows": 16
+          }
+        ],
+        "total_calls": 10004,
+        "queries_per_request": 50.02,
+        "named": {
+          "rate_limit_counter": 400,
+          "revocation_lookup": 0,
+          "interaction_state": 1000,
+          "tenant_lookup": 600,
+          "account_lookup": 400,
+          "rate_limit_config": 4,
+          "signing_keys": 0
+        }
+      }
+    }
+  ],
+  "rate_limit_ramp": [
+    {
+      "name": "management-c1",
+      "requests": 1000,
+      "errors": 0,
+      "error_rate": 0,
+      "latency": {
+        "count": 1000,
+        "min_ms": 2.053,
+        "p50_ms": 3.501,
+        "p95_ms": 6.21,
+        "p99_ms": 9.256,
+        "max_ms": 37.215,
+        "mean_ms": 3.981
+      },
+      "throughput_rps": 250.064,
+      "first_error": ""
+    },
+    {
+      "name": "management-c4",
+      "requests": 1000,
+      "errors": 0,
+      "error_rate": 0,
+      "latency": {
+        "count": 1000,
+        "min_ms": 2.423,
+        "p50_ms": 3.639,
+        "p95_ms": 6.316,
+        "p99_ms": 7.575,
+        "max_ms": 12.273,
+        "mean_ms": 4.093
+      },
+      "throughput_rps": 974.289,
+      "first_error": ""
+    },
+    {
+      "name": "management-c16",
+      "requests": 1000,
+      "errors": 0,
+      "error_rate": 0,
+      "latency": {
+        "count": 1000,
+        "min_ms": 4.214,
+        "p50_ms": 12.862,
+        "p95_ms": 21.01,
+        "p99_ms": 58.529,
+        "max_ms": 66.23,
+        "mean_ms": 14.077
+      },
+      "throughput_rps": 1127.734,
+      "first_error": ""
+    },
+    {
+      "name": "management-c64",
+      "requests": 1000,
+      "errors": 0,
+      "error_rate": 0,
+      "latency": {
+        "count": 1000,
+        "min_ms": 8.523,
+        "p50_ms": 46.22,
+        "p95_ms": 69.984,
+        "p99_ms": 83.076,
+        "max_ms": 90.3,
+        "mean_ms": 46.37
+      },
+      "throughput_rps": 1349.894,
+      "first_error": ""
+    }
+  ],
+  "tenant_pool": [
+    {
+      "tenants": 50,
+      "seconds": 11.348,
+      "cold": {
+        "count": 50,
+        "min_ms": 105.929,
+        "p50_ms": 182.906,
+        "p95_ms": 346.535,
+        "p99_ms": 426.934,
+        "max_ms": 426.934,
+        "mean_ms": 194.288
+      },
+      "warm": {
+        "count": 50,
+        "min_ms": 1.284,
+        "p50_ms": 5.46,
+        "p95_ms": 112.829,
+        "p99_ms": 143.054,
+        "max_ms": 143.054,
+        "mean_ms": 32.527
+      },
+      "cold_pool": {
+        "hits": 154,
+        "misses": 50,
+        "hit_rate": 0.755,
+        "lookup_avg_ms": 15.569,
+        "connect_avg_ms": 145.104,
+        "cold_requests": 50,
+        "warm_requests": 50
+      },
+      "warm_pool": {
+        "hits": 100,
+        "misses": 0,
+        "hit_rate": 1,
+        "lookup_avg_ms": 0,
+        "connect_avg_ms": 0,
+        "cold_requests": 50,
+        "warm_requests": 50
+      },
+      "errors": 0,
+      "first_error": "",
+      "connections": 102,
+      "mailer_tick_possible": true
+    },
+    {
+      "tenants": 198,
+      "seconds": 138.219,
+      "cold": {
+        "count": 198,
+        "min_ms": 108.5,
+        "p50_ms": 344.591,
+        "p95_ms": 591.425,
+        "p99_ms": 678.11,
+        "max_ms": 702.843,
+        "mean_ms": 343.016
+      },
+      "warm": {
+        "count": 198,
+        "min_ms": 1.644,
+        "p50_ms": 414.126,
+        "p95_ms": 584.352,
+        "p99_ms": 682.162,
+        "max_ms": 704.421,
+        "mean_ms": 354.929
+      },
+      "cold_pool": {
+        "hits": 265,
+        "misses": 498,
+        "hit_rate": 0.347,
+        "lookup_avg_ms": 66.622,
+        "connect_avg_ms": 131.02,
+        "cold_requests": 198,
+        "warm_requests": 198
+      },
+      "warm_pool": {
+        "hits": 282,
+        "misses": 586,
+        "hit_rate": 0.325,
+        "lookup_avg_ms": 76.79,
+        "connect_avg_ms": 118.864,
+        "cold_requests": 198,
+        "warm_requests": 198
+      },
+      "errors": 0,
+      "first_error": "",
+      "connections": 127,
+      "mailer_tick_possible": true
+    }
+  ],
+  "app_role": {
+    "passes": [
+      {
+        "mode": "control",
+        "scenarios": [
+          {
+            "name": "management",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "management",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.978,
+                "p50_ms": 3.382,
+                "p95_ms": 6.438,
+                "p99_ms": 8.503,
+                "max_ms": 10.833,
+                "mean_ms": 3.85
+              },
+              "throughput_rps": 258.336,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts\n             WHERE $1::text IS NULL OR primary_email ILIKE $1 OR display_name ILIKE $1\n             ORDER BY created_at DESC, id DESC\n             LIMIT $2",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT r.id, r.name, r.description, r.permissions, r.created_at\n             FROM tenant.roles r\n             JOIN tenant.account_roles a ON a.role_id = r.id\n             WHERE a.account_id = $1\n             ORDER BY r.name",
+                  "calls": 300,
+                  "rows": 0
+                }
+              ],
+              "total_calls": 2100,
+              "queries_per_request": 7,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 300,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 300,
+                "rate_limit_config": 0,
+                "signing_keys": 300
+              }
+            }
+          },
+          {
+            "name": "authorize",
+            "expected": [
+              302
+            ],
+            "measurement": {
+              "name": "authorize",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.632,
+                "p50_ms": 2.964,
+                "p95_ms": 6.19,
+                "p99_ms": 9.203,
+                "max_ms": 10.802,
+                "mean_ms": 3.495
+              },
+              "throughput_rps": 274.755,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "DELETE FROM tenant.interactions WHERE expires_at <= now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT redirect_uri FROM tenant.redirect_uris WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 600
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.interactions (id, payload, expires_at) VALUES ($1,$2,$3)\n             ON CONFLICT (id) DO NOTHING",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 2100,
+              "queries_per_request": 7,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 0,
+                "interaction_state": 600,
+                "tenant_lookup": 300,
+                "account_lookup": 0,
+                "rate_limit_config": 0,
+                "signing_keys": 0
+              }
+            }
+          },
+          {
+            "name": "token",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "token",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 29.874,
+                "p50_ms": 38.222,
+                "p95_ms": 44.631,
+                "p99_ms": 55.59,
+                "max_ms": 77.047,
+                "mean_ms": 38.606
+              },
+              "throughput_rps": 25.859,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, endpoint, client_id, limit_count, window_secs\n             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+                  "calls": 3,
+                  "rows": 12
+                }
+              ],
+              "total_calls": 1203,
+              "queries_per_request": 4.01,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 0,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 0,
+                "rate_limit_config": 3,
+                "signing_keys": 0
+              }
+            }
+          },
+          {
+            "name": "userinfo",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "userinfo",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.628,
+                "p50_ms": 2.756,
+                "p95_ms": 6.098,
+                "p99_ms": 22.277,
+                "max_ms": 37.24,
+                "mean_ms": 3.599
+              },
+              "throughput_rps": 276.378,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 1500,
+              "queries_per_request": 5,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 300,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 300,
+                "rate_limit_config": 0,
+                "signing_keys": 300
+              }
+            }
+          }
+        ],
+        "seconds": 17.1
+      },
+      {
+        "mode": "app",
+        "scenarios": [
+          {
+            "name": "management",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "management",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.575,
+                "p50_ms": 2.958,
+                "p95_ms": 5.858,
+                "p99_ms": 23.527,
+                "max_ms": 66.942,
+                "mean_ms": 3.88
+              },
+              "throughput_rps": 256.533,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts\n             WHERE $1::text IS NULL OR primary_email ILIKE $1 OR display_name ILIKE $1\n             ORDER BY created_at DESC, id DESC\n             LIMIT $2",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT r.id, r.name, r.description, r.permissions, r.created_at\n             FROM tenant.roles r\n             JOIN tenant.account_roles a ON a.role_id = r.id\n             WHERE a.account_id = $1\n             ORDER BY r.name",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 2100,
+              "queries_per_request": 7,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 300,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 300,
+                "rate_limit_config": 0,
+                "signing_keys": 300
+              }
+            }
+          },
+          {
+            "name": "authorize",
+            "expected": [
+              302
+            ],
+            "measurement": {
+              "name": "authorize",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.206,
+                "p50_ms": 2.389,
+                "p95_ms": 4.951,
+                "p99_ms": 6.443,
+                "max_ms": 9.405,
+                "mean_ms": 2.664
+              },
+              "throughput_rps": 358.975,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "DELETE FROM tenant.interactions WHERE expires_at <= now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT redirect_uri FROM tenant.redirect_uris WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 600
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.interactions (id, payload, expires_at) VALUES ($1,$2,$3)\n             ON CONFLICT (id) DO NOTHING",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 2100,
+              "queries_per_request": 7,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 0,
+                "interaction_state": 600,
+                "tenant_lookup": 300,
+                "account_lookup": 0,
+                "rate_limit_config": 0,
+                "signing_keys": 0
+              }
+            }
+          },
+          {
+            "name": "token",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "token",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 34.391,
+                "p50_ms": 42.061,
+                "p95_ms": 50.863,
+                "p99_ms": 104.562,
+                "max_ms": 140.847,
+                "mean_ms": 43.878
+              },
+              "throughput_rps": 22.749,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, endpoint, client_id, limit_count, window_secs\n             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+                  "calls": 3,
+                  "rows": 12
+                }
+              ],
+              "total_calls": 1203,
+              "queries_per_request": 4.01,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 0,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 0,
+                "rate_limit_config": 3,
+                "signing_keys": 0
+              }
+            }
+          },
+          {
+            "name": "userinfo",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "userinfo",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.62,
+                "p50_ms": 2.669,
+                "p95_ms": 5.438,
+                "p99_ms": 27.37,
+                "max_ms": 57.643,
+                "mean_ms": 3.641
+              },
+              "throughput_rps": 273.335,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 1500,
+              "queries_per_request": 5,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 300,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 300,
+                "rate_limit_config": 0,
+                "signing_keys": 300
+              }
+            }
+          }
+        ],
+        "seconds": 18.4
+      },
+      {
+        "mode": "control",
+        "scenarios": [
+          {
+            "name": "management",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "management",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.53,
+                "p50_ms": 3.006,
+                "p95_ms": 5.485,
+                "p99_ms": 6.891,
+                "max_ms": 13.652,
+                "mean_ms": 3.284
+              },
+              "throughput_rps": 302.934,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts\n             WHERE $1::text IS NULL OR primary_email ILIKE $1 OR display_name ILIKE $1\n             ORDER BY created_at DESC, id DESC\n             LIMIT $2",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT r.id, r.name, r.description, r.permissions, r.created_at\n             FROM tenant.roles r\n             JOIN tenant.account_roles a ON a.role_id = r.id\n             WHERE a.account_id = $1\n             ORDER BY r.name",
+                  "calls": 300,
+                  "rows": 0
+                }
+              ],
+              "total_calls": 2100,
+              "queries_per_request": 7,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 300,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 300,
+                "rate_limit_config": 0,
+                "signing_keys": 300
+              }
+            }
+          },
+          {
+            "name": "authorize",
+            "expected": [
+              302
+            ],
+            "measurement": {
+              "name": "authorize",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.113,
+                "p50_ms": 2.325,
+                "p95_ms": 4.927,
+                "p99_ms": 6.492,
+                "max_ms": 11.065,
+                "mean_ms": 2.668
+              },
+              "throughput_rps": 358.706,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "DELETE FROM tenant.interactions WHERE expires_at <= now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT redirect_uri FROM tenant.redirect_uris WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 600
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.interactions (id, payload, expires_at) VALUES ($1,$2,$3)\n             ON CONFLICT (id) DO NOTHING",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 2100,
+              "queries_per_request": 7,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 0,
+                "interaction_state": 600,
+                "tenant_lookup": 300,
+                "account_lookup": 0,
+                "rate_limit_config": 0,
+                "signing_keys": 0
+              }
+            }
+          },
+          {
+            "name": "token",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "token",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 28.034,
+                "p50_ms": 38.144,
+                "p95_ms": 46.018,
+                "p99_ms": 62.289,
+                "max_ms": 86.401,
+                "mean_ms": 38.894
+              },
+              "throughput_rps": 25.671,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, client_id, name, kind, secret_hash, token_auth_method, jwks, custom_css,\n                    cors_allowed_origins, scopes, is_third_party, created_at\n             FROM tenant.clients WHERE client_id = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, slug, schema_name, role_name, state, is_default, created_at\n             FROM tenant.organizations WHERE slug = $1 AND state = 'active'",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, endpoint, client_id, limit_count, window_secs\n             FROM tenant.rate_limits ORDER BY endpoint, client_id NULLS FIRST",
+                  "calls": 3,
+                  "rows": 12
+                }
+              ],
+              "total_calls": 1203,
+              "queries_per_request": 4.01,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 0,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 0,
+                "rate_limit_config": 3,
+                "signing_keys": 0
+              }
+            }
+          },
+          {
+            "name": "userinfo",
+            "expected": [
+              200
+            ],
+            "measurement": {
+              "name": "userinfo",
+              "requests": 300,
+              "errors": 0,
+              "error_rate": 0,
+              "latency": {
+                "count": 300,
+                "min_ms": 1.506,
+                "p50_ms": 2.654,
+                "p95_ms": 5.053,
+                "p99_ms": 5.613,
+                "max_ms": 10.385,
+                "mean_ms": 2.972
+              },
+              "throughput_rps": 334.704,
+              "first_error": ""
+            },
+            "db": {
+              "available": true,
+              "reason": "",
+              "statements": [
+                {
+                  "database": "monaca_control",
+                  "query": "SELECT id, slug, short, db_name, issuer, state FROM tenants WHERE slug = $1",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "INSERT INTO tenant.rate_limit_counters (bucket_key, window_start, count)\n             VALUES ($1,$2,1)\n             ON CONFLICT (bucket_key) DO UPDATE SET\n               count = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN 1 ELSE rate_limit_counters.count + 1 END,\n               window_start = CASE\n                 WHEN rate_limit_counters.window_start + make_interval(secs => $3::double precision) <= $2\n                 THEN $2 ELSE rate_limit_counters.window_start END\n             RETURNING count, window_start",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT 1::bigint FROM tenant.revoked_access_tokens\n             WHERE jti = $1 AND expires_at > now()",
+                  "calls": 300,
+                  "rows": 0
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, private_enc, public_jwk FROM tenant.signing_keys\n             WHERE retired_at IS NULL ORDER BY created_at DESC",
+                  "calls": 300,
+                  "rows": 300
+                },
+                {
+                  "database": "mt_mj4wgmzt",
+                  "query": "SELECT id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at\n             FROM tenant.accounts WHERE id = $1",
+                  "calls": 300,
+                  "rows": 300
+                }
+              ],
+              "total_calls": 1500,
+              "queries_per_request": 5,
+              "named": {
+                "rate_limit_counter": 300,
+                "revocation_lookup": 300,
+                "interaction_state": 0,
+                "tenant_lookup": 300,
+                "account_lookup": 300,
+                "rate_limit_config": 0,
+                "signing_keys": 300
+              }
+            }
+          }
+        ],
+        "seconds": 16.5
+      }
+    ],
+    "comparison": {
+      "management": {
+        "control_p50_ms": 3.194,
+        "app_p50_ms": 2.958,
+        "p50_delta_pct": -7.39,
+        "control_p95_ms": 5.962,
+        "app_p95_ms": 5.858,
+        "p95_delta_pct": -1.74,
+        "control_p99_ms": 7.697,
+        "app_p99_ms": 23.527,
+        "p99_delta_pct": 205.66,
+        "control_rps": 280.6,
+        "app_rps": 256.533,
+        "rps_delta_pct": -8.59
+      },
+      "authorize": {
+        "control_p50_ms": 2.645,
+        "app_p50_ms": 2.389,
+        "p50_delta_pct": -9.66,
+        "control_p95_ms": 5.559,
+        "app_p95_ms": 4.951,
+        "p95_delta_pct": -10.93,
+        "control_p99_ms": 7.848,
+        "app_p99_ms": 6.443,
+        "p99_delta_pct": -17.9,
+        "control_rps": 316.7,
+        "app_rps": 358.975,
+        "rps_delta_pct": 13.34
+      },
+      "token": {
+        "control_p50_ms": 38.183,
+        "app_p50_ms": 42.061,
+        "p50_delta_pct": 10.16,
+        "control_p95_ms": 45.325,
+        "app_p95_ms": 50.863,
+        "p95_delta_pct": 12.22,
+        "control_p99_ms": 58.94,
+        "app_p99_ms": 104.562,
+        "p99_delta_pct": 77.41,
+        "control_rps": 25.8,
+        "app_rps": 22.749,
+        "rps_delta_pct": -11.71
+      },
+      "userinfo": {
+        "control_p50_ms": 2.705,
+        "app_p50_ms": 2.669,
+        "p50_delta_pct": -1.33,
+        "control_p95_ms": 5.576,
+        "app_p95_ms": 5.438,
+        "p95_delta_pct": -2.47,
+        "control_p99_ms": 13.945,
+        "app_p99_ms": 27.37,
+        "p99_delta_pct": 96.27,
+        "control_rps": 305.5,
+        "app_rps": 273.335,
+        "rps_delta_pct": -10.54
+      }
+    }
+  }
+}
