@@ -47,9 +47,10 @@ pub struct Config {
     /// Whether `MONACA_ENV=prod`, which forbids the dev KEK and the bootstrap password.
     pub production: bool,
     /// A dev/CI-only siteverify endpoint that replaces the provider's documented URL
-    /// (`MONACA_CAPTCHA_SITEVERIFY_URL`). The acceptance walk-through points this at a local
-    /// mock so a valid token can be proven without calling a real provider. Ignored in
-    /// production, where the provider URL is always the documented one.
+    /// (`MONACA_CAPTCHA_SITEVERIFY_URL`). For `cap` it replaces the instance base, and the
+    /// site-key path is appended exactly as the real protocol expects. The acceptance
+    /// walk-through points this at a local mock so a valid token can be proven without calling a
+    /// real provider. Ignored in production, where the provider URL is always the documented one.
     pub captcha_siteverify_url: Option<String>,
 }
 

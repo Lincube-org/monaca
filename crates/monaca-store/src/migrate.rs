@@ -254,6 +254,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "remembered and one-shot consent (M1)",
         include_str!("../migrations/tenant_43.sql"),
     ),
+    (
+        44,
+        "Cap proof-of-work CAPTCHA (M1)",
+        include_str!("../migrations/tenant_44.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

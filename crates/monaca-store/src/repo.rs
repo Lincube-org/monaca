@@ -103,10 +103,12 @@ pub struct SignInExperienceRow {
     pub language: String,
     /// Whether a CAPTCHA challenge gates the entrances named below.
     pub captcha_enabled: bool,
-    /// `turnstile` | `recaptcha` | `hcaptcha`.
+    /// `turnstile` | `recaptcha` | `hcaptcha` | `cap`.
     pub captcha_provider: String,
     /// The provider's public site key; `null` until one is saved.
     pub captcha_site_key: Option<String>,
+    /// The Cap instance's public base URL; `null` unless the provider is `cap`.
+    pub captcha_cap_base_url: Option<String>,
     /// The provider's secret, sealed with the tenant DEK — never returned by any endpoint.
     pub captcha_secret_enc: Option<Vec<u8>>,
     /// Whether password sign-in demands a token.
@@ -152,10 +154,12 @@ pub struct LoginFailureRow {
 pub struct SignInGuardrailsPatch {
     /// Whether CAPTCHA is enforced.
     pub captcha_enabled: Option<bool>,
-    /// `turnstile` | `recaptcha` | `hcaptcha`.
+    /// `turnstile` | `recaptcha` | `hcaptcha` | `cap`.
     pub captcha_provider: Option<String>,
     /// The public site key.
     pub captcha_site_key: Option<Option<String>>,
+    /// The Cap instance's public base URL.
+    pub captcha_cap_base_url: Option<Option<String>>,
     /// The sealed provider secret.
     pub captcha_secret_enc: Option<Option<Vec<u8>>>,
     /// Whether password sign-in demands a token.
@@ -176,6 +180,7 @@ impl SignInGuardrailsPatch {
         self.captcha_enabled.is_none()
             && self.captcha_provider.is_none()
             && self.captcha_site_key.is_none()
+            && self.captcha_cap_base_url.is_none()
             && self.captcha_secret_enc.is_none()
             && self.captcha_on_sign_in.is_none()
             && self.captcha_on_sign_up.is_none()
@@ -1029,8 +1034,9 @@ impl Store {
                     username_min_length, username_max_length, username_allowed_punctuation,
                     username_allow_email_local_part, username_preserve_case,
                     username_reserved_words, sign_up_profile_fields, language,
-                    captcha_enabled, captcha_provider, captcha_site_key, captcha_secret_enc,
-                    captcha_on_sign_in, captcha_on_sign_up, captcha_on_password_reset,
+                    captcha_enabled, captcha_provider, captcha_site_key, captcha_cap_base_url,
+                    captcha_secret_enc, captcha_on_sign_in, captcha_on_sign_up,
+                    captcha_on_password_reset,
                     login_lockout_threshold, login_lockout_duration_secs, updated_at
              FROM tenant.sign_in_experience WHERE singleton",
         )
@@ -1116,7 +1122,8 @@ impl Store {
                        username_allowed_punctuation, username_allow_email_local_part,
                        username_preserve_case, username_reserved_words, sign_up_profile_fields,
                        language, captcha_enabled, captcha_provider, captcha_site_key,
-                       captcha_secret_enc, captcha_on_sign_in, captcha_on_sign_up,
+                       captcha_cap_base_url, captcha_secret_enc, captcha_on_sign_in,
+                       captcha_on_sign_up,
                        captcha_on_password_reset, login_lockout_threshold,
                        login_lockout_duration_secs, updated_at",
         )
@@ -1162,12 +1169,13 @@ impl Store {
              SET captcha_enabled = COALESCE($1, captcha_enabled),
                  captcha_provider = COALESCE($2, captcha_provider),
                  captcha_site_key = CASE WHEN $3 THEN $4 ELSE captcha_site_key END,
-                 captcha_secret_enc = CASE WHEN $5 THEN $6 ELSE captcha_secret_enc END,
-                 captcha_on_sign_in = COALESCE($7, captcha_on_sign_in),
-                 captcha_on_sign_up = COALESCE($8, captcha_on_sign_up),
-                 captcha_on_password_reset = COALESCE($9, captcha_on_password_reset),
-                 login_lockout_threshold = COALESCE($10, login_lockout_threshold),
-                 login_lockout_duration_secs = COALESCE($11, login_lockout_duration_secs),
+                 captcha_cap_base_url = CASE WHEN $5 THEN $6 ELSE captcha_cap_base_url END,
+                 captcha_secret_enc = CASE WHEN $7 THEN $8 ELSE captcha_secret_enc END,
+                 captcha_on_sign_in = COALESCE($9, captcha_on_sign_in),
+                 captcha_on_sign_up = COALESCE($10, captcha_on_sign_up),
+                 captcha_on_password_reset = COALESCE($11, captcha_on_password_reset),
+                 login_lockout_threshold = COALESCE($12, login_lockout_threshold),
+                 login_lockout_duration_secs = COALESCE($13, login_lockout_duration_secs),
                  updated_at = now()
              WHERE singleton
              RETURNING sign_up_enabled, password_sign_in_enabled, email_code_sign_in_enabled,
@@ -1181,7 +1189,8 @@ impl Store {
                        username_allowed_punctuation, username_allow_email_local_part,
                        username_preserve_case, username_reserved_words, sign_up_profile_fields,
                        language, captcha_enabled, captcha_provider, captcha_site_key,
-                       captcha_secret_enc, captcha_on_sign_in, captcha_on_sign_up,
+                       captcha_cap_base_url, captcha_secret_enc, captcha_on_sign_in,
+                       captcha_on_sign_up,
                        captcha_on_password_reset, login_lockout_threshold,
                        login_lockout_duration_secs, updated_at",
         )
@@ -1189,6 +1198,8 @@ impl Store {
         .bind(patch.captcha_provider.as_deref())
         .bind(patch.captcha_site_key.is_some())
         .bind(patch.captcha_site_key.clone().flatten())
+        .bind(patch.captcha_cap_base_url.is_some())
+        .bind(patch.captcha_cap_base_url.clone().flatten())
         .bind(patch.captcha_secret_enc.is_some())
         .bind(patch.captcha_secret_enc.clone().flatten())
         .bind(patch.captcha_on_sign_in)

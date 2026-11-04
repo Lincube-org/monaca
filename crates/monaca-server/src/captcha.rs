@@ -32,7 +32,7 @@ impl Flow {
     }
 }
 
-/// The three providers the contract names and the siteverify endpoint each documents.
+/// The hostnames whose siteverify endpoint never depends on tenant configuration.
 fn verify_url(provider: &str) -> Option<&'static str> {
     match provider {
         "turnstile" => Some("https://challenges.cloudflare.com/turnstile/v0/siteverify"),
@@ -42,7 +42,15 @@ fn verify_url(provider: &str) -> Option<&'static str> {
     }
 }
 
-/// All three providers answer `{"success": true|false, …}` — a rejected token is still a 200.
+/// Cap Standalone serves its reCAPTCHA-compatible siteverify under the site key path.
+///
+/// `base` is the instance's public URL (or the dev/CI override); a trailing slash is optional.
+fn cap_verify_url(base: &str, site_key: &str) -> String {
+    format!("{}/{}/siteverify", base.trim_end_matches('/'), site_key)
+}
+
+/// All providers answer `{"success": true|false, …}`; Cap may also answer a rejected token with
+/// a 4xx, which `enforce` maps to the same `MONACA_CAPTCHA_FAILED`.
 fn verification_passed(body: &[u8]) -> Result<bool, serde_json::Error> {
     #[derive(serde::Deserialize)]
     struct Answer {
@@ -80,34 +88,69 @@ pub async fn enforce(
     })?;
     let secret = String::from_utf8(secret)
         .map_err(|_| ApiError::internal("the stored CAPTCHA secret is not text"))?;
-    let provider_url = verify_url(&experience.captcha_provider).ok_or_else(|| {
-        ApiError::internal(format!(
-            "unknown CAPTCHA provider `{}`",
-            experience.captcha_provider
-        ))
-    })?;
     // The override exists so the acceptance walk-through can run a local siteverify; it is only
     // populated in dev/CI and is `None` in production, where the provider's URL always wins.
-    let url = state
-        .config
-        .captcha_siteverify_url
-        .as_deref()
-        .unwrap_or(provider_url);
-
-    let response = state
-        .http
-        .post(url)
-        .form(&verification_form(&secret, token))
-        .send()
-        .await
-        .map_err(|err| {
-            ApiError::internal(format!("the CAPTCHA provider could not be reached: {err}"))
+    // For Cap it replaces the instance base, so the site key stays in the path exactly as the
+    // real protocol puts it.
+    let (url, is_cap) = if experience.captcha_provider == "cap" {
+        let base = experience
+            .captcha_cap_base_url
+            .as_deref()
+            .ok_or_else(|| ApiError::internal("cap is enabled without a base URL"))?;
+        let site_key = experience
+            .captcha_site_key
+            .as_deref()
+            .ok_or_else(|| ApiError::internal("cap is enabled without a site key"))?;
+        let base = state
+            .config
+            .captcha_siteverify_url
+            .as_deref()
+            .unwrap_or(base);
+        (cap_verify_url(base, site_key), true)
+    } else {
+        let provider_url = verify_url(&experience.captcha_provider).ok_or_else(|| {
+            ApiError::internal(format!(
+                "unknown CAPTCHA provider `{}`",
+                experience.captcha_provider
+            ))
         })?;
+        let url = state
+            .config
+            .captcha_siteverify_url
+            .clone()
+            .unwrap_or_else(|| provider_url.to_owned());
+        (url, false)
+    };
+
+    let request = state.http.post(&url);
+    let response = if is_cap {
+        // Cap Standalone documents a JSON body; the other three read a form.
+        request
+            .json(&serde_json::json!({ "secret": secret, "response": token }))
+            .send()
+            .await
+    } else {
+        request
+            .form(&verification_form(&secret, token))
+            .send()
+            .await
+    }
+    .map_err(|err| {
+        ApiError::internal(format!("the CAPTCHA provider could not be reached: {err}"))
+    })?;
     let status = response.status();
     let body = response.bytes().await.map_err(|err| {
         ApiError::internal(format!("the CAPTCHA answer could not be read: {err}"))
     })?;
     if !status.is_success() {
+        // Cap reports a rejected, expired or already redeemed token with a 4xx and
+        // `{"success":false}`; that is a failed challenge, not a server fault.
+        if status.is_client_error() && !verification_passed(&body).unwrap_or(true) {
+            return Err(ApiError::problem(
+                kinds::CAPTCHA_FAILED,
+                "the CAPTCHA challenge was not solved",
+            ));
+        }
         return Err(ApiError::internal(format!(
             "the CAPTCHA provider answered {status}"
         )));
@@ -142,6 +185,19 @@ mod tests {
             Some("https://api.hcaptcha.com/siteverify")
         );
         assert_eq!(verify_url("hcaptcha2"), None);
+        assert_eq!(verify_url("cap"), None);
+    }
+
+    #[test]
+    fn cap_composes_the_site_key_path_from_its_base() {
+        assert_eq!(
+            cap_verify_url("https://cap.example.com/", "site-1"),
+            "https://cap.example.com/site-1/siteverify"
+        );
+        assert_eq!(
+            cap_verify_url("https://cap.example.com/base", "site-1"),
+            "https://cap.example.com/base/site-1/siteverify"
+        );
     }
 
     #[test]

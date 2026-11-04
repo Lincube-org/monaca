@@ -599,10 +599,12 @@ impl BrandingPatch {
 pub struct CaptchaPatch {
     /// Whether a challenge gates the entrances named below.
     pub enabled: Option<bool>,
-    /// `turnstile` | `recaptcha` | `hcaptcha`.
+    /// `turnstile` | `recaptcha` | `hcaptcha` | `cap`.
     pub provider: Option<String>,
     /// The public site key; an empty string clears it.
     pub site_key: Option<String>,
+    /// The Cap instance's public base URL; an empty string clears it.
+    pub base_url: Option<String>,
     /// The provider secret; an empty string clears it.
     pub secret: Option<String>,
     /// Whether password sign-in demands a token.
@@ -618,6 +620,7 @@ impl CaptchaPatch {
         self.enabled.is_none()
             && self.provider.is_none()
             && self.site_key.is_none()
+            && self.base_url.is_none()
             && self.secret.is_none()
             && self.on_sign_in.is_none()
             && self.on_sign_up.is_none()
@@ -815,11 +818,11 @@ pub async fn update_sign_in_experience(
     }
     if let Some(captcha) = &body.captcha {
         if let Some(provider) = captcha.provider.as_deref()
-            && !matches!(provider, "turnstile" | "recaptcha" | "hcaptcha")
+            && !matches!(provider, "turnstile" | "recaptcha" | "hcaptcha" | "cap")
         {
             return Err(ApiError::problem(
                 kinds::INVALID_REQUEST,
-                "captcha.provider must be turnstile, recaptcha or hcaptcha",
+                "captcha.provider must be turnstile, recaptcha, hcaptcha or cap",
             ));
         }
         if let Some(site_key) = captcha.site_key.as_deref()
@@ -829,6 +832,11 @@ pub async fn update_sign_in_experience(
                 kinds::INVALID_REQUEST,
                 "captcha.site_key must be at most 200 characters",
             ));
+        }
+        if let Some(base_url) = captcha.base_url.as_deref()
+            && !base_url.trim().is_empty()
+        {
+            check_captcha_base_url(base_url)?;
         }
         if let Some(secret) = captcha.secret.as_deref()
             && secret.trim().chars().count() > 500
@@ -954,10 +962,29 @@ pub async fn update_sign_in_experience(
         Some(value) => !value.trim().is_empty(),
         None => current.captcha_secret_enc.is_some(),
     };
+    let captcha_provider = body
+        .captcha
+        .as_ref()
+        .and_then(|captcha| captcha.provider.as_deref())
+        .unwrap_or(current.captcha_provider.as_str());
+    let captcha_base_url = match body
+        .captcha
+        .as_ref()
+        .and_then(|captcha| captcha.base_url.as_deref())
+    {
+        Some(value) => (!value.trim().is_empty()).then(|| value.trim()),
+        None => current.captcha_cap_base_url.as_deref(),
+    };
     if captcha_enabled && (captcha_site_key.is_none() || !captcha_secret_set) {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "captcha.enabled requires a site key and a secret",
+        ));
+    }
+    if captcha_enabled && captcha_provider == "cap" && captcha_base_url.is_none() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "captcha.enabled with cap requires a base URL",
         ));
     }
 
@@ -999,6 +1026,9 @@ pub async fn update_sign_in_experience(
         captcha_provider: captcha.and_then(|captcha| captcha.provider.clone()),
         captcha_site_key: captcha
             .and_then(|captcha| captcha.site_key.as_deref())
+            .map(|value| (!value.trim().is_empty()).then(|| value.trim().to_owned())),
+        captcha_cap_base_url: captcha
+            .and_then(|captcha| captcha.base_url.as_deref())
             .map(|value| (!value.trim().is_empty()).then(|| value.trim().to_owned())),
         captcha_secret_enc: match captcha.and_then(|captcha| captcha.secret.as_deref()) {
             Some(value) if value.trim().is_empty() => Some(None),
@@ -1138,6 +1168,25 @@ fn sign_in_experience_json(experience: &SignInExperienceRow, branding: &Branding
     })
 }
 
+/// The Cap instance URL the server prefixes with the site key; it may not carry credentials.
+fn check_captcha_base_url(raw: &str) -> Result<(), ApiError> {
+    let url = raw.trim();
+    let authority = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default()
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if !is_absolute_http_url(url) || authority.contains('@') || url.chars().count() > 500 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "captcha.base_url must be an absolute http(s) URL of at most 500 characters without credentials",
+        ));
+    }
+    Ok(())
+}
+
 /// The CAPTCHA object. A management reader also learns whether a secret is stored — never the
 /// secret itself, which exists only sealed in the tenant database.
 pub(crate) fn captcha_json(experience: &SignInExperienceRow, management: bool) -> Value {
@@ -1145,6 +1194,7 @@ pub(crate) fn captcha_json(experience: &SignInExperienceRow, management: bool) -
         "enabled": experience.captcha_enabled,
         "provider": experience.captcha_provider,
         "site_key": experience.captcha_site_key,
+        "base_url": experience.captcha_cap_base_url,
         "on_sign_in": experience.captcha_on_sign_in,
         "on_sign_up": experience.captcha_on_sign_up,
         "on_password_reset": experience.captcha_on_password_reset,
