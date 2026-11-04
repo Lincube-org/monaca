@@ -36,7 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(protocol_routes())
         .merge(account_routes())
         .merge(management_routes())
-        .merge(internal_routes())
+        .merge(internal_routes(state.config.production))
         .with_state(state.clone())
         // Only the protocol paths it recognizes are touched; see `cors` for the tenant gate.
         .layer(axum::middleware::from_fn_with_state(
@@ -493,8 +493,12 @@ pub fn management_routes() -> Router<Arc<AppState>> {
 }
 
 /// `/internal/*` — §6.3. The gateway must never proxy this group.
-pub fn internal_routes() -> Router<Arc<AppState>> {
-    Router::new()
+///
+/// `/internal/mail` is the dev/CI outbox reader: its payload carries the verification code in
+/// plaintext, so the route is mounted only outside `prod`. In production it does not exist at all,
+/// which is a `404` rather than an authentication failure.
+pub fn internal_routes(production: bool) -> Router<Arc<AppState>> {
+    let routes = Router::new()
         .route(
             "/internal/audit",
             post(crate::internal::append_audit).get(crate::internal::tenant_audit),
@@ -507,8 +511,12 @@ pub fn internal_routes() -> Router<Arc<AppState>> {
             "/internal/tenants/{slug}/issuer",
             get(crate::internal::tenant_issuer),
         )
-        .route("/internal/health", get(crate::internal::health))
-        .route("/internal/mail", get(crate::internal::latest_mail))
+        .route("/internal/health", get(crate::internal::health));
+    if production {
+        routes
+    } else {
+        routes.route("/internal/mail", get(crate::internal::latest_mail))
+    }
 }
 
 /// `GET /healthz` — always `200` with `{"status":"ok"}`.

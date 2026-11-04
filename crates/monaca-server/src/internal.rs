@@ -177,7 +177,8 @@ pub struct MailQuery {
 ///
 /// §6.3: a production deployment would hand these rows to a relay; in M0 and the acceptance run
 /// they are read back here, which is what lets `scripts/e2e/skeleton.ts` finish a verification
-/// flow without an SMTP server.
+/// flow without an SMTP server. The payload contains the verification code in plaintext, so the
+/// route is mounted only when `MONACA_ENV` is not `prod` (`routes::internal_routes`).
 pub async fn latest_mail(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
