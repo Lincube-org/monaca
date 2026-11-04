@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::error::ApiError;
+use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
 
 /// Upper bound on the decoded signing keys kept in memory. One entry is a few kilobytes and the
@@ -42,6 +43,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Per-endpoint request gates (§6.2).
     pub rate_limit: RateLimiter,
+    /// Prometheus text metrics (§6.4).
+    pub metrics: Metrics,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             signing: Mutex::new(HashMap::new()),
             http,
             rate_limit: RateLimiter::default(),
+            metrics: Metrics::default(),
         }))
     }
 
@@ -112,6 +116,8 @@ impl AppState {
             tenant_layer.1,
             now,
         ) {
+            self.metrics
+                .record_rejection(&tenant.slug, endpoint, "tenant", None);
             return Err(ApiError::rate_limited(rejection.retry_after));
         }
         if let (Some((limit, window_secs)), Some(client)) = (client_layer, client) {
@@ -123,6 +129,8 @@ impl AppState {
             if let Some(rejection) =
                 crate::rate_limit::rejection(count, limit, window_start, window_secs, now)
             {
+                self.metrics
+                    .record_rejection(&tenant.slug, endpoint, "client", Some(client));
                 return Err(ApiError::rate_limited(rejection.retry_after));
             }
         }

@@ -178,6 +178,7 @@ pub async fn authorize_admin(
         .and_then(|raw| Uuid::parse_str(raw).ok())
         && state.store.access_token_revoked(&tenant, jti).await?
     {
+        state.metrics.record_revoked("management");
         return Err(ApiError::problem(
             kinds::UNAUTHORIZED,
             "the token was revoked",

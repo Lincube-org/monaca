@@ -639,6 +639,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "Retry-After, proving the counter is shared; clearing the configuration lets the second process mint " +
       "again",
   },
+  {
+    step: "64",
+    title: "metrics and structured logs",
+    assertion:
+      "GET /metrics is 200 text/plain; it carries monaca_http_requests_total with a real tenant/endpoint/status " +
+      "series, the latency histogram, a positive monaca_rate_limit_rejections_total from this run and a positive " +
+      "monaca_revoked_token_rejections_total{surface=\"management\"} from this run; the body contains no internal " +
+      "secret",
+  },
 ];
 
 interface StepResult {
@@ -7282,6 +7291,75 @@ async function sharedRateLimitFlow(
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: row stored → two pass on A → third on B is 429 → cleared → B mints`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 64 — the metrics endpoint answers "who is slow and who was limited" (§6.4).
+ */
+async function metricsFlow(base: string, internalSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  try {
+    const response = await call(`${base}/metrics`, {
+      headers: { accept: "text/plain" },
+    });
+    const body = typeof response.body === "string" ? response.body : "";
+    const contentType = response.headers.get("content-type") ?? "";
+    const total = (prefix: string): number => {
+      let sum = 0;
+      for (const line of body.split("\n")) {
+        if (!line.startsWith(prefix)) continue;
+        const value = Number(line.slice(line.lastIndexOf(" ") + 1));
+        if (Number.isFinite(value)) sum += value;
+      }
+      return sum;
+    };
+
+    checks.push([
+      "GET /metrics is 200 text/plain",
+      response.status === 200 && contentType.startsWith("text/plain"),
+    ]);
+    checks.push([
+      "request counters carry a real tenant, endpoint and status",
+      body.includes("monaca_http_requests_total{") &&
+        body.includes('endpoint="management"') &&
+        body.includes('status="200"'),
+    ]);
+    checks.push([
+      "the latency histogram is exposed with finite buckets",
+      body.includes("monaca_http_request_duration_seconds_bucket") &&
+        body.includes('le="+Inf"') &&
+        body.includes("monaca_http_request_duration_seconds_count"),
+    ]);
+    checks.push([
+      "this run's rate-limit rejections are visible",
+      total("monaca_rate_limit_rejections_total{") > 0,
+    ]);
+    checks.push([
+      "this run's revoked management token is visible",
+      total('monaca_revoked_token_rejections_total{surface="management"}') > 0,
+    ]);
+    checks.push([
+      "the scrape carries no internal secret",
+      internalSecret === "" || !body.includes(internalSecret),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "64",
+    title: "metrics and structured logs",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: text/plain → request series → histogram → rate-limit rejections → revoked token → no secret`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -14297,6 +14375,7 @@ async function main(): Promise<number> {
   push(await rateLimitFlow(base, adminToken, parsed.adminSecret));
   push(await persistenceFlow(base, adminToken, parsed.consoleSecret));
   push(await sharedRateLimitFlow(base, adminToken, parsed.adminSecret));
+  push(await metricsFlow(base, parsed.internalSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

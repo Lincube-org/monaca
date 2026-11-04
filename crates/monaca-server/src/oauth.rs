@@ -52,6 +52,7 @@ pub async fn userinfo(
     let jti = token_jti(&claims)
         .ok_or_else(|| ApiError::bearer(401, "invalid_token", "the token has no usable `jti`"))?;
     if state.store.access_token_revoked(&tenant, jti).await? {
+        state.metrics.record_revoked("userinfo");
         return Err(ApiError::bearer(
             401,
             "invalid_token",

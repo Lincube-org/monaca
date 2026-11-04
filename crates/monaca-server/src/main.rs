@@ -21,6 +21,7 @@ mod error;
 mod internal;
 mod mailer;
 mod management;
+mod metrics;
 mod oauth;
 mod openapi;
 mod org_roles;
@@ -84,7 +85,7 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
     let addr = resolve_addr(args.addr.as_deref())?;
     let state = build_state().await?;
     mailer::spawn(Arc::clone(&state));
-    let app = routes::router(state);
+    let app = routes::router(Arc::clone(&state));
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -94,6 +95,26 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
         .context("could not read the bound address")?;
 
     tracing::info!(%bound, "monaca-server listening");
+
+    if let Some(raw) = state.config.metrics_addr.as_deref() {
+        let metrics_addr = resolve_addr(Some(raw))?;
+        let metrics_listener = tokio::net::TcpListener::bind(metrics_addr)
+            .await
+            .with_context(|| format!("could not bind the metrics listener at {metrics_addr}"))?;
+        let metrics_state = Arc::clone(&state);
+        let metrics_app = axum::Router::new()
+            .route(
+                "/metrics",
+                axum::routing::get(crate::metrics::scrape),
+            )
+            .with_state(metrics_state);
+        tracing::info!(addr = %metrics_addr, "metrics listening");
+        tokio::spawn(async move {
+            if let Err(err) = axum::serve(metrics_listener, metrics_app).await {
+                tracing::error!(%err, "the metrics listener stopped");
+            }
+        });
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

@@ -119,6 +119,19 @@ database size and has not been measured for this stack; run the drill against a 
 copy before relying on a number. Dumps are sequential per database, so control and tenants can be
 seconds apart.
 
+## Metrics
+
+The server exposes Prometheus text at `/metrics` (§6.4). `compose.dev.yml` also starts a second
+listener inside the server container (`MONACA_METRICS_ADDR=0.0.0.0:9090`) and publishes it on the
+host **loopback only**:
+
+    http://127.0.0.1:9090/metrics
+
+Scrape it from a Prometheus on the host, or through your own network policy. Do not put it behind
+the public origin. `MONACA_METRICS_PORT` changes the host port; the container port stays 9090.
+The series are `monaca_http_requests_total`, `monaca_http_request_duration_seconds` (histogram),
+`monaca_rate_limit_rejections_total` and `monaca_revoked_token_rejections_total`.
+
 ## Operating
 
 `remote-deploy.sh` is the deploy itself (postgres ready → pull → backup → migrate → bootstrap → up);

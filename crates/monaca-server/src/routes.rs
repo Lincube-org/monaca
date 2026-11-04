@@ -40,8 +40,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state.clone())
         // Only the protocol paths it recognizes are touched; see `cors` for the tenant gate.
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            state.clone(),
             crate::cors::tenant_cors,
+        ))
+        // Outermost: every response, including a CORS preflight or an error page, is counted.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::metrics::middleware,
         ))
 }
 
@@ -50,11 +55,12 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     <ApiDoc as utoipa::OpenApi>::openapi()
 }
 
-/// `/healthz` and `/version`.
+/// `/healthz`, `/version` and the Prometheus scrape endpoint — §6.4.
 pub fn health_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/version", get(version))
+        .route("/metrics", get(crate::metrics::scrape))
 }
 
 /// The protocol endpoints — §6.1.

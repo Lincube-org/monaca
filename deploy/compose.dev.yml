@@ -109,12 +109,19 @@ services:
       # The image defaults to 0.0.0.0:8081 too; restated because this is the value the
       # gateway's MONACA_SERVER_URL must agree with.
       MONACA_SERVER_ADDR: 0.0.0.0:8081
+      # A second listener that serves only /metrics (§6.4); the scrape is mapped to the host
+      # loopback below, never to the public origin.
+      MONACA_METRICS_ADDR: 0.0.0.0:9090
       MONACA_CONTROL_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/monaca_control
       MONACA_ADMIN_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/postgres
       MONACA_LOG_FORMAT: json
     # Not published (§2.1). MONACA_SERVER_URL=http://server:8081 in .env is the only way to
     # reach it, and that value never ends up in a token or a browser request.
     expose: ["8081"]
+    # Prometheus scrapes this from the host. Loopback-only on purpose: /metrics is operational
+    # data, not a public endpoint.
+    ports:
+      - "127.0.0.1:${MONACA_METRICS_PORT:-9090}:9090"
     healthcheck:
       test: ["CMD-SHELL", "monaca-server --version >/dev/null 2>&1 || exit 1"]
       interval: 15s

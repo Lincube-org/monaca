@@ -79,6 +79,9 @@ pub struct Config {
     /// (`MONACA_SOCIAL_PROVIDER_BASE_URL`), so acceptance can run a local mock. Ignored in
     /// production, where the provider's documented endpoints always win.
     pub social_provider_base_url: Option<String>,
+    /// An optional second listener that serves only `/metrics` (`MONACA_METRICS_ADDR`).
+    /// Empty disables it; the main server still answers `/metrics` on its own address.
+    pub metrics_addr: Option<String>,
 }
 
 impl Config {
@@ -154,6 +157,7 @@ impl Config {
             social_provider_base_url: matches!(environment.as_str(), "dev" | "ci")
                 .then(|| env("MONACA_SOCIAL_PROVIDER_BASE_URL"))
                 .flatten(),
+            metrics_addr: env("MONACA_METRICS_ADDR"),
         }
     }
 
@@ -339,6 +343,7 @@ mod tests {
             dev_kek_supplied: false,
             captcha_siteverify_url: None,
             social_provider_base_url: None,
+            metrics_addr: None,
         }
     }
 
