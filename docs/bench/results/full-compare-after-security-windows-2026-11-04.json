@@ -1,0 +1,138 @@
+{
+  "generated_at": "2026-11-04T15:41:07.774Z",
+  "baseline": "docs/bench/results/full-windows-2026-11-04.json",
+  "candidate": ".monaca/reports/bench-full-after-security.json",
+  "threshold_pct": 20,
+  "profile_match": true,
+  "comparisons": 14,
+  "regressions": [
+    {
+      "kind": "tenant_pool",
+      "key": "50",
+      "metric": "cold_hit_rate",
+      "baseline": 0.755,
+      "candidate": 0.5,
+      "delta_pct": -33.77,
+      "direction": "regression"
+    },
+    {
+      "kind": "app_role",
+      "key": "management",
+      "metric": "app_p50_ms",
+      "baseline": 2.958,
+      "candidate": 3.578,
+      "delta_pct": 20.96,
+      "direction": "regression"
+    },
+    {
+      "kind": "app_role",
+      "key": "userinfo",
+      "metric": "app_p50_ms",
+      "baseline": 2.669,
+      "candidate": 3.394,
+      "delta_pct": 27.16,
+      "direction": "regression"
+    }
+  ],
+  "improvements": [
+    {
+      "kind": "scenario",
+      "key": "authorize",
+      "metric": "p50_ms",
+      "baseline": 4.941,
+      "candidate": 3.769,
+      "delta_pct": -23.72,
+      "direction": "improvement"
+    },
+    {
+      "kind": "scenario",
+      "key": "authorize",
+      "metric": "p95_ms",
+      "baseline": 8.41,
+      "candidate": 6.35,
+      "delta_pct": -24.49,
+      "direction": "improvement"
+    },
+    {
+      "kind": "scenario",
+      "key": "authorize",
+      "metric": "p99_ms",
+      "baseline": 16.292,
+      "candidate": 8.033,
+      "delta_pct": -50.69,
+      "direction": "improvement"
+    },
+    {
+      "kind": "scenario",
+      "key": "authorize",
+      "metric": "rps",
+      "baseline": 168.998,
+      "candidate": 237.341,
+      "delta_pct": 40.44,
+      "direction": "improvement"
+    },
+    {
+      "kind": "scenario",
+      "key": "management",
+      "metric": "p99_ms",
+      "baseline": 15.836,
+      "candidate": 6.513,
+      "delta_pct": -58.87,
+      "direction": "improvement"
+    },
+    {
+      "kind": "scenario",
+      "key": "flow",
+      "metric": "p99_ms",
+      "baseline": 182.692,
+      "candidate": 124.268,
+      "delta_pct": -31.98,
+      "direction": "improvement"
+    },
+    {
+      "kind": "rate_limit_ramp",
+      "key": "management-c1",
+      "metric": "p99_ms",
+      "baseline": 9.256,
+      "candidate": 6.588,
+      "delta_pct": -28.82,
+      "direction": "improvement"
+    },
+    {
+      "kind": "rate_limit_ramp",
+      "key": "management-c16",
+      "metric": "p99_ms",
+      "baseline": 58.529,
+      "candidate": 23.309,
+      "delta_pct": -60.18,
+      "direction": "improvement"
+    },
+    {
+      "kind": "app_role",
+      "key": "management",
+      "metric": "app_p99_ms",
+      "baseline": 23.527,
+      "candidate": 6.936,
+      "delta_pct": -70.52,
+      "direction": "improvement"
+    },
+    {
+      "kind": "app_role",
+      "key": "token",
+      "metric": "app_p99_ms",
+      "baseline": 104.562,
+      "candidate": 70.369,
+      "delta_pct": -32.7,
+      "direction": "improvement"
+    },
+    {
+      "kind": "app_role",
+      "key": "userinfo",
+      "metric": "app_p99_ms",
+      "baseline": 27.37,
+      "candidate": 8.979,
+      "delta_pct": -67.19,
+      "direction": "improvement"
+    }
+  ]
+}

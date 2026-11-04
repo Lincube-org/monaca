@@ -285,6 +285,158 @@ latency and hit rates, activation connections, connector queries and app-pool la
 non-blocking against the committed smoke baseline with a 20% threshold, archives the JSON/text and
 writes the comparison to the job summary.
 
+## Batch E — Security debt and two capacity questions
+
+Batch D closed the capacity line. This batch fixes an account-takeover path in social sign-in,
+checks the neighbouring surfaces for the same class of defect, and re-runs the request-path
+profile whose fixtures predate the Batch D mailer. No request-path semantics change.
+
+### Google ID token verification
+
+Before, the Google callback read the `id_token` without checking its signature and took `sub`,
+`email` and `email_verified` from the payload. With `auto_link_verified_email`, a forged payload
+naming an existing address was enough to sign in as that account. The callback now:
+
+* fetches Google's JWKS (`https://www.googleapis.com/oauth2/v3/certs`; the dev/CI mock's
+  `/google/jwks` outside production), caches it for one hour per process and serialises refreshes
+  behind a mutex;
+* refreshes once when the token's `kid` is not in the cached set — the rotation path — and falls
+  back to the stale set only when a refresh fails; if no key then matches, the sign-in fails;
+* accepts **only** `alg=RS256` before selecting a key, so `none`, `HS256/384/512` and an ES256
+  token minted by our own issuer are refused (algorithm confusion). A JWK whose `alg` is not
+  RS256 is refused too;
+* requires `kid`, `exp` (60 s leeway), `aud` equal to the connector's client id (string or array),
+  `iss` one of the two Google spellings, `iat` within [now − 10 min, now + 60 s] and the `nonce`
+  minted into the state row;
+* builds the identity (`sub`, `email`, `email_verified`, `name`) from the verified token only;
+  a boolean `email_verified=true` is required before an unlinked identity may attach to an
+  existing address. Google no longer reads userinfo.
+
+GitHub has no equivalent path: it exchanges the code for an access token and reads `/user` plus
+`/user/emails`, where only an entry that is both `primary` and `verified` supplies an address. There
+is no unsigned token to verify there.
+
+Negative coverage, step 59 unless noted:
+
+| token / request | expected | what it proves |
+|---|---|---|
+| `alg=none` | 502 | unsigned tokens are refused before key lookup |
+| `HS256` signed with public material | 502 | algorithm confusion is closed |
+| rogue RSA key under a published `kid` | 502 | the signature is actually checked |
+| wrong `aud` | 502 | a token minted for another client cannot be replayed |
+| wrong `iss` | 502 | another issuer cannot be substituted |
+| `exp` in the past | 502 | expired tokens are refused |
+| unknown `kid` | 502 after one refresh | an attacker cannot name an unpublished key |
+| `nonce` from another flow | 502 | a captured token cannot be replayed |
+| `email_verified=false`, unlinked | 403 `MONACA_SOCIAL_UNLINKED` | no auto-link to an existing address |
+| published key added after the cache filled | 302 → token 200 | `kid` rotation works without the TTL |
+
+Unit tests in `monaca-crypto` refuse `none`, `HS256`, an ES256 token under the RS256 verifier and an
+unknown `kid` (`cargo test -p monaca-crypto`).
+
+### State/CSRF and link policies
+
+The callback already redeemed a server-side, single-use `state` with a conditional
+`UPDATE … WHERE consumed_at IS NULL AND expires_at > now()`, so concurrent or repeated callbacks
+have exactly one winner. It now also mints an `HttpOnly`, `SameSite=Lax`, path-scoped
+`monaca_social_state` cookie and requires the callback to carry the same id before redeeming the
+state. A callback URL copied to another browser is `400` and audited `state_invalid`; a replay is
+`400` for the same reason; a wrong/malformed state is `400`. PKCE `S256` and the Google `nonce`
+remain part of the same flow. No hole found.
+
+Both binding policies only run for an unlinked provider subject, and both require a verified
+address:
+
+* `auto_link_verified_email` links or creates only after `email_verified=true`.
+* `confirm_link` parks the interaction and hands out a one-time, expiring token; `POST …/confirm`
+  still requires a verified address, refuses a subject already linked elsewhere and finishes the
+  sign-in. The token is unguessable, single-use and is the CSRF token for that POST. A disabled
+  connector is `404`. The check consumes the token before testing `enabled`, so a disabled
+  connector burns a pending confirmation; fail-closed, no bypass, left as is.
+* `create_new_only` refuses any existing address with `409 MONACA_SOCIAL_EMAIL_TAKEN`; the
+  per-tenant unique `lower(primary_email)` closes the create race.
+* An unrecognised `link_policy` string on input falls back to `confirm_link`, not to auto-link.
+
+Residual trust boundary: all three policies trust the configured provider's `email_verified`
+assertion. A connector that can assert an arbitrary verified address can still be linked by the
+browser that starts the flow. That is why the built-ins only take GitHub's `primary && verified`
+entry and Google's verified `id_token`.
+
+### `/internal/*`
+
+Every internal handler now takes an `InternalAuth` extractor as its first argument:
+`/internal/audit` (GET and POST), `/internal/tenants/{slug}/jwks`, `/internal/tenants/{slug}/issuer`,
+`/internal/health` and (dev/CI only) `/internal/mail`. The extractor runs the shared-secret
+comparison with the constant-time byte loop before the path, query or JSON extractors, so an
+unauthenticated request with a malformed body is `401`, not `422`, and the endpoint shape stays
+hidden. A router middleware was tried first and leaked onto `/mcp/demo` after the internal router
+was merged, which is why the authentication is an extractor. CI stage 2 loops every endpoint
+without the secret expecting `401`; e2e steps 4 and 4b cover the gateway/server pair. No hole found.
+
+### Request-path profile after the Batch D mailer
+
+The Batch C full profile was captured while the mailer still scanned every tenant. It was re-run
+with the `8f1a03e` binary and the same fixtures (200 tenants / 198 extra / 200 accounts /
+20 clients / 1000 iterations):
+`docs/bench/results/full-after-security-windows-2026-11-04.json`, comparison
+`full-compare-after-security-windows-2026-11-04.json`.
+
+| path | P50 before → after | P95 before → after | P99 before → after | rps before → after | DB queries |
+|---|---:|---:|---:|---:|---:|
+| `authorize` | 4.94 → 3.77 | 8.41 → 6.35 | 16.29 → 8.03 | 169 → 237 | 7.0 → 7.0 |
+| `token` | 42.31 → 50.12 | 53.18 → 57.87 | 66.84 → 67.55 | 23 → 20 | 4.0 → 4.0 |
+| `userinfo` | 2.62 → 2.84 | 4.77 → 5.26 | 5.39 → 6.25 | 345 → 313 | 5.0 → 5.0 |
+| `management` | 3.73 → 3.55 | 6.46 → 5.80 | 15.84 → 6.51 | 232 → 262 | 7.0 → 7.0 |
+| `management-revoked` | 2.00 → 1.88 | 4.38 → 3.88 | 5.47 → 4.48 | 431 → 471 | 3.0 → 3.0 |
+| `flow` | 101.03 → 102.44 | 132.65 → 117.44 | 182.69 → 124.27 | 10 → 10 | 50.0 → 50.0 |
+
+Queries per request are unchanged; the mailer change is not on the request path. `authorize` and
+`management` P99 halved because the background sweep no longer competes for the tenant pool cache.
+`token` P50 moved 42 → 50 ms, under the comparison's 20% threshold and inside the Argon2
+verification variance (the same path was 19–24 ms on the CI Linux runner). The full report's pool
+section is not comparable with Batch C: its schema changed in Batch D, and this run's pool phase
+overlapped a local `cargo test`/`tsc`; use the Batch D `scale` report for pool trends.
+
+### All tenants with a connector
+
+The worst case for the control index is every tenant having a connector. `bun run bench --profile
+scale --only-pool --all-connectors` builds 400 tenant databases, gives each an enabled HTTP
+connector, and measures the 400-tenant pool phase:
+`docs/bench/results/scale-all-connectors-windows-2026-11-04.json`.
+
+| metric | value |
+|---|---:|
+| activation connections, base → peak (6.7 s) | 4 → 25 |
+| connections after cold / hot / mixed | 189 / 186 / 110 |
+| cold P50 / P99 | 282.9 / 601.4 ms |
+| hot P50 / P99, hit rate | 3.4 / 100.9 ms, 98.5% |
+| mixed P50, hit rate | 198.0 ms, 70.7% |
+| control-index / `tenant.email_connector` statements, 164 s | 3 / 561 |
+| errors | 0 |
+
+The index cannot narrow a tenant set in which every row matches: the poller still opens a pool
+per tenant every tick, and the 64-entry cache rations what it keeps. The measured connection peak
+was **189** (the activation window caught only the first 25; the peak appears after the cold sweep).
+That is well below the bench's `max_connections=500` and the dev compose's 400, so the connection
+budget is not breached at these defaults. The cost shows up as cadence and latency instead: three
+index queries in 164 s means a tick takes tens of seconds, not five; hot P99 spikes to ~100 ms and
+mixed P50 is ~198 ms while the poller evicts and reopens pools (the tenant-pool mutex is held across
+`connect`).
+
+Configuration advice, without changing semantics:
+
+* Connections: `max_connections >= MONACA_TENANT_POOL_CACHE × MONACA_TENANT_POOL_SIZE + headroom`
+  still describes the retained pools (~128 live at cache 64 × size 5). At 400 all-connector tenants
+  the observed peak was 189, so a 400-connection ceiling has headroom; do not shrink it to the
+  ~128 steady figure.
+* Cadence: when the connector count approaches the tenant count, expect the poller's 5 s cadence to
+  degrade roughly with N × pool-connect time. Lowering `MONACA_TENANT_POOL_SIZE` reduces live
+  connections per pool; raising `MONACA_TENANT_POOL_CACHE` stops the churn but raises retained
+  connections to ~2 per pool (not viable for 400 tenants on a 400-connection database). Giving the
+  poller its own connection budget or process is a design change outside this batch.
+* Latency: the cache mutex is held across pool `connect`, so a churning poller adds cold-request
+  P99. Moving the connect outside the lock is a shared-mechanism change, not done here.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, per-IP limiting, Redis-backed rate

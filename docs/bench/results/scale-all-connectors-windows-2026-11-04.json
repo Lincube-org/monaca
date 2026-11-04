@@ -1,0 +1,142 @@
+{
+  "meta": {
+    "generated_at": "2026-11-04T16:07:23.887Z",
+    "profile": "scale",
+    "commit": "8f1a03e5d8ca9a7569b63638d50f9a8d1a64498b",
+    "host": {
+      "platform": "win32",
+      "release": "10.0.26200",
+      "arch": "x64",
+      "cpu": "Intel(R) Core(TM) Ultra 5 226V",
+      "memory_gb": 15.6,
+      "bun": "1.3.14"
+    },
+    "server": {
+      "binary": "C:\\git\\sso\\monaca\\.monaca\\bin\\monaca-server.exe",
+      "version": "unknown"
+    },
+    "pg": {
+      "source": "embedded",
+      "port": 5442,
+      "version": "18.4",
+      "settings": {
+        "fsync": "off",
+        "full_page_writes": "off",
+        "max_connections": "500",
+        "shared_buffers": "32768",
+        "synchronous_commit": "off",
+        "work_mem": "8192"
+      },
+      "stats_available": true,
+      "stats_error": ""
+    },
+    "fixtures": {
+      "tenants": 400,
+      "extra_tenants": 398,
+      "scenario_tenant": "demo",
+      "accounts": 0,
+      "accounts_in_demo": 0,
+      "clients": 0,
+      "all_connectors": true,
+      "connectors": 400,
+      "instances": 1,
+      "tenant_pool_size": 5,
+      "tenant_pool_cache": 64
+    },
+    "iterations": {
+      "warmup": 10,
+      "measured": 100,
+      "flow_warmup": 5,
+      "flow_measured": 20
+    },
+    "notes": [
+      "The PostgreSQL cluster is disposable: fsync=off, synchronous_commit=off, full_page_writes=off.",
+      "Numbers are comparative and machine-specific; the fixture and parameters are fixed per profile.",
+      "Metrics on /metrics are per process; this run uses one server instance at a time."
+    ]
+  },
+  "scenarios": [],
+  "rate_limit_ramp": [],
+  "tenant_pool": [
+    {
+      "tenants": 400,
+      "seconds": 164.306,
+      "activation_seconds": 6.7,
+      "activation_base_connections": 4,
+      "activation_peak_connections": 25,
+      "cold": {
+        "latency": {
+          "count": 400,
+          "min_ms": 11.19,
+          "p50_ms": 282.877,
+          "p95_ms": 506.222,
+          "p99_ms": 601.395,
+          "max_ms": 752.762,
+          "mean_ms": 291.407
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "hot": {
+        "latency": {
+          "count": 100,
+          "min_ms": 0.876,
+          "p50_ms": 3.448,
+          "p95_ms": 6.301,
+          "p99_ms": 100.859,
+          "max_ms": 190.856,
+          "mean_ms": 8.019
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "mixed": {
+        "latency": {
+          "count": 100,
+          "min_ms": 1.033,
+          "p50_ms": 197.978,
+          "p95_ms": 360.527,
+          "p99_ms": 378.576,
+          "max_ms": 476.377,
+          "mean_ms": 191.221
+        },
+        "errors": 0,
+        "first_error": ""
+      },
+      "cold_pool": {
+        "hits": 1189,
+        "misses": 388,
+        "hit_rate": 0.754,
+        "lookup_avg_ms": 19.689,
+        "connect_avg_ms": 162.266
+      },
+      "hot_pool": {
+        "hits": 203,
+        "misses": 3,
+        "hit_rate": 0.985,
+        "lookup_avg_ms": 2.271,
+        "connect_avg_ms": 190.564
+      },
+      "mixed_pool": {
+        "hits": 411,
+        "misses": 170,
+        "hit_rate": 0.707,
+        "lookup_avg_ms": 24.062,
+        "connect_avg_ms": 126.531
+      },
+      "connections_after_cold": 189,
+      "connections_after_hot": 186,
+      "connections_after_mixed": 110,
+      "mailer_ticks": 3,
+      "connector_queries": 561,
+      "index_queries": 3,
+      "errors": 0,
+      "first_error": "",
+      "mailer_tick_possible": true
+    }
+  ],
+  "app_role": {
+    "passes": [],
+    "comparison": {}
+  }
+}
