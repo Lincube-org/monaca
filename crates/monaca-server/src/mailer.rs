@@ -132,7 +132,8 @@ fn open_secret(
         .tenant_dek(&tenant.tenant_id())
         .ok_or_else(|| "tenant DEK missing".to_owned())?;
     let opened = open(&dek, sealed).map_err(|err| err.to_string())?;
-    let secret = String::from_utf8(opened).map_err(|_| "the stored secret is not UTF-8".to_owned())?;
+    let secret =
+        String::from_utf8(opened).map_err(|_| "the stored secret is not UTF-8".to_owned())?;
     Ok(Some(secret))
 }
 
@@ -228,5 +229,4 @@ mod tests {
         assert_eq!(body["from"], "no-reply@example.com");
         assert_eq!(body["from_name"], "Demo");
     }
-
 }

@@ -228,7 +228,9 @@ pub async fn authorize_admin(
                 "the account is not a tenant admin",
             ));
         }
-        state.enforce_rate_limit(&tenant, "management", None).await?;
+        state
+            .enforce_rate_limit(&tenant, "management", None)
+            .await?;
         return Ok((
             tenant,
             AdminPrincipal {
@@ -2692,12 +2694,7 @@ pub async fn update_rate_limits(
                 "the same endpoint and client_id appears twice",
             ));
         }
-        rows.push((
-            item.endpoint,
-            item.client_id,
-            item.limit,
-            item.window_secs,
-        ));
+        rows.push((item.endpoint, item.client_id, item.limit, item.window_secs));
     }
 
     state.store.replace_rate_limits(&tenant, &rows).await?;

@@ -103,9 +103,7 @@ impl Metrics {
         }
         let entry = latency.entry(key).or_default();
         entry.count += 1;
-        entry.sum_micros = entry
-            .sum_micros
-            .saturating_add(elapsed.as_micros() as u64);
+        entry.sum_micros = entry.sum_micros.saturating_add(elapsed.as_micros() as u64);
         let seconds = elapsed.as_secs_f64();
         for (index, bound) in BUCKETS.iter().enumerate() {
             if seconds <= *bound {
@@ -149,7 +147,10 @@ impl Metrics {
         let mut out = String::with_capacity(8_192);
         out.push_str("# HELP monaca_http_requests_total HTTP responses by tenant, endpoint, method and status.\n");
         out.push_str("# TYPE monaca_http_requests_total counter\n");
-        for (key, value) in lock(&self.requests).iter().map(|(key, value)| (key.clone(), *value)) {
+        for (key, value) in lock(&self.requests)
+            .iter()
+            .map(|(key, value)| (key.clone(), *value))
+        {
             out.push_str(&format!(
                 "monaca_http_requests_total{{tenant=\"{}\",endpoint=\"{}\",method=\"{}\",status=\"{}\"}} {value}\n",
                 escape(&key.tenant),
@@ -231,7 +232,9 @@ impl Metrics {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn clone_latency(value: &Latency) -> Latency {

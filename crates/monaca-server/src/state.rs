@@ -102,30 +102,25 @@ impl AppState {
                 loaded
             }
         };
-        let (tenant_layer, client_layer) =
-            crate::rate_limit::layer_limits(&rows, endpoint, client);
+        let (tenant_layer, client_layer) = crate::rate_limit::layer_limits(&rows, endpoint, client);
         let key = format!("{endpoint}|tenant");
         let (count, window_start) = self
             .store
             .rate_limit_hit(tenant, &key, tenant_layer.1, now)
             .await?;
-        if let Some(rejection) = crate::rate_limit::rejection(
-            count,
-            tenant_layer.0,
-            window_start,
-            tenant_layer.1,
-            now,
-        ) {
+        if let Some(rejection) =
+            crate::rate_limit::rejection(count, tenant_layer.0, window_start, tenant_layer.1, now)
+        {
             self.metrics
                 .record_rejection(&tenant.slug, endpoint, "tenant", None);
             return Err(ApiError::rate_limited(rejection.retry_after));
         }
         if let (Some((limit, window_secs)), Some(client)) = (client_layer, client) {
             let key = format!("{endpoint}|client|{client}");
-            let (count, window_start) =
-                self.store
-                    .rate_limit_hit(tenant, &key, window_secs, now)
-                    .await?;
+            let (count, window_start) = self
+                .store
+                .rate_limit_hit(tenant, &key, window_secs, now)
+                .await?;
             if let Some(rejection) =
                 crate::rate_limit::rejection(count, limit, window_start, window_secs, now)
             {
@@ -324,7 +319,9 @@ impl AppState {
         account: Uuid,
     ) -> Result<(), monaca_oidc::InteractionError> {
         self.require_interaction_update(
-            self.store.interaction_mfa_pending(tenant, id, account).await,
+            self.store
+                .interaction_mfa_pending(tenant, id, account)
+                .await,
             tenant,
             id,
         )
@@ -341,7 +338,9 @@ impl AppState {
         account: Uuid,
     ) -> Result<(), monaca_oidc::InteractionError> {
         self.require_interaction_update(
-            self.store.interaction_mfa_enrollment(tenant, id, account).await,
+            self.store
+                .interaction_mfa_enrollment(tenant, id, account)
+                .await,
             tenant,
             id,
         )
@@ -532,11 +531,7 @@ impl AppState {
     }
 
     /// `take_signed_in` failing on a live row means it was never signed in.
-    async fn take_failure(
-        &self,
-        tenant: &TenantRow,
-        id: &str,
-    ) -> monaca_oidc::InteractionError {
+    async fn take_failure(&self, tenant: &TenantRow, id: &str) -> monaca_oidc::InteractionError {
         match self.store.interaction_get(tenant, id).await {
             Ok(Some(row)) => {
                 if let Err(err) = interaction_status(&row, self.now()) {
@@ -566,7 +561,11 @@ impl AppState {
     }
 
     /// Append an audit event to an org chain in its own transaction.
-    pub async fn audit_org(self: &Arc<Self>, org: &OrgCtx, event: &AuditEvent) -> Result<(), ApiError> {
+    pub async fn audit_org(
+        self: &Arc<Self>,
+        org: &OrgCtx,
+        event: &AuditEvent,
+    ) -> Result<(), ApiError> {
         let mut tx = self.store.begin_org(org).await?;
         self.store
             .audit_append(&mut *tx, &org.schema_name, event)

@@ -114,7 +114,10 @@ pub async fn create_sso_connector(
         }
     }
     if scopes.is_empty() {
-        scopes = DEFAULT_SCOPES.iter().map(|scope| (*scope).to_owned()).collect();
+        scopes = DEFAULT_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect();
     }
 
     let email_domains = normalise_domains(&body.email_domains)?;
@@ -315,7 +318,12 @@ pub async fn sso_authorize(
             state.now() + Duration::seconds(SSO_STATE_TTL_SECS),
         )
         .await?;
-    Ok(provider_redirect(&state, &connector, &state_id, &tenant.slug))
+    Ok(provider_redirect(
+        &state,
+        &connector,
+        &state_id,
+        &tenant.slug,
+    ))
 }
 
 /// `GET /t/{tenant}/sso/{connector}/callback` — finish the identity-provider round-trip.

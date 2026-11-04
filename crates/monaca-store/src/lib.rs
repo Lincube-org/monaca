@@ -33,16 +33,15 @@ use tokio::sync::Mutex;
 
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
-pub use runtime_state::InteractionRow;
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
     BrandingRow, ClientRow, ConsentRow, EmailConnectorRow, EmailTemplateRow, GrantRow,
     LoginFailureRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow, RateLimitRow,
-    RefreshRow, RoleRow, SessionRow,
-    SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow, SocialConnectorRow,
-    SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow,
-    VerificationRow, WebhookDeliveryRow, WebhookRow,
+    RefreshRow, RoleRow, SessionRow, SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow,
+    SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow, SsoConnectorRow,
+    SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow, WebhookRow,
 };
+pub use runtime_state::InteractionRow;
 
 /// A storage failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

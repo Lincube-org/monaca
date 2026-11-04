@@ -125,7 +125,10 @@ pub async fn update_email_connector(
 
     let existing = state.store.email_connector(&tenant).await?;
     let (secret_enc, set_secret) = match body.secret.as_deref() {
-        None => (existing.as_ref().and_then(|row| row.secret_enc.clone()), false),
+        None => (
+            existing.as_ref().and_then(|row| row.secret_enc.clone()),
+            false,
+        ),
         Some("") => (None, true),
         Some(secret) => {
             if secret.len() > 500 {
@@ -140,8 +143,8 @@ pub async fn update_email_connector(
                     "secret must not contain control characters",
                 ));
             }
-            let sealed = seal(&state.tenant_dek(&tenant)?, secret.as_bytes())
-                .map_err(ApiError::internal)?;
+            let sealed =
+                seal(&state.tenant_dek(&tenant)?, secret.as_bytes()).map_err(ApiError::internal)?;
             (Some(sealed), true)
         }
     };

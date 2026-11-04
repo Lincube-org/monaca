@@ -213,9 +213,7 @@ impl Config {
 
         let mut problems: Vec<String> = Vec::new();
         if self.kek_hex.is_empty() {
-            problems.push(
-                "MONACA_KEK is not set (must be 32 bytes, 64 hex characters)".to_owned(),
-            );
+            problems.push("MONACA_KEK is not set (must be 32 bytes, 64 hex characters)".to_owned());
         } else if let Err(err) = monaca_crypto::EnvKeyProvider::from_hex(&self.kek_hex) {
             // `err` reports the shape (`not hex`, `wrong length`), never the value.
             problems.push(format!("MONACA_KEK is invalid: {err}"));

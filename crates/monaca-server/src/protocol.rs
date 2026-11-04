@@ -282,13 +282,8 @@ pub async fn authorize(
             if request.requires_consent(client.is_third_party) {
                 // A remembered grant lets a returning user through without the screen.
                 // `prompt=consent` overrides it, and a first-party client never records one.
-                let grant = remember_consent(
-                    &state,
-                    &tenant,
-                    account.account_id(),
-                    client.id,
-                )
-                .await?;
+                let grant =
+                    remember_consent(&state, &tenant, account.account_id(), client.id).await?;
                 let approved = !request.forces_consent()
                     && client.is_third_party
                     && grant
@@ -314,9 +309,7 @@ pub async fn authorize(
                     // this interaction's authentication, and let the page render its consent step.
                     let interaction =
                         build_interaction(&state, &tenant, &client, &request, &org, true);
-                    state
-                        .put_interaction(&tenant, interaction.clone())
-                        .await?;
+                    state.put_interaction(&tenant, interaction.clone()).await?;
                     state
                         .mark_interaction_signed_in(
                             &tenant,
@@ -1747,7 +1740,9 @@ pub async fn sign_up(
         &email,
     )?;
     let username_value = username.as_ref().map(|checked| checked.value.clone());
-    let username_display = username.as_ref().and_then(|checked| checked.display.clone());
+    let username_display = username
+        .as_ref()
+        .and_then(|checked| checked.display.clone());
     let local_part = email.split('@').next().unwrap_or(&email);
     let mut identifiers = vec![local_part];
     if let Some(username) = username_value.as_deref() {
@@ -1794,7 +1789,9 @@ pub async fn sign_up_verify(
         &email,
     )?;
     let username_value = username.as_ref().map(|checked| checked.value.clone());
-    let username_display = username.as_ref().and_then(|checked| checked.display.clone());
+    let username_display = username
+        .as_ref()
+        .and_then(|checked| checked.display.clone());
     let local_part = email.split('@').next().unwrap_or(&email);
     let mut identifiers = vec![local_part];
     if let Some(username) = username_value.as_deref() {
@@ -2450,9 +2447,7 @@ pub async fn mfa_enroll_verify(
         .store
         .set_totp_secret(&tenant, account_id, &sealed)
         .await?;
-    state
-        .drop_totp_enrollment(&tenant, account_id.uuid())
-        .await;
+    state.drop_totp_enrollment(&tenant, account_id.uuid()).await;
     state
         .mark_mfa_satisfied(&tenant, &iid)
         .await
@@ -3053,9 +3048,7 @@ async fn approve_interaction(
     // client is a one-off confirmation, not something the account centre should list. A one-shot
     // decision is recorded so it can be listed and withdrawn, but it never covers a later request.
     if record_consent
-        && client
-            .as_ref()
-            .is_some_and(|client| client.is_third_party)
+        && client.as_ref().is_some_and(|client| client.is_third_party)
         && let Some(client) = client.as_ref()
     {
         let kind = if remember { "remember" } else { "one_shot" };
@@ -3093,9 +3086,7 @@ async fn approve_interaction(
             .await;
         }
     } else if audit_mode == Some("silent")
-        && client
-            .as_ref()
-            .is_some_and(|client| client.is_third_party)
+        && client.as_ref().is_some_and(|client| client.is_third_party)
         && let Some(client) = client.as_ref()
     {
         audit_consent_granted(

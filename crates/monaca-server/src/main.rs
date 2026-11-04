@@ -103,10 +103,7 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
             .with_context(|| format!("could not bind the metrics listener at {metrics_addr}"))?;
         let metrics_state = Arc::clone(&state);
         let metrics_app = axum::Router::new()
-            .route(
-                "/metrics",
-                axum::routing::get(crate::metrics::scrape),
-            )
+            .route("/metrics", axum::routing::get(crate::metrics::scrape))
             .with_state(metrics_state);
         tracing::info!(addr = %metrics_addr, "metrics listening");
         tokio::spawn(async move {

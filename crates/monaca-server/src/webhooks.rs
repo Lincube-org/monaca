@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac};
 use monaca_audit::{AuditDecision, AuditEvent, AuditSubject};
-use monaca_crypto::{generate_challenge, open, seal, KeyProvider};
+use monaca_crypto::{KeyProvider, generate_challenge, open, seal};
 use monaca_oidc::is_absolute_http_url;
 use monaca_store::{Store, WebhookDeliveryRow, WebhookRow};
 use monaca_types::{EventId, TenantId, TypedId, WebhookDeliveryId, WebhookId};
@@ -143,7 +143,8 @@ pub async fn create_webhook(
     let events = check_events(&body.events)?;
 
     let secret = new_secret();
-    let sealed = seal(&state.tenant_dek(&tenant)?, secret.as_bytes()).map_err(ApiError::internal)?;
+    let sealed =
+        seal(&state.tenant_dek(&tenant)?, secret.as_bytes()).map_err(ApiError::internal)?;
     let row = state
         .store
         .create_webhook(&tenant, url, &events, &sealed)
@@ -237,7 +238,8 @@ pub async fn rotate_webhook_secret(
     let id = parse_webhook_id(&id)?;
 
     let secret = new_secret();
-    let sealed = seal(&state.tenant_dek(&tenant)?, secret.as_bytes()).map_err(ApiError::internal)?;
+    let sealed =
+        seal(&state.tenant_dek(&tenant)?, secret.as_bytes()).map_err(ApiError::internal)?;
     let row = state
         .store
         .set_webhook_secret(&tenant, id, &sealed)
@@ -262,7 +264,9 @@ pub async fn rotate_webhook_secret(
         tracing::warn!(%err, "could not append webhook.secret_rotated audit event");
     }
 
-    Ok(Json(json!({ "id": id.to_typed_string(), "secret": secret })))
+    Ok(Json(
+        json!({ "id": id.to_typed_string(), "secret": secret }),
+    ))
 }
 
 /// `DELETE /v1/webhooks/{webhook}` — remove the subscription and its delivery history.
@@ -317,8 +321,7 @@ pub async fn list_webhook_deliveries(
 }
 
 fn parse_webhook_id(raw: &str) -> Result<WebhookId, ApiError> {
-    WebhookId::parse(raw)
-        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a webhook id"))
+    WebhookId::parse(raw).map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a webhook id"))
 }
 
 fn check_endpoint(raw: &str) -> Result<&str, ApiError> {
@@ -404,7 +407,10 @@ pub async fn dispatch(
     };
 
     for hook in hooks {
-        let secret = match open(&dek, &hook.secret_enc).ok().and_then(|bytes| String::from_utf8(bytes).ok()) {
+        let secret = match open(&dek, &hook.secret_enc)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        {
             Some(secret) => secret,
             None => {
                 tracing::warn!(webhook = %WebhookId::from_uuid(hook.id), "webhook signing key could not be opened");

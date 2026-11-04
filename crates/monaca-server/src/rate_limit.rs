@@ -70,7 +70,11 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     /// A tenant's configuration if the cache entry is still fresh.
-    pub async fn cached(&self, tenant: Uuid, now: OffsetDateTime) -> Option<Arc<Vec<RateLimitRow>>> {
+    pub async fn cached(
+        &self,
+        tenant: Uuid,
+        now: OffsetDateTime,
+    ) -> Option<Arc<Vec<RateLimitRow>>> {
         let configs = self.configs.lock().await;
         configs
             .get(&tenant)
