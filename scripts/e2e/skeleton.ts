@@ -599,7 +599,8 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "and rejects a replay; create_new_only refuses an existing email with 409 MONACA_SOCIAL_EMAIL_TAKEN and creates " +
       "when the address is free; a callback without the state cookie, with another browser's cookie or replayed " +
       "is 400; a Google callback verifies the RS256 id_token against the JWKS, refreshes an unknown kid, and rejects " +
-      "alg=none, a forged signature, wrong aud/iss, expiry, an unknown kid and a mismatched nonce as " +
+      "alg=none, HS256 algorithm confusion, a forged signature, wrong aud/iss, expiry, an unknown kid and a " +
+      "mismatched nonce as " +
       "502 MONACA_SOCIAL_PROVIDER_ERROR, while email_verified=false is 403 MONACA_SOCIAL_UNLINKED; disabling a " +
       "connector removes it from the public list and makes its authorize 404; social_sign_in.succeeded/failed and " +
       "social_identity.linked are on the tenant audit chain",
@@ -6783,6 +6784,27 @@ async function socialProvidersFlow(
       }),
     ]);
     checks.push([
+      "a Google id_token signed with HS256 is rejected (algorithm confusion)",
+      await googleRejected("go-hs256", (nonce) => {
+        const now = Math.floor(Date.now() / 1000);
+        const header = base64UrlJson({ alg: "HS256", typ: "JWT", kid: googleKeys[0]!.kid });
+        const payload = base64UrlJson({
+          iss: "https://accounts.google.com",
+          aud: googleClientId,
+          sub: `google-go-hs256-${runId}`,
+          email: `social59-go-hs256-${runId}@example.test`,
+          email_verified: true,
+          nonce,
+          iat: now,
+          exp: now + 3_600,
+        });
+        const signature = createHmac("sha256", "the-public-key-would-be-the-secret")
+          .update(`${header}.${payload}`)
+          .digest("base64url");
+        return Promise.resolve(`${header}.${payload}.${signature}`);
+      }),
+    ]);
+    checks.push([
       "a Google id_token with a forged signature is rejected",
       await googleRejected("go-forged", (nonce) =>
         googleIdToken(nonce, {}, rogueKey, googleKeys[0]!.kid),
@@ -6800,7 +6822,9 @@ async function socialProvidersFlow(
       "an expired Google id_token is rejected",
       await googleRejected("go-exp", (nonce) => {
         const now = Math.floor(Date.now() / 1000);
-        return googleIdToken(nonce, { iat: now - 3_600, exp: now - 10 });
+        // Past the verifier's 60 s expiry leeway, but `iat` stays inside the ten-minute window so
+        // this check fails on `exp`, not on the age rule.
+        return googleIdToken(nonce, { iat: now - 180, exp: now - 120 });
       }),
     ]);
     checks.push([

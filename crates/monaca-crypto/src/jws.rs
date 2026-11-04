@@ -4,7 +4,7 @@
 //! the tenant signing key's wire id (`key_…`, §5.2), which is also the `kid` in the JWKS.
 
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
 };
 use monaca_types::{KeyId, TypedId};
 use serde_json::Value;
@@ -141,12 +141,11 @@ pub fn verify_rs256_jws(
             header.alg
         )));
     }
-    if let Some(expected) = expected_typ
-        && header.typ.as_deref() != Some(expected)
+    if let (Some(expected), Some(typ)) = (expected_typ, header.typ.as_deref())
+        && typ != expected
     {
         return Err(CryptoError::Claims(format!(
-            "typ `{:?}` is not `{expected}`",
-            header.typ
+            "typ `{typ}` is not `{expected}`"
         )));
     }
 
@@ -334,6 +333,20 @@ mod tests {
         // `jsonwebtoken` may classify `none` as a malformed algorithm rather than a bad signature;
         // what matters is that it is refused.
         assert!(verify_rs256_jws(&token, &[], Some("JWT")).is_err());
+    }
+
+    #[test]
+    fn the_rs256_verifier_rejects_hmac_tokens() {
+        // Algorithm confusion: an attacker signs with the public key material as an HMAC secret.
+        // The whitelist must refuse before any key is selected.
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({"exp": 4_102_444_800i64}),
+            &EncodingKey::from_secret(&[7u8; 32]),
+        )
+        .expect("signs");
+        let error = verify_rs256_jws(&token, &[], Some("JWT")).expect_err("must refuse");
+        assert!(matches!(error, CryptoError::BadSignature(_)));
     }
 
     #[test]

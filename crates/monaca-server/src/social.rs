@@ -61,7 +61,7 @@ const GOOGLE_ISSUERS: &[&str] = &["https://accounts.google.com", "accounts.googl
 
 /// An ID token older than this is refused even if its `exp` is still ahead: the code exchange
 /// happens seconds after the provider minted it, and the state itself expires in ten minutes.
-const GOOGLE_ID_TOKEN_MAX_AGE_SECS: i64 = 900;
+const GOOGLE_ID_TOKEN_MAX_AGE_SECS: i64 = 600;
 
 /// Binds the one-time `state` to the browser that started the flow, so a callback URL copied to
 /// another browser cannot complete the interaction (login CSRF).
@@ -1471,7 +1471,10 @@ async fn google_id_token_claims(
         provider_error("the provider's identity token is not valid")
     })?;
 
-    let issuer = claims.get("iss").and_then(Value::as_str).unwrap_or_default();
+    let issuer = claims
+        .get("iss")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if !GOOGLE_ISSUERS.contains(&issuer) {
         tracing::warn!(connector = %connector.connector_id, "Google id_token issuer mismatch");
         return Err(provider_error("the provider's identity token is not valid"));
@@ -1520,7 +1523,10 @@ fn google_user(claims: &Value) -> Result<SocialUser, ApiError> {
             .get("email_verified")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        name: claims.get("name").and_then(Value::as_str).map(str::to_owned),
+        name: claims
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 
