@@ -2,10 +2,11 @@
 // still being unable to run DDL or read an org schema directly (docs/contracts/m0.md §5.1, §6.4).
 //
 // It is deliberately opt-in: MONACA_APP_DATABASE_URL is unset by default, so no existing
-// deployment changes. Running this script sets up the role, grants it the tenant schema and the
-// org roles it must SET ROLE into, revokes PUBLIC CONNECT from the tenant database, starts a
-// second server with the app URL and exercises a real write/read through it. It exits non-zero on
-// the first failed proof.
+// deployment changes. Running this script sets up the role for one tenant, grants it the tenant
+// schema and the org roles it must SET ROLE into, revokes PUBLIC CONNECT from that tenant
+// database, proves another tenant's data is unreadable, starts a second server with the app URL
+// and exercises a real write/read through it. It exits non-zero on the first failed proof. Run it
+// once per tenant slug while the login is enabled; MONACA_APP_DB_TENANT defaults to `demo`.
 //
 //   MONACA_CONTROL_DATABASE_URL=… MONACA_ADMIN_DATABASE_URL=… \
 //   MONACA_APP_DB_PASSWORD=… MONACA_SERVER_BIN=.monaca/bin/monaca-server \
@@ -15,7 +16,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
-const TENANT = "demo";
+const TENANT = process.env.MONACA_APP_DB_TENANT ?? "demo";
 const PORT = 8085;
 
 interface RawSql {
@@ -151,6 +152,44 @@ try {
     orgDenied = message.includes("permission denied") || message.includes("42501");
   }
   checks.push(["the app role cannot read an org schema without SET ROLE", orgDenied]);
+
+  // The login is deployment-wide, so the meaningful cross-tenant proof is a read against another
+  // active tenant database. Schema grants are per database: `tenant` has no PUBLIC USAGE, and this
+  // script only grants it on the tenant it provisions.
+  const otherRows = (await control`
+    SELECT db_name, slug FROM tenants
+    WHERE state = 'active' AND db_name <> ${tenantDb}
+    ORDER BY db_name
+    LIMIT 1`) as { db_name: string; slug: string }[];
+  const otherTenant = otherRows[0];
+  if (otherTenant === undefined) {
+    checks.push(["another active tenant exists for the cross-tenant proof", false]);
+  } else {
+    const otherDb = identifier(otherTenant.db_name, "other tenant database");
+    let otherDenied = false;
+    let otherDetail = "";
+    try {
+      const other = new Bun.SQL(withDatabase(appParsed.toString(), otherDb));
+      try {
+        await other`SELECT count(*)::bigint FROM tenant.accounts`;
+      } catch (err) {
+        otherDetail = err instanceof Error ? err.message : String(err);
+        otherDenied =
+          otherDetail.includes("permission denied") || otherDetail.includes("42501");
+      }
+      await other.close();
+    } catch (err) {
+      otherDetail = err instanceof Error ? err.message : String(err);
+      otherDenied =
+        otherDetail.includes("permission denied") || otherDetail.includes("does not exist");
+    }
+    checks.push([
+      `the app role cannot read ${otherTenant.slug}'s data${
+        otherDenied ? "" : ` (${otherDetail})`
+      }`,
+      otherDenied,
+    ]);
+  }
 
   const probe = `monaca_role_probe_${process.pid}`;
   const maintenance = new Bun.SQL(withDatabase(adminUrl, "postgres"));

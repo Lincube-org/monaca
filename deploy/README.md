@@ -126,17 +126,20 @@ request-path queries as `monaca_app` instead:
 
 1. Set `MONACA_APP_DATABASE_URL` to a DSN for that login (the per-tenant database name is
    substituted into it), and keep `MONACA_APP_DB_USER` / `MONACA_APP_DB_PASSWORD` in sync.
-2. Provision the role and its grants once, from a checkout on the host or from CI:
+2. Provision the role and its grants once per tenant, from a checkout on the host or from CI:
 
        MONACA_CONTROL_DATABASE_URL=… MONACA_ADMIN_DATABASE_URL=… \
-       MONACA_APP_DB_PASSWORD=… MONACA_SERVER_BIN=.monaca/bin/monaca-server \
+       MONACA_APP_DB_PASSWORD=… MONACA_APP_DB_TENANT=demo \
+       MONACA_SERVER_BIN=.monaca/bin/monaca-server \
          bun scripts/verify-app-role.ts
 
-   The script is idempotent: it creates/updates the login, grants `tenant` schema CRUD, grants
-   every org role for `SET ROLE`, revokes `CONNECT … FROM PUBLIC` on the tenant database, and
-   proves that DDL, a direct org-schema read and another database are all denied while a real
-   server using the app pool still creates and reads an account.
-3. Restart the server.
+   `MONACA_APP_DB_TENANT` defaults to `demo`. The script is idempotent: it creates/updates the
+   login, grants `tenant` schema CRUD, grants every org role for `SET ROLE`, revokes
+   `CONNECT … FROM PUBLIC` on that tenant database, and proves that DDL, a direct org-schema read,
+   another tenant's data and an unprovisioned database are all denied while a real server using
+   the app pool still creates and reads an account.
+3. Restart the server. Repeat step 2 for every active tenant while this login is enabled; a tenant
+   whose database has not been granted cannot serve request-path traffic with the app pool.
 
 This is **off by default**: without `MONACA_APP_DATABASE_URL`, no existing deployment changes. The
 first enablement on an existing database also revokes `CONNECT` from `PUBLIC` on the tenant
