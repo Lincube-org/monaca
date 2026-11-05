@@ -1967,6 +1967,26 @@
         "summary": "SSO provider callback"
       }
     },
+    "/t/{tenant}/verification/sms": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Send an SMS verification code"
+      }
+    },
+    "/t/{tenant}/verification/sms/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify an SMS code"
+      }
+    },
     "/v1/accounts": {
       "get": {
         "operationId": "list_accounts",
@@ -2631,6 +2651,44 @@
         "summary": "One email template"
       }
     },
+    "/v1/message-templates": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Message templates"
+      }
+    },
+    "/v1/message-templates/{purpose}/{locale}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One message template"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One message template"
+      }
+    },
+    "/v1/message-templates/{purpose}/{locale}/restore": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Restore a built-in message template"
+      }
+    },
     "/v1/orgs": {
       "get": {
         "operationId": "list_orgs",
@@ -3206,6 +3264,32 @@
           }
         },
         "summary": "Sign-in policy"
+      }
+    },
+    "/v1/sms-connector": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SMS connector"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SMS connector"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SMS connector"
       }
     },
     "/v1/sso-connectors": {

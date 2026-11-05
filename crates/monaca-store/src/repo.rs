@@ -5619,7 +5619,7 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, OutboxMailRow>(
             "WITH claimed AS (
-               SELECT id FROM tenant.outbox
+               SELECT id, attempts FROM tenant.outbox
                WHERE topic = $3
                  AND published_at IS NULL
                  AND attempts < $2
