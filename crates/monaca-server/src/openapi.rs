@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 65);
+        assert_eq!(M0_ACTIONS.len(), 70);
         for action in [
             "account.created",
             "account.updated",
@@ -289,6 +289,11 @@ mod tests {
             "email_template.reset",
             "email_connector.updated",
             "email_connector.deleted",
+            "sms_connector.updated",
+            "sms_connector.deleted",
+            "message_template.updated",
+            "message_template.deleted",
+            "message_template.restored",
             "resource.created",
             "resource.updated",
             "resource.deleted",
