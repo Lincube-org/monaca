@@ -348,6 +348,11 @@ async function main(): Promise<number> {
   const password = `Ops-Restore-${Date.now().toString(36)}-9xQ`;
   const connectorSecret = `ops-connector-secret-${Date.now().toString(36)}`;
   const mails: Mail[] = [];
+  let resetCounter = 0;
+  // A fresh address keeps `password/forgot` out of the per-address resend cooldown. The endpoint
+  // answers the same for an unknown address, so this still proves the connector, not the account.
+  const resetTarget = (): string =>
+    `ops-reset-${Date.now().toString(36)}-${resetCounter++}@demo.localhost`;
   let mock: ReturnType<typeof Bun.serve> | undefined;
 
   const report = {
@@ -424,7 +429,7 @@ async function main(): Promise<number> {
       const signed = await signIn(args, email, password);
       check("the seeded account signs in", signed.status === 200, `${signed.status}`);
       if (signed.status !== 200) fail("the seeded account cannot sign in");
-      await requestReset(args, email);
+      await requestReset(args, resetTarget());
       for (let i = 0; i < 120 && mails.length === 0; i++) await Bun.sleep(250);
       check(
         "the seeded connector delivers a reset mail",
@@ -526,7 +531,7 @@ async function main(): Promise<number> {
       check("the restored account signs in", signed.status === 200, `${signed.status}`);
       if (signed.status !== 200) fail("the restored account cannot sign in");
       const before = mails.length;
-      await requestReset(args, email);
+      await requestReset(args, resetTarget());
       for (let i = 0; i < 120 && mails.length <= before; i++) await Bun.sleep(250);
       check(
         "the restored connector delivers a reset mail",
@@ -564,7 +569,7 @@ async function main(): Promise<number> {
       check("the account signs in after the rotation", signed.status === 200, `${signed.status}`);
       if (signed.status !== 200) fail("the account cannot sign in after the rotation");
       const before = mails.length;
-      await requestReset(args, email);
+      await requestReset(args, resetTarget());
       for (let i = 0; i < 120 && mails.length <= before; i++) await Bun.sleep(250);
       check(
         "the rewrapped connector delivers a reset mail",
