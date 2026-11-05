@@ -513,6 +513,7 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         &["delete"],
         "Revoke a grant",
     ),
+    ("/v1/audit", &["get"], "Tenant audit events"),
     ("/v1/orgs/{org}/audit", &["get"], "Audit events"),
     (
         "/v1/orgs/{org}/audit/verify",
@@ -994,6 +995,7 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             "/v1/orgs/{org}/grants/{grant}",
             delete(crate::management::revoke_grant),
         )
+        .route("/v1/audit", get(crate::management::list_tenant_audit))
         .route("/v1/orgs/{org}/audit", get(crate::management::list_audit))
         .route(
             "/v1/orgs/{org}/audit/verify",

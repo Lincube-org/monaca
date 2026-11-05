@@ -2317,6 +2317,16 @@
         ]
       }
     },
+    "/v1/audit": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant audit events"
+      }
+    },
     "/v1/clients": {
       "get": {
         "operationId": "list_clients",

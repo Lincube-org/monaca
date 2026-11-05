@@ -92,12 +92,19 @@ pub async fn userinfo(
     let account_id = AccountId::parse(sub).map_err(|_| {
         ApiError::bearer(401, "invalid_token", "the token subject is not an account")
     })?;
-    let account = state
+    // One primary-key row answers the account state, the rendered profile fields and the session
+    // liveness; `userinfo` does not consult the revoked-`jti` list (that is `/v1`'s and
+    // introspection's job), so no revocation join is needed here.
+    let session_id = claims
+        .get("sid")
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok());
+    let live = state
         .store
-        .account_by_id(&tenant, account_id)
+        .account_liveness(&tenant, account_id, session_id, None)
         .await?
         .ok_or_else(|| ApiError::bearer(401, "invalid_token", "the account no longer exists"))?;
-    if account.state != "active" {
+    if live.state != "active" {
         return Err(ApiError::bearer(
             401,
             "invalid_token",
@@ -106,12 +113,7 @@ pub async fn userinfo(
     }
     // A token minted by a session dies with that session: the console kick must invalidate the
     // access token immediately, not wait for its `exp`.
-    if let Some(session_id) = claims
-        .get("sid")
-        .and_then(Value::as_str)
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        && !state.store.session_is_active(&tenant, session_id).await?
-    {
+    if !live.session_live {
         return Err(ApiError::bearer(
             401,
             "invalid_token",
@@ -120,20 +122,20 @@ pub async fn userinfo(
     }
 
     let body = UserInfoClaims {
-        sub: account.account_id().to_typed_string(),
+        sub: account_id.to_typed_string(),
         name: scopes
             .iter()
             .any(|scope| scope == "profile")
-            .then(|| account.display_name.clone()),
+            .then(|| live.display_name.clone()),
         picture: scopes
             .iter()
             .any(|scope| scope == "profile")
-            .then(|| account.avatar_url.clone())
+            .then(|| live.avatar_url.clone())
             .flatten(),
         email: scopes
             .iter()
             .any(|scope| scope == "email")
-            .then(|| account.primary_email.clone()),
+            .then(|| live.primary_email.clone()),
         email_verified: scopes.iter().any(|scope| scope == "email").then_some(true),
     };
     Ok(Json(body.to_json()).into_response())
@@ -487,30 +489,29 @@ async fn introspect_access(
     let Some(jti) = token_jti(&claims) else {
         return Ok(None);
     };
-    if state.store.access_token_revoked(tenant, jti).await? {
-        return Ok(Some(json!({ "active": false })));
-    }
 
-    // A self-contained token is only live while its account is active and the session that minted
-    // it is still live; introspection must say so, or a resource would trust a token the console
-    // already withdrew.
-    if let Some(account_id) = claims
+    // A self-contained token is only live while its account is active, its `jti` is not revoked
+    // and the session that minted it is still live; introspection must say so, or a resource would
+    // trust a token the console already withdrew. The account answers come from one primary-key
+    // row; automation tokens have no account row and fall back to the `jti` list.
+    let account_id = claims
         .get("sub")
         .and_then(Value::as_str)
-        .and_then(|raw| AccountId::parse(raw).ok())
-    {
-        let account = state.store.account_by_id(tenant, account_id).await?;
-        if account.is_none_or(|account| account.state != "active") {
-            return Ok(Some(json!({ "active": false })));
-        }
-        if let Some(session_id) = claims
+        .and_then(|raw| AccountId::parse(raw).ok());
+    if let Some(account_id) = account_id {
+        let session_id = claims
             .get("sid")
             .and_then(Value::as_str)
-            .and_then(|raw| Uuid::parse_str(raw).ok())
-            && !state.store.session_is_active(tenant, session_id).await?
-        {
+            .and_then(|raw| Uuid::parse_str(raw).ok());
+        let live = state
+            .store
+            .account_liveness(tenant, account_id, session_id, Some(jti))
+            .await?;
+        if live.is_none_or(|row| row.state != "active" || !row.session_live || row.token_revoked) {
             return Ok(Some(json!({ "active": false })));
         }
+    } else if state.store.access_token_revoked(tenant, jti).await? {
+        return Ok(Some(json!({ "active": false })));
     }
 
     let token_type = if claims.get("cnf").is_some() {

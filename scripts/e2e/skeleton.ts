@@ -728,6 +728,24 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "access and refresh tokens inactive, its refresh token is 400 invalid_grant, and DELETE all ends " +
       "the remaining browser and empties the list",
   },
+  {
+    step: "73",
+    title: "tenant audit query",
+    assertion:
+      "a non-admin sign-in asking for `monaca:admin` receives a token without that scope and GET /v1/audit " +
+      "is 403 MONACA_INSUFFICIENT_SCOPE; the operator's account events are found by subject, exact action, " +
+      "action prefix and actor, a future time window is empty and a covering one is not, `limit=1` returns " +
+      "one row plus `next` and `total`, a page request of 1,000,000 is clamped to 200, two reads leave the " +
+      "head and total unchanged, and a malformed or inverted time window is 400 MONACA_INVALID_REQUEST",
+  },
+  {
+    step: "74",
+    title: "revocation watermark",
+    assertion:
+      "after a session kick the very next userinfo is 401 invalid_token, the very next renewal is 400 " +
+      "invalid_grant and the very next introspection is active:false; after an account disable the same " +
+      "three calls fail immediately, with no sleep between the write and the probe",
+  },
 ];
 
 interface StepResult {
@@ -937,6 +955,7 @@ async function consoleSignIn(
   password: string,
   consoleSecret: string,
   tag: string,
+  scope = "openid profile email offline_access",
 ): Promise<{ session?: ConsoleSignIn; error?: string }> {
   const redirectUri = "http://localhost:5173/bff/callback";
   const verifier = `e-${tag}-${Date.now().toString(36)}-${"w".repeat(32)}`;
@@ -948,7 +967,7 @@ async function consoleSignIn(
       response_type: "code",
       client_id: "monaca-console",
       redirect_uri: redirectUri,
-      scope: "openid profile email offline_access",
+      scope,
       state: `st-${tag}`,
       nonce: `n-${tag}`,
       code_challenge: challenge,
@@ -5605,6 +5624,365 @@ async function sessionKickFlow(
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: two sessions listed → one kick 204 → exactly one browser dead → other alive → introspection inactive → renewal refused → revoke-all → both dead → list empty`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 73 — tenant audit queries (§6.2).
+ *
+ * The tenant chain carries the operator actions the org chain never sees. The list must filter
+ * by action, prefix, actor, subject and time window, state its effective page size and filtered
+ * total, cap a page at 200 rows, refuse a non-admin, and above all not append an event just
+ * because someone read the audit.
+ */
+async function auditQueryFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const email = `audit-${runId}@demo.localhost`;
+  const password = `pw-${runId}-audit`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "73",
+    title: "tenant audit query",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  interface AuditPage {
+    items?: {
+      seq?: number;
+      action?: unknown;
+      subject?: { id?: unknown };
+      actor_chain?: { id?: unknown }[];
+    }[];
+    next?: number | null;
+    limit?: unknown;
+    total?: unknown;
+    head?: { seq?: unknown };
+  }
+  const audit = (query: Record<string, string>): Promise<HttpResult> =>
+    call(`${base}/v1/audit?${new URLSearchParams(query)}`, { headers });
+  const page = (body: unknown): AuditPage => (body as AuditPage | undefined) ?? {};
+  const errorCode = (body: unknown): unknown =>
+    (body as { monaca_error_code?: unknown })?.monaca_error_code;
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Audit Subject", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const signedIn = await consoleSignIn(
+      base,
+      email,
+      password,
+      consoleSecret,
+      "audit",
+      "openid offline_access monaca:admin",
+    );
+    if (signedIn.session === undefined) return fail(signedIn.error ?? "sign-in failed");
+
+    // --- §6.2: a non-admin asking for monaca:admin does not receive it -----------------------
+    const tokenScope = (jwtClaims(signedIn.session.accessToken)?.scope ?? []) as unknown;
+    checks.push([
+      "a non-admin's requested monaca:admin is dropped at issuance",
+      Array.isArray(tokenScope) && !tokenScope.map(String).includes("monaca:admin"),
+    ]);
+    const forbidden = await call(`${base}/v1/audit?limit=1`, {
+      headers: managementHeaders(signedIn.session.accessToken),
+    });
+    checks.push([
+      "a non-admin cannot read the tenant audit chain",
+      forbidden.status === 403 &&
+        errorCode(forbidden.body) === "MONACA_INSUFFICIENT_SCOPE",
+    ]);
+
+    // --- an operator action on the tenant chain ------------------------------------------------
+    const disabled = await call(`${base}/v1/accounts/${accountId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    if (disabled.status !== 200) {
+      return fail(`PATCH disabled → ${disabled.status} ${text(disabled.body)}`);
+    }
+
+    const bySubject = page((await audit({ subject: accountId, limit: "10" })).body);
+    const subjectItems = bySubject.items ?? [];
+    checks.push([
+      "the subject filter returns only that account's events",
+      subjectItems.length >= 2 &&
+        subjectItems.every((item) => item.subject?.id === accountId),
+    ]);
+
+    const exact = page((await audit({ action: "account.suspended", subject: accountId, limit: "10" })).body);
+    checks.push([
+      "the exact action filter finds the suspension",
+      (exact.items ?? []).length >= 1 &&
+        (exact.items ?? []).every((item) => item.action === "account.suspended"),
+    ]);
+
+    const prefix = page((await audit({ action_prefix: "account.", subject: accountId, limit: "10" })).body);
+    const prefixItems = prefix.items ?? [];
+    checks.push([
+      "the action prefix matches every account.* event",
+      prefixItems.length >= 2 &&
+        prefixItems.every((item) => String(item.action).startsWith("account.")),
+    ]);
+
+    const actor = (jwtClaims(adminToken) as { sub?: unknown } | undefined)?.sub;
+    const byActor = page(
+      (await audit({ actor: typeof actor === "string" ? actor : "", subject: accountId, limit: "10" })).body,
+    );
+    checks.push([
+      "the actor filter matches the operator's chain entry",
+      typeof actor === "string" &&
+        (byActor.items ?? []).length >= 1 &&
+        (byActor.items ?? []).every((item) =>
+          (item.actor_chain ?? []).some((entry) => entry.id === actor),
+        ),
+    ]);
+
+    const now = Date.now();
+    const past = new Date(now - 3_600_000).toISOString();
+    const future = new Date(now + 3_600_000).toISOString();
+    const far = new Date(now + 7_200_000).toISOString();
+    const empty = page((await audit({ from: future, to: far, subject: accountId, limit: "10" })).body);
+    checks.push([
+      "a time window after the events is empty",
+      Number(empty.total) === 0 && (empty.items ?? []).length === 0,
+    ]);
+    const covered = page((await audit({ from: past, to: far, subject: accountId, limit: "10" })).body);
+    checks.push([
+      "a covering time window returns the events",
+      Number(covered.total) >= 2,
+    ]);
+
+    // --- pagination: effective page size, cursor and the hard cap ------------------------------
+    const first = page((await audit({ subject: accountId, limit: "1" })).body);
+    const firstNext = first.next;
+    checks.push([
+      "limit=1 returns one row and a cursor while total stays filtered",
+      Number(first.limit) === 1 &&
+        (first.items ?? []).length === 1 &&
+        typeof firstNext === "number" &&
+        Number(first.total) >= 2,
+    ]);
+    const second = page(
+      (
+        await audit({
+          subject: accountId,
+          limit: "1",
+          before: String(firstNext),
+        })
+      ).body,
+    );
+    checks.push([
+      "before returns the older page",
+      (second.items ?? []).length >= 1 &&
+        Number((second.items ?? [])[0]?.seq) < Number(firstNext),
+    ]);
+    const capped = page((await audit({ limit: "1000000" })).body);
+    checks.push([
+      "a page size above the cap is clamped to 200",
+      Number(capped.limit) === 200 && (capped.items ?? []).length <= 200,
+    ]);
+
+    // --- reading must not write ----------------------------------------------------------------
+    const readOnce = page((await audit({ subject: accountId, limit: "1" })).body);
+    const readTwice = page((await audit({ subject: accountId, limit: "1" })).body);
+    checks.push([
+      "reading the audit chain appends no event",
+      readOnce.head?.seq === readTwice.head?.seq && Number(readOnce.total) === Number(readTwice.total),
+    ]);
+
+    const badTime = await audit({ from: "not-rfc3339" });
+    checks.push([
+      "a malformed time bound is 400 MONACA_INVALID_REQUEST",
+      badTime.status === 400 && errorCode(badTime.body) === "MONACA_INVALID_REQUEST",
+    ]);
+    const inverted = await audit({ from: far, to: future });
+    checks.push([
+      "from later than to is 400",
+      inverted.status === 400 && errorCode(inverted.body) === "MONACA_INVALID_REQUEST",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "73",
+    title: "tenant audit query",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: scope drop → non-admin 403 → subject → action → prefix → actor → windows → cursor → cap 200 → reads write nothing → 400s`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 74 — revocation takes effect on the very next request (§6.2).
+ *
+ * Two watermarks are exercised without any sleep: a session revocation and an account disable.
+ * The next `userinfo`, token renewal and introspection must all see the new state immediately.
+ */
+async function revocationImmediateFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "74",
+    title: "revocation watermark",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  const userinfo = (token: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/oauth2/userinfo`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  const introspect = (token: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/oauth2/introspect`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${basic}`,
+      },
+      body: new URLSearchParams({ token, token_type_hint: "access_token" }).toString(),
+    });
+  const renew = (refreshToken: string): Promise<HttpResult> =>
+    tokenCall(base, { grant_type: "refresh_token", refresh_token: refreshToken }, basic);
+
+  const addAccount = async (tag: string): Promise<{ id: string; session: ConsoleSignIn } | undefined> => {
+    const email = `${tag}-${runId}@demo.localhost`;
+    const password = `pw-${runId}-${tag}`;
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: tag, password }),
+    });
+    const id = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof id !== "string") {
+      detail = `POST /v1/accounts(${tag}) → ${created.status} ${text(created.body)}`;
+      return undefined;
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: id, role: "member" }),
+    });
+    const signedIn = await consoleSignIn(base, email, password, consoleSecret, tag);
+    if (signedIn.session === undefined) {
+      detail = signedIn.error ?? "sign-in failed";
+      return undefined;
+    }
+    return { id, session: signedIn.session };
+  };
+
+  try {
+    // --- watermark 1: the session is revoked, the next request must fail ----------------------
+    const kicked = await addAccount("watermark-kick");
+    if (kicked === undefined) return fail("");
+    const before = await userinfo(kicked.session.accessToken);
+    checks.push(["the session's token works before the kick", before.status === 200]);
+
+    const sessions = await call(`${base}/v1/accounts/${kicked.id}/sessions`, { headers });
+    const sessionId = ((sessions.body as { items?: { id?: unknown }[] } | undefined)?.items ?? [])[0]?.id;
+    if (typeof sessionId !== "string") return fail(`session list → ${text(sessions.body)}`);
+    const kick = await call(`${base}/v1/accounts/${kicked.id}/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["the kick answers 204", kick.status === 204]);
+
+    const afterKick = await userinfo(kicked.session.accessToken);
+    checks.push([
+      "the very next userinfo after the kick is 401",
+      afterKick.status === 401 && (afterKick.body as { error?: unknown })?.error === "invalid_token",
+    ]);
+    const kickRenewal = await renew(kicked.session.refreshToken);
+    checks.push([
+      "the very next renewal after the kick is invalid_grant",
+      kickRenewal.status === 400 && (kickRenewal.body as { error?: unknown })?.error === "invalid_grant",
+    ]);
+    const kickIntrospection = await introspect(kicked.session.accessToken);
+    checks.push([
+      "the very next introspection after the kick is inactive",
+      kickIntrospection.status === 200 &&
+        (kickIntrospection.body as { active?: unknown })?.active === false,
+    ]);
+
+    // --- watermark 2: the account is disabled, the next request must fail ----------------------
+    const disabled = await addAccount("watermark-disable");
+    if (disabled === undefined) return fail("");
+    const beforeDisable = await userinfo(disabled.session.accessToken);
+    checks.push(["the token works before the disable", beforeDisable.status === 200]);
+    const patch = await call(`${base}/v1/accounts/${disabled.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    checks.push(["the disable answers 200", patch.status === 200]);
+
+    const afterDisable = await userinfo(disabled.session.accessToken);
+    checks.push([
+      "the very next userinfo after the disable is 401",
+      afterDisable.status === 401 && (afterDisable.body as { error?: unknown })?.error === "invalid_token",
+    ]);
+    const disableRenewal = await renew(disabled.session.refreshToken);
+    checks.push([
+      "the very next renewal after the disable is invalid_grant",
+      disableRenewal.status === 400 &&
+        (disableRenewal.body as { error?: unknown })?.error === "invalid_grant",
+    ]);
+    const disableIntrospection = await introspect(disabled.session.accessToken);
+    checks.push([
+      "the very next introspection after the disable is inactive",
+      disableIntrospection.status === 200 &&
+        (disableIntrospection.body as { active?: unknown })?.active === false,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "74",
+    title: "revocation watermark",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: kick 204 → next userinfo 401 → next renewal invalid → next introspection inactive → disable → same three immediately`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -16022,6 +16400,8 @@ async function main(): Promise<number> {
   push(await templateFallbackFlow(base, adminToken));
   push(await administrativeDisposalFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
   push(await sessionKickFlow(base, adminToken, parsed.consoleSecret));
+  push(await auditQueryFlow(base, adminToken, parsed.consoleSecret));
+  push(await revocationImmediateFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

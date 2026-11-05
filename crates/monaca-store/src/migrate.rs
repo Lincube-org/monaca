@@ -311,6 +311,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "session-bound refresh tokens (M1)",
         include_str!("../migrations/tenant_51.sql"),
     ),
+    (
+        52,
+        "audit query indexes (M1)",
+        include_str!("../migrations/tenant_52.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

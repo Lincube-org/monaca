@@ -44,6 +44,29 @@ impl AccountRow {
     }
 }
 
+/// The one row a request-time liveness check needs for an account token (§6.2).
+///
+/// The account fields `userinfo` renders and the two revocation answers are read in a single
+/// primary-key statement. `session_live` is true when the token carries no `sid` (client and
+/// legacy tokens); `token_revoked` is false when the token carries no `jti`.
+#[derive(Debug, Clone, FromRow)]
+pub struct AccountLivenessRow {
+    /// Primary email, for `userinfo`.
+    pub primary_email: String,
+    /// Display name, for `userinfo`.
+    pub display_name: String,
+    /// Avatar, for `userinfo`.
+    pub avatar_url: Option<String>,
+    /// `active` | `disabled`.
+    pub state: String,
+    /// Whether the account may call the management API.
+    pub is_tenant_admin: bool,
+    /// Whether the session named by the token is still usable.
+    pub session_live: bool,
+    /// Whether the token's `jti` is on the revocation list.
+    pub token_revoked: bool,
+}
+
 /// The tenant's hosted sign-in switches (§6.1 sign-in experience).
 #[derive(Debug, Clone, FromRow)]
 pub struct SignInExperienceRow {
@@ -871,6 +894,33 @@ impl GrantRow {
     }
 }
 
+/// The filters `GET /v1/audit` and `GET /v1/orgs/{org}/audit` accept (§6.2).
+///
+/// Every field is independent; the query ANDs the ones that are present. `action` is exact,
+/// `action_prefix` is an anchored prefix, `actor` matches any actor in the chain and `subject`
+/// is the canonical `subject.id` string.
+#[derive(Debug, Clone, Default)]
+pub struct AuditFilter<'a> {
+    /// Return rows with `seq < before`.
+    pub before: Option<i64>,
+    /// Exact action.
+    pub action: Option<&'a str>,
+    /// Anchored action prefix, such as `account.`.
+    pub action_prefix: Option<&'a str>,
+    /// Any actor in the chain with this typed id.
+    pub actor: Option<&'a str>,
+    /// The canonical `subject.id` string.
+    pub subject: Option<&'a str>,
+    /// Inclusive lower time bound.
+    pub from: Option<OffsetDateTime>,
+    /// Exclusive upper time bound.
+    pub to: Option<OffsetDateTime>,
+    /// Grant the action was authorized by.
+    pub grant_id: Option<Uuid>,
+    /// Token `jti`.
+    pub jti: Option<Uuid>,
+}
+
 /// A stored audit row, chain fields included.
 #[derive(Debug, Clone, FromRow)]
 pub struct AuditRow {
@@ -1027,6 +1077,37 @@ impl Store {
              FROM tenant.accounts WHERE id = $1",
         )
         .bind(account_id.uuid())
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// The liveness of an account token in one primary-key read.
+    ///
+    /// The two revocation questions are `EXISTS` subqueries on their own primary keys, so the
+    /// statement stays a narrow one-row read; it replaces the separate account and session
+    /// lookups a request used to make.
+    pub async fn account_liveness(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        session_id: Option<Uuid>,
+        jti: Option<Uuid>,
+    ) -> Result<Option<AccountLivenessRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, AccountLivenessRow>(
+            "SELECT a.primary_email, a.display_name, a.avatar_url, a.state, a.is_tenant_admin,
+                    ($2::uuid IS NULL OR EXISTS (
+                        SELECT 1 FROM tenant.sessions s
+                        WHERE s.id = $2 AND s.revoked_at IS NULL AND s.expires_at > now()
+                    )) AS session_live,
+                    ($3::uuid IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM tenant.revoked_access_tokens r WHERE r.jti = $3
+                    )) AS token_revoked
+             FROM tenant.accounts a WHERE a.id = $1",
+        )
+        .bind(account_id.uuid())
+        .bind(session_id)
+        .bind(jti)
         .fetch_optional(&pool)
         .await?)
     }
@@ -5539,6 +5620,73 @@ impl Store {
             StoreError::Database(format!("chain head hash is {} bytes", bytes.len()))
         })?;
         Ok(ChainHead { seq, hash })
+    }
+
+    /// Newest events first, with the §6.2 filters and the filtered total.
+    ///
+    /// The page size is the caller's hard cap; this method never builds a query without `LIMIT`.
+    pub async fn audit_page(
+        &self,
+        conn: &mut PgConnection,
+        schema: &str,
+        limit: i64,
+        filter: &AuditFilter<'_>,
+    ) -> Result<(Vec<AuditRow>, i64), StoreError> {
+        let schema = quote_ident(schema);
+        // A prefix is data, not a pattern: escape LIKE's own wildcards so `sign_in_` means the
+        // literal characters followed by anything, not `sign_in` plus one character.
+        let action_prefix = filter.action_prefix.map(|prefix| {
+            prefix
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_")
+        });
+        let predicate = "($1::bigint IS NULL OR seq < $1)
+               AND ($2::text IS NULL OR action = $2)
+               AND ($3::text IS NULL OR action LIKE $3 || '%' ESCAPE '!')
+               AND ($4::text IS NULL OR actor_chain @> jsonb_build_array(jsonb_build_object('id', $4)))
+               AND ($5::text IS NULL OR subject_ref = $5)
+               AND ($6::timestamptz IS NULL OR at >= $6)
+               AND ($7::timestamptz IS NULL OR at < $7)
+               AND ($8::uuid IS NULL OR grant_id = $8)
+               AND ($9::uuid IS NULL OR jti = $9)";
+        let total: (i64,) = sqlx::query_as(q(format!(
+            "SELECT count(*) FROM {schema}.audit_events WHERE {predicate}"
+        )))
+        // The cursor is pagination, not a filter: `total` stays the size of the filtered set on
+        // every page, so a client can compute how many pages remain.
+        .bind(None::<i64>)
+        .bind(filter.action)
+        .bind(action_prefix.as_deref())
+        .bind(filter.actor)
+        .bind(filter.subject)
+        .bind(filter.from)
+        .bind(filter.to)
+        .bind(filter.grant_id)
+        .bind(filter.jti)
+        .fetch_one(&mut *conn)
+        .await?;
+        let rows = sqlx::query_as::<_, AuditRow>(q(format!(
+            "SELECT seq, id, at, action, actor_chain, subject_type, subject_id, subject_ref,
+                    decision, grant_id, jti, payload, prev_hash, hash
+             FROM {schema}.audit_events
+             WHERE {predicate}
+             ORDER BY seq DESC
+             LIMIT $10"
+        )))
+        .bind(filter.before)
+        .bind(filter.action)
+        .bind(action_prefix.as_deref())
+        .bind(filter.actor)
+        .bind(filter.subject)
+        .bind(filter.from)
+        .bind(filter.to)
+        .bind(filter.grant_id)
+        .bind(filter.jti)
+        .bind(limit)
+        .fetch_all(&mut *conn)
+        .await?;
+        Ok((rows, total.0))
     }
 
     /// Newest events first, with the §6.2 filters.

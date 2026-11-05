@@ -966,6 +966,97 @@ immediately, but it was exercised on one server plus the two-process rate-limit 
 separate multi-instance deployment. Tenant-chain audit remains readable only through
 `/internal/audit`; a management-API audit reader is still a gap.
 
+## Batch L — operator audit, issued scopes and the liveness read
+
+### Tenant audit is readable from the management API
+
+`GET /v1/audit` reads the tenant chain, which previously had no reader outside
+`/internal/audit`: `account.suspended`/`account.deleted`, message-template overrides, connector
+writes and the sign-in/experience switches were invisible to an operator. The filters are
+`action` (exact), `action_prefix` (anchored and escape-safe: `_` and `%` are data, not LIKE
+wildcards), `actor` (any typed id in the chain, matched with `jsonb_path_ops` containment),
+`subject` (the canonical `subject.id`), `from`/`to` (RFC 3339, `from` inclusive and `to`
+exclusive) and the `before` sequence cursor. A page is clamped to **200 rows** and the response
+states the effective `limit` and the filtered `total`, so a client can never ask for the whole
+table and still learns how much it has to page through. The org list now returns the same
+envelope (`items`, `next`, `limit`, `total`, `head`). `tenant_52` adds the subject and actor
+indexes; the action and time indexes already existed.
+
+A read appends no event: both handlers only select, and the acceptance step compares `head.seq`
+and `total` across consecutive reads. Non-admins are refused by the same `authorize_admin`
+path as every other `/v1` call, with `403 MONACA_INSUFFICIENT_SCOPE`.
+
+### `monaca:admin` is dropped at issuance
+
+The contract said a non-admin's requested `monaca:admin` was silently dropped, but the code
+issued it and relied on `/v1` to refuse. The design intent is the contract's: a token should not
+carry a capability its subject cannot exercise, and RFC 6749 §3.3 explicitly allows the server
+to narrow the granted scope. Authorization-code and refresh exchanges now filter
+`monaca:admin` out unless `is_tenant_admin` is true; the refresh path re-evaluates the flag on
+every rotation, so a demoted administrator does not get the scope back. `/v1` still re-checks
+the flag on every request, because a token minted before a demotion keeps the scope until it is
+rotated. Impact: a non-admin token that asks for `monaca:admin` now reports the narrower scope
+and gets `403` for the missing scope; the automation client is unchanged (its scopes come from
+its registration); no schema or error-code change was needed, and the OpenAPI document was
+regenerated unchanged.
+
+### The liveness read
+
+Before this batch, a user token on `/v1` paid for an account row, a session existence check and
+the revoked-`jti` lookup as separate round-trips; `userinfo` paid for the account and session
+rows; introspection paid for `jti`, account and session. `account_liveness` now answers all of
+it in one primary-key statement: the account columns `userinfo` renders plus
+`session_live = ($sid IS NULL OR EXISTS live session)` and
+`token_revoked = ($jti IS NOT NULL AND EXISTS revoked jti)`. `/v1`, `userinfo` and introspection
+call it once; automation tokens (no account row) keep the narrow `jti` lookup.
+
+The measurement is the same `smoke` profile on the same machine, before and after the change.
+Before (one run), request paths at concurrency 1:
+
+| scenario | p50 ms | p95 ms | p99 ms | queries/request |
+|---|---|---|---|---|
+| management (automation) | 4.26 | 5.92 | 6.40 | 7 |
+| management-user (account+sid) | 5.01 | 6.71 | 7.29 | 8 |
+| userinfo | 3.25 | 4.71 | 5.46 | 6 |
+| introspect | 37.99 | 42.76 | 45.98 | 6 |
+
+After (two runs; the first showed a noisy `userinfo`, the second is quoted and the range is in
+the report):
+
+| scenario | p50 ms | p95 ms | p99 ms | queries/request |
+|---|---|---|---|---|
+| management (automation) | 3.14–4.43 | 5.05–6.91 | 5.81–8.32 | 7 |
+| management-user | 2.83–2.92 | 4.57–4.95 | 5.54–6.04 | 6 |
+| userinfo | 2.54–3.37 | 4.14–5.09 | 4.39–6.78 | 5 |
+| introspect | 35.22–36.15 | 39.62–41.79 | 41.12–43.15 | 4 |
+
+The pool/app-role pass shows the same direction: `management-user` p99 9.31 vs 6.35 ms
+(-31.7%) and `userinfo` p99 7.41 vs 5.93 ms (-20.0%) on the second after run. Query counts
+drop by two for `management-user` and introspection and by one for `userinfo`; the smaller
+latency gain on introspection is because its p95 is dominated by client-secret hashing, not by
+the three lookups.
+
+No cache, TTL or eventual-consistency window was introduced. Every revocation question is
+answered by the same row the write committed, so the delay after a session kick or a disable is
+**zero**: the next request that starts after the transaction commits observes it, on any
+instance. Step 74 probes `userinfo`, renewal and introspection immediately after the write with
+no sleep. A cross-instance deployment was not exercised beyond the existing two-process
+rate-limit steps; the bound is a database-visibility argument, not a load-test result.
+
+### Verification
+
+Steps 73 and 74 were added; the run is **76 steps** (74 before the batch, plus two) with the
+same two gateway-only skips (4/4b). Step 73 passes 14 checks, step 74 passes 10. The OpenAPI
+document is 117 paths / 163 operations; `schema.gen.ts` is regenerated. CI numbers are reported
+with the batch summary.
+
+Known limits: the audit `total` is a second `count(*)` over the filtered set; it is indexed for
+the filters but still linear in the matching rows. `action_prefix` is anchored only (no
+substring search). The liveness row includes the account's profile columns because `userinfo`
+renders them; a narrower `/v1`-only query would be possible if `userinfo` ever stopped reading
+the row. Bench numbers come from the embedded PostgreSQL fixture, not a production-sized audit
+table.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

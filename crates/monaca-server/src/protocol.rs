@@ -3681,6 +3681,10 @@ async fn authorization_code_grant(
         .account_by_id(&tenant, AccountId::from_uuid(row.account_id))
         .await?
         .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidGrant, "account is gone"))?;
+    // `monaca:admin` is a capability only a tenant administrator may hold. A non-admin request
+    // that asked for it gets the other scopes and no `monaca:admin` (RFC 6749 §3.3); the
+    // management API still re-checks the flag on every request, so a demotion is immediate.
+    let granted_scope = issued_scope(&row.scope, account.is_tenant_admin);
 
     let key = state.signing_key(&tenant).await?;
     let now = state.now().unix_timestamp();
@@ -3696,7 +3700,7 @@ async fn authorization_code_grant(
         aud,
         tid: tenant.tenant_id().to_typed_string(),
         org: org.org_id().to_typed_string(),
-        scope: row.scope.clone(),
+        scope: granted_scope.clone(),
         jti: Uuid::now_v7().to_string(),
         iat: now,
         exp: access_exp,
@@ -3765,7 +3769,7 @@ async fn authorization_code_grant(
                 client.id,
                 account.id,
                 org.id,
-                row.scope.clone(),
+                granted_scope.clone(),
                 row.resource.clone(),
                 None,
                 Uuid::now_v7(),
@@ -3783,7 +3787,7 @@ async fn authorization_code_grant(
         "access_token": access_token,
         "token_type": token_type(&jkt),
         "expires_in": state.config.access_token_ttl.as_secs(),
-        "scope": row.scope,
+        "scope": granted_scope,
     });
     if let Some(id_token) = id_token {
         body["id_token"] = Value::String(id_token);
@@ -3869,6 +3873,9 @@ async fn refresh_grant(
         }
         None => row.scope.clone(),
     };
+    // A refresh may have been issued while the account was an administrator. Re-evaluate the
+    // capability on every rotation so a demotion cannot outlive the old access token.
+    let scope = issued_scope(&scope, account.is_tenant_admin);
 
     // RFC 9449 §5: a token bound to a key may only be refreshed by proving that key. A refresh
     // that starts using DPoP binds the rotated tokens to the proof's key.
@@ -4233,6 +4240,23 @@ async fn agent_token(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The scopes an issued token may actually carry.
+///
+/// `monaca:admin` is governed by the account's tenant-admin flag rather than a role, so a
+/// non-admin who asked for it receives the other scopes and no `monaca:admin` (RFC 6749 §3.3).
+/// `/v1` re-checks the flag on every request, because a token minted before a demotion still
+/// carries the scope until it is rotated.
+fn issued_scope(scope: &[String], is_tenant_admin: bool) -> Vec<String> {
+    if is_tenant_admin || !scope.iter().any(|value| value == "monaca:admin") {
+        return scope.to_vec();
+    }
+    scope
+        .iter()
+        .filter(|value| value.as_str() != "monaca:admin")
+        .cloned()
+        .collect()
+}
+
 async fn issue_refresh(
     state: Arc<AppState>,
     tenant: TenantRow,

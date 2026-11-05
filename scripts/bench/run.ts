@@ -460,6 +460,18 @@ async function mintAdmin(base: string): Promise<string> {
   return accessToken(result);
 }
 
+/** RFC 7662 introspection, authenticated as the console client. */
+async function introspect(base: string, token: string): Promise<HttpResult> {
+  return request(`${base}/t/${TENANT}/oauth2/introspect`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: `Basic ${btoa(`${CONSOLE_CLIENT_ID}:${CONSOLE_SECRET}`)}`,
+    },
+    body: new URLSearchParams({ token, token_type_hint: "access_token" }).toString(),
+  });
+}
+
 async function patchGates(base: string, adminToken: string): Promise<void> {
   const items = ["authorize", "token", "userinfo", "management"].map((endpoint) => ({
     endpoint,
@@ -524,25 +536,39 @@ async function seedClients(base: string, adminToken: string, count: number): Pro
 
 const PKCE_VERIFIER = `bench-verifier-${"v".repeat(32)}`;
 
-async function authorizeUrl(base: string, tag: string, prompt?: string): Promise<string> {
+async function authorizeUrl(
+  base: string,
+  tag: string,
+  prompt?: string,
+  resource?: string,
+  scope = "openid profile email offline_access",
+): Promise<string> {
   const challenge = await sha256(PKCE_VERIFIER);
   return `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
     response_type: "code",
     client_id: CONSOLE_CLIENT_ID,
     redirect_uri: REDIRECT_URI,
-    scope: "openid profile email offline_access",
+    scope,
     state: `bench-${tag}`,
     nonce: `bench-nonce-${tag}`,
     code_challenge: challenge,
     code_challenge_method: "S256",
     organization: ORG,
     ...(prompt === undefined ? {} : { prompt }),
+    ...(resource === undefined ? {} : { resource }),
   })}`;
 }
 
 /** One interactive sign-in; returns the code and the freshly minted user access token. */
-async function mintUserToken(base: string, tag: string): Promise<string> {
-  const authorize = await request(await authorizeUrl(base, `${tag}-a`), { redirect: "manual" });
+async function mintUserToken(
+  base: string,
+  tag: string,
+  resource?: string,
+  scope?: string,
+): Promise<string> {
+  const authorize = await request(await authorizeUrl(base, `${tag}-a`, undefined, resource, scope), {
+    redirect: "manual",
+  });
   if (authorize.status !== 302) {
     throw new Error(`authorize answered ${authorize.status}: ${authorize.body.slice(0, 200)}`);
   }
@@ -986,6 +1012,7 @@ async function appPass(
   try {
     const adminToken = await mintAdmin(base);
     const userToken = await mintUserToken(base, `ab-${mode}`);
+    const userAdminToken = await mintUserToken(base, `ab-admin-${mode}`, `${base}/v1`, "openid monaca:admin");
     const runs: ScenarioRun[] = [];
 
     runs.push(
@@ -1040,6 +1067,30 @@ async function appPass(
             headers: { authorization: `Bearer ${userToken}` },
           }),
         ),
+        stats,
+      ),
+    );
+    runs.push(
+      await scenario(
+        "management-user",
+        [200],
+        profile.appRoleWarmup,
+        profile.appRoleIterations,
+        once(async () =>
+          request(`${base}/v1/accounts?limit=1`, {
+            headers: { authorization: `Bearer ${userAdminToken}` },
+          }),
+        ),
+        stats,
+      ),
+    );
+    runs.push(
+      await scenario(
+        "introspect",
+        [200],
+        profile.appRoleWarmup,
+        profile.appRoleIterations,
+        once(async () => introspect(base, userToken)),
         stats,
       ),
     );
@@ -1155,6 +1206,12 @@ async function main(): Promise<number> {
       await seedAccounts(CONTROL_BASE, adminToken, args.profile.accounts);
       await seedClients(CONTROL_BASE, adminToken, args.profile.clients);
       const userToken = await mintUserToken(CONTROL_BASE, "main");
+      const userAdminToken = await mintUserToken(
+        CONTROL_BASE,
+        "main-admin",
+        `${CONTROL_BASE}/v1`,
+        "openid monaca:admin",
+      );
 
       const fixturesSql = new Bun.SQL(withDatabase(pg.adminUrl, demoDb));
       const accountCount = (await raw(fixturesSql, "SELECT count(*)::bigint AS count FROM tenant.accounts")) as {
@@ -1219,6 +1276,30 @@ async function main(): Promise<number> {
               headers: { authorization: `Bearer ${managementToken}` },
             }),
           ),
+          stats,
+        ),
+      );
+      runs.push(
+        await scenario(
+          "management-user",
+          [200],
+          args.profile.warmup,
+          args.profile.iterations,
+          once(async () =>
+            request(`${CONTROL_BASE}/v1/accounts?limit=1`, {
+              headers: { authorization: `Bearer ${userAdminToken}` },
+            }),
+          ),
+          stats,
+        ),
+      );
+      runs.push(
+        await scenario(
+          "introspect",
+          [200],
+          args.profile.warmup,
+          args.profile.iterations,
+          once(async () => introspect(CONTROL_BASE, userToken)),
           stats,
         ),
       );
@@ -1353,7 +1434,14 @@ async function main(): Promise<number> {
       const app = appRolePasses.find((pass) => pass.mode === "app");
       if (app !== undefined && controls.length === 2) {
         const comparison: Record<string, unknown> = {};
-        for (const scenarioName of ["management", "authorize", "token", "userinfo"]) {
+        for (const scenarioName of [
+          "management",
+          "management-user",
+          "authorize",
+          "token",
+          "userinfo",
+          "introspect",
+        ]) {
           const appRun = app.scenarios.find((run) => run.name === scenarioName);
           const controlRuns = controls
             .map((pass) => pass.scenarios.find((run) => run.name === scenarioName))

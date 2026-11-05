@@ -15,8 +15,8 @@ use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditS
 use monaca_crypto::{hash_password, seal};
 use monaca_oidc::{is_absolute_http_url, valid_scope};
 use monaca_store::{
-    AccountRow, AgentKeyRow, AgentRow, BrandingRow, GrantRow, RateLimitRow, RoleRow, SessionRow,
-    SignInExperienceRow, SignInGuardrailsPatch, TenantRow,
+    AccountRow, AgentKeyRow, AgentRow, AuditFilter, BrandingRow, GrantRow, RateLimitRow, RoleRow,
+    SessionRow, SignInExperienceRow, SignInGuardrailsPatch, TenantRow,
 };
 use monaca_types::{
     AccountId, AgentId, AgentKeyId, EventId, GrantId, PasskeyId, RoleId, SessionId, TenantId,
@@ -76,6 +76,27 @@ pub struct AuditQuery {
     pub jti: Option<Uuid>,
     /// Filter by action.
     pub action: Option<String>,
+}
+
+/// The query string of `GET /v1/audit` (§6.2).
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct TenantAuditQuery {
+    /// Page size, default 50; values above 200 are clamped to 200.
+    pub limit: Option<i64>,
+    /// Return rows with `seq < before`.
+    pub before: Option<i64>,
+    /// Exact action, such as `account.suspended`.
+    pub action: Option<String>,
+    /// Anchored action prefix, such as `account.` or `message_template.`.
+    pub action_prefix: Option<String>,
+    /// A typed actor id, such as `acc_…`, `cli_…` or `agt_…`.
+    pub actor: Option<String>,
+    /// The exact `subject.id` string.
+    pub subject: Option<String>,
+    /// Inclusive lower time bound, RFC 3339.
+    pub from: Option<String>,
+    /// Exclusive upper time bound, RFC 3339.
+    pub to: Option<String>,
 }
 
 /// `POST /v1/accounts` body.
@@ -188,21 +209,10 @@ pub async fn authorize_admin(
     )
     .map_err(|err| ApiError::problem(kinds::UNAUTHORIZED, err.to_string()))?;
 
-    // An access token stays valid until its `exp`, so revocation only takes effect where a
-    // verifier consults `revoked_access_tokens`. `/oauth2/revoke` writes the `jti`; check it here
-    // for user and automation tokens alike (§6.2).
-    if let Some(jti) = claims
+    let jti = claims
         .get("jti")
         .and_then(Value::as_str)
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        && state.store.access_token_revoked(&tenant, jti).await?
-    {
-        state.metrics.record_revoked("management");
-        return Err(ApiError::problem(
-            kinds::UNAUTHORIZED,
-            "the token was revoked",
-        ));
-    }
+        .and_then(|raw| Uuid::parse_str(raw).ok());
 
     if claims.get("act").is_some() {
         return Err(ApiError::problem(
@@ -217,37 +227,56 @@ pub async fn authorize_admin(
         .unwrap_or_default()
         .to_owned();
 
-    // A user token is only usable while its account is active and the session that minted it is
-    // still live. A disable or a session kick must stop the old token from reaching `/v1`, not
-    // merely prevent the next sign-in.
+    // A user token is only usable while its account is active, its `jti` is not revoked and the
+    // session that minted it is still live. A disable or a session kick must stop the old token
+    // from reaching `/v1`, not merely prevent the next sign-in. The three answers come from one
+    // primary-key row, so the request does not pay for separate account and session lookups.
     let account = match AccountId::parse(&sub) {
         Ok(account_id) => {
-            let account = state
+            let session_id = claims
+                .get("sid")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok());
+            let live = state
                 .store
-                .account_by_id(&tenant, account_id)
+                .account_liveness(&tenant, account_id, session_id, jti)
                 .await?
                 .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the account is gone"))?;
-            if account.state != "active" {
+            if live.token_revoked {
+                state.metrics.record_revoked("management");
+                return Err(ApiError::problem(
+                    kinds::UNAUTHORIZED,
+                    "the token was revoked",
+                ));
+            }
+            if live.state != "active" {
                 return Err(ApiError::problem(
                     kinds::UNAUTHORIZED,
                     "the account is disabled",
                 ));
             }
-            if let Some(session_id) = claims
-                .get("sid")
-                .and_then(Value::as_str)
-                .and_then(|raw| Uuid::parse_str(raw).ok())
-                && !state.store.session_is_active(&tenant, session_id).await?
-            {
+            if !live.session_live {
                 return Err(ApiError::problem(
                     kinds::UNAUTHORIZED,
                     "the session was revoked",
                 ));
             }
-            Some((account_id, account))
+            Some((account_id, live.is_tenant_admin))
         }
         Err(_) => None,
     };
+
+    // Automation tokens have no account row; their `jti` is the only revocation state.
+    if account.is_none()
+        && let Some(jti) = jti
+        && state.store.access_token_revoked(&tenant, jti).await?
+    {
+        state.metrics.record_revoked("management");
+        return Err(ApiError::problem(
+            kinds::UNAUTHORIZED,
+            "the token was revoked",
+        ));
+    }
 
     let scopes: Vec<String> = claims
         .get("scope")
@@ -268,9 +297,9 @@ pub async fn authorize_admin(
     }
 
     // A user token must belong to an account that is still a tenant admin; `monaca:admin` is only
-    // minted for one, but a demotion has to take effect before the token expires.
-    if let Some((account_id, account)) = account {
-        if !account.is_tenant_admin {
+    // issued to one, but a demotion has to take effect before the token expires.
+    if let Some((account_id, is_tenant_admin)) = account {
+        if !is_tenant_admin {
             return Err(ApiError::problem(
                 kinds::INSUFFICIENT_SCOPE,
                 "the account is not a tenant admin",
@@ -2680,34 +2709,135 @@ pub async fn list_audit(
         ),
         None => None,
     };
+    let filter = AuditFilter {
+        before: query.before,
+        action: query
+            .action
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        grant_id,
+        jti: query.jti,
+        ..AuditFilter::default()
+    };
 
     let mut tx = state.store.begin_org(&ctx).await?;
-    let rows = state
+    let (rows, total) = state
         .store
-        .audit_list(
-            &mut *tx,
-            &ctx.schema_name,
-            limit,
-            query.before,
-            grant_id,
-            query.jti,
-            query.action.as_deref(),
-        )
+        .audit_page(&mut *tx, &ctx.schema_name, limit, &filter)
         .await?;
     let head = state.store.audit_head(&mut *tx, &ctx.schema_name).await?;
     tx.rollback().await?;
 
+    Ok(Json(audit_page_json(
+        rows, total, limit, head.seq, &head.hash,
+    )))
+}
+
+/// `GET /v1/audit` — the tenant chain, for operator actions that are not org-scoped (§6.2).
+///
+/// Reads are not audited: the handler only selects. The page size is clamped to the same 200
+/// rows the org list uses, and every response states the effective `limit` and the filtered
+/// `total`, so a client can page without asking for the whole table.
+#[utoipa::path(
+    get,
+    path = "/v1/audit",
+    tag = "management",
+    summary = "Search the tenant audit chain",
+    params(TenantAuditQuery),
+    responses(
+        (status = 200, description = "One page of events, the filtered total and the chain head."),
+        (status = 400, description = "A filter is malformed."),
+        (status = 403, description = "The caller is not a tenant administrator.")
+    )
+)]
+pub async fn list_tenant_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<TenantAuditQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let from = parse_audit_time(query.from.as_deref(), "from")?;
+    let to = parse_audit_time(query.to.as_deref(), "to")?;
+    if let (Some(from), Some(to)) = (from, to)
+        && from >= to
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "`from` must be earlier than `to`",
+        ));
+    }
+    let filter = AuditFilter {
+        before: query.before,
+        action: bounded_filter(query.action.as_deref(), "action")?,
+        action_prefix: bounded_filter(query.action_prefix.as_deref(), "action_prefix")?,
+        actor: bounded_filter(query.actor.as_deref(), "actor")?,
+        subject: bounded_filter(query.subject.as_deref(), "subject")?,
+        from,
+        to,
+        ..AuditFilter::default()
+    };
+
+    let mut tx = state.store.begin_tenant(&tenant).await?;
+    let (rows, total) = state
+        .store
+        .audit_page(&mut *tx, "tenant", limit, &filter)
+        .await?;
+    let head = state.store.audit_head(&mut *tx, "tenant").await?;
+    tx.rollback().await?;
+
+    Ok(Json(audit_page_json(
+        rows, total, limit, head.seq, &head.hash,
+    )))
+}
+
+/// The one envelope both audit lists return.
+fn audit_page_json(
+    rows: Vec<monaca_store::AuditRow>,
+    total: i64,
+    limit: i64,
+    head_seq: i64,
+    head_hash: &[u8; 32],
+) -> Value {
     let next = if rows.len() as i64 == limit {
         rows.last().map(|row| row.seq)
     } else {
         None
     };
     let items: Vec<Value> = rows.iter().map(audit_json).collect();
-    Ok(Json(json!({
+    json!({
         "items": items,
         "next": next,
-        "head": { "seq": head.seq, "hash": monaca_audit::hash_hex(&head.hash) },
-    })))
+        "limit": limit,
+        "total": total,
+        "head": { "seq": head_seq, "hash": monaca_audit::hash_hex(head_hash) },
+    })
+}
+
+/// A filter value, trimmed; empty is absent and an over-long value is refused.
+fn bounded_filter<'a>(raw: Option<&'a str>, field: &str) -> Result<Option<&'a str>, ApiError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 200 {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("`{field}` must be at most 200 characters"),
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn parse_audit_time(raw: Option<&str>, field: &str) -> Result<Option<OffsetDateTime>, ApiError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map(Some)
+        .map_err(|_| {
+            ApiError::problem(kinds::INVALID_REQUEST, format!("`{field}` is not RFC 3339"))
+        })
 }
 
 /// `GET /v1/orgs/{org}/audit/verify`.

@@ -37,13 +37,13 @@ use tokio::sync::{Mutex, OnceCell};
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
-    AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
-    BrandingRow, ClientRow, ConsentRow, DeliveryConnectorRow, GrantRow, LoginFailureRow,
-    MessageTemplateRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow,
-    RateLimitRow, RefreshRow, RoleRow, SessionRow, SignInExperienceRow, SignInGuardrailsPatch,
-    SignInPhraseRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow,
-    SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow,
-    WebhookRow,
+    AccountLivenessRow, AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditFilter, AuditRow,
+    AuthCodeRow, AuthorizedAppRow, BrandingRow, ClientRow, ConsentRow, DeliveryConnectorRow,
+    GrantRow, LoginFailureRow, MessageTemplateRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow,
+    ParRow, PasskeyRow, RateLimitRow, RefreshRow, RoleRow, SessionRow, SignInExperienceRow,
+    SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow,
+    SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow,
+    WebhookDeliveryRow, WebhookRow,
 };
 pub use runtime_state::InteractionRow;
 
