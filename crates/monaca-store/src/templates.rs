@@ -34,23 +34,29 @@ pub fn builtins() -> Vec<BuiltinTemplate> {
             serde_json::from_str(*raw).expect("the built-in template resource is valid JSON");
         for (purpose, entry) in document {
             let object = entry.as_object().expect("a template entry is an object");
-            let text = |key: &str| {
-                object
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .unwrap_or_else(|| panic!("template {purpose} has no {key}"))
-                    .to_owned()
-            };
+            let channel = text(object, &purpose, "channel");
+            let subject = text(object, &purpose, "subject");
+            let body = text(object, &purpose, "body");
             rows.push(BuiltinTemplate {
                 purpose,
                 locale: (*locale).to_owned(),
-                channel: text("channel"),
-                subject: text("subject"),
-                body: text("body"),
+                channel,
+                subject,
+                body,
             });
         }
     }
     rows
+}
+
+/// One required string field of a resource entry; a missing field is a resource bug, not a runtime
+/// condition, so it panics with the purpose and field name.
+fn text(object: &Map<String, Value>, purpose: &str, key: &str) -> String {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("template {purpose} has no {key}"))
+        .to_owned()
 }
 
 #[cfg(test)]
