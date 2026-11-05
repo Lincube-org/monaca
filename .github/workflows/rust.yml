@@ -532,7 +532,12 @@ jobs:
             --out-dir .monaca/backups-all --retention-days 14
           latest="$(find .monaca/backups-all -mindepth 1 -maxdepth 1 -type d | head -n 1)"
           test -s "$latest/monaca_control.dump"
-          test -s "$latest/mt_demo.dump"
+          tenant_dump="$(find "$latest" -maxdepth 1 -name 'mt_*.dump' | head -n 1)"
+          if [ -z "$tenant_dump" ] || [ ! -s "$tenant_dump" ]; then
+            echo "::error::backup-all did not dump a tenant database"
+            ls -la "$latest"
+            exit 1
+          fi
           test -s "$latest/manifest.txt"
 
           mkdir -p .monaca/backups-all/20000101T000000Z
