@@ -43,24 +43,25 @@ export function startSmtpCapture(port: number): SmtpCapture {
         if (!session) return;
         session.buffer += new TextDecoder().decode(chunk);
 
-        if (session.data) {
-          const terminator = session.buffer.indexOf("\r\n.\r\n");
-          if (terminator === -1) return;
-          session.raw = session.buffer.slice(0, terminator);
-          messages.push({
-            from: session.from,
-            to: [...session.to],
-            raw: session.raw,
-            receivedAt: new Date().toISOString(),
-          });
-          session.buffer = session.buffer.slice(terminator + 5);
-          session.data = false;
-          session.from = "";
-          session.to = [];
-          socket.write("250 2.0.0 queued\r\n");
-        }
+        while (true) {
+          if (session.data) {
+            const terminator = session.buffer.indexOf("\r\n.\r\n");
+            if (terminator === -1) return;
+            session.raw = session.buffer.slice(0, terminator);
+            messages.push({
+              from: session.from,
+              to: [...session.to],
+              raw: session.raw,
+              receivedAt: new Date().toISOString(),
+            });
+            session.buffer = session.buffer.slice(terminator + 5);
+            session.data = false;
+            session.from = "";
+            session.to = [];
+            socket.write("250 2.0.0 queued\r\n");
+            continue;
+          }
 
-        while (!session.data) {
           const newline = session.buffer.indexOf("\r\n");
           if (newline === -1) return;
           const line = session.buffer.slice(0, newline);
