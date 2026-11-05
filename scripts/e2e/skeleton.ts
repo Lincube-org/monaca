@@ -7809,7 +7809,7 @@ async function smtpDeliveryFlow(base: string, adminToken: string): Promise<StepR
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, locale: "en" }),
       },
     );
     checks.push([
@@ -7834,12 +7834,23 @@ async function smtpDeliveryFlow(base: string, adminToken: string): Promise<StepR
         (message?.to ?? []).some((to) => to.includes(email)),
     ]);
     checks.push([
-      "the raw message carries the rendered Subject header and body with the code",
-      raw.includes("Subject: Reset your demo password") &&
-        raw.includes("Content-Type: text/plain") &&
+      "the raw message carries the rendered Subject header",
+      raw.includes("Subject: Reset your demo password"),
+    ]);
+    checks.push([
+      "the raw message is text/plain and carries the code",
+      raw.includes("Content-Type: text/plain") &&
         typeof code === "string" &&
         raw.includes(code),
     ]);
+    if (
+      !raw.includes("Subject: Reset your demo password") ||
+      !raw.includes("Content-Type: text/plain") ||
+      typeof code !== "string" ||
+      !raw.includes(code)
+    ) {
+      detail = `raw: ${raw.slice(0, 500)}`;
+    }
   } catch (error) {
     detail = error instanceof Error ? error.message : String(error);
     checks.push([`the flow completed without an exception (${detail})`, false]);
