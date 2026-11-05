@@ -757,6 +757,76 @@ walk-through, so a change to a deploy script that breaks a step turns the job re
 (36/36), and the CI e2e job (acceptance + KEK drill + ops acceptance). CI run numbers are reported
 with the batch summary.
 
+## Batch I — contract truth, production defaults and tenant lifecycle
+
+### The OpenAPI claim, the KEK statement and the phone placeholder
+
+`spec/openapi.json` had 67 paths while the router mounts 106 non-internal paths. The overlay now
+registers every mounted path and method outside `/internal/*`: the account self-service surface,
+the interaction sub-steps, the public social/SSO callbacks, the alternate discovery path and the
+missing role-assignment operation. The generated document is 110 paths / 152 operations, and
+`packages/sdk/src/schema.gen.ts` was regenerated from it. The contract (§6.5) now states the
+coverage precisely: paths/methods complete outside `/internal/*`, response schemas still
+incremental, and `/internal/*` deliberately absent.
+
+`deploy/README.md` said KEK rotation was unsupported. It now describes the real three-step
+procedure (new key + `MONACA_KEK_PREVIOUS`, `monaca-server rewrap`, restart with only the new key)
+and names what is not supported: a KMS-hosted KEK, automatic/online rotation, per-ciphertext key
+ids and rotating while an instance still runs with only the old key.
+
+`account_identifiers.kind` accepted `phone` although no phone flow existed. `tenant.sql` now
+allows only `email` and `username`; `tenant_49` replaces the check on existing databases and
+raises if a phone row exists instead of deleting data. The control state check gained `archived`
+in `control_3`.
+
+### The least-privilege request path is the default
+
+`serve` now requires `MONACA_APP_DATABASE_URL`, and `bootstrap` creates/updates the login
+`LOGIN NOINHERIT`, revokes `CONNECT … FROM PUBLIC` on every tenant database, grants the tenant
+schema and every org role. Before binding the listener, `serve` proves the login exists, is not a
+superuser, is `NOINHERIT`, and can read `tenant.accounts` in an active tenant. The only path back
+to the control DSN is `MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1`, written explicitly; there is no
+implicit fallback. Administrative subcommands use an internal owner switch, never the environment.
+
+CI runs both refusals (Stage 0d): a superuser DSN exits non-zero naming the variable and "superuser",
+and an unprovisioned role exits non-zero naming the variable and the role. The real message from
+the local run was:
+
+    MONACA_APP_DATABASE_URL: role `postgres` is a superuser; MONACA_APP_DATABASE_URL must name
+    a least-privilege login, not the control or admin DSN
+    MONACA_APP_DATABASE_URL: role `missing_app` does not exist; run `monaca-server bootstrap` ...
+
+`deploy/backup-all.sh` is the recurring backup: one timestamped directory with control and every
+`mt_*` database, a manifest, retention pruning (`MONACA_BACKUP_RETENTION_DAYS`, default 14) and
+a `BACKUP FAILED:` line forwarded to `MONACA_BACKUP_ALERT_COMMAND`. `deploy/README.md` gives an
+hourly cron example and the honest recovery numbers: no WAL/PITR, so RPO is the schedule interval
+(up to one hour plus dump time with the example, unbounded without a scheduler); RTO was 1.9 s for
+the near-empty CI fixture, dominated by database size in production. CI Stage 0e proves both
+dumps and a retention prune.
+
+### Tenant lifecycle
+
+`monaca-server tenant create|suspend|resume|archive` is the offline entry point, every subcommand
+with `--dry-run`. `create` provisions the tenant, default `acme` org, admin account and two clients
+(management and public sign-in) and grants the app login. `suspend` is `active → suspended`;
+`resume` is `suspended|archived → active`; `archive` is `active|suspended → archived`. Transitions
+from `provisioning` are refused. `archive` disposes of nothing: the database, schemas, data and
+audit chains stay, and `resume` reactivates the tenant; there is no delete command.
+
+`AppState::tenant` and `authorize_admin` enforce `active`: suspended is `403
+MONACA_TENANT_SUSPENDED`, archived is `403 MONACA_TENANT_ARCHIVED`, provisioning stays `404`. A
+management token minted before suspension is refused while the tenant is suspended. Step 67 of
+the walk-through creates `life-<id>`, mints a management token, completes a public-client password
+sign-in, dry-runs suspend, suspends (both the token and token issuance answer 403), resumes, archives
+(403 and database retained), and resumes again; it passed 13 checks locally and in CI.
+
+### Verification
+
+`cargo test -p monaca-store -p monaca-server`, `bun run typecheck`, the local walk-through
+(step 67 passed; the other local failures were environment-only: the scratch server did not set
+the CAPTCHA/social mocks or the per-IP limit), and the CI e2e job (walk-through, KEK drill and
+ops acceptance). CI run numbers are reported with the batch summary.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

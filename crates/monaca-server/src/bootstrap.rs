@@ -19,16 +19,7 @@ use crate::state::AppState;
 pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
     let store = Arc::clone(&state.store);
     let config = Arc::clone(&state.config);
-    let control_url = store.config().control_url.as_str();
-    let admin_url = store.config().admin_url.as_str();
-    let admin_dsn = seal(state.keys.platform_kek(), admin_url.as_bytes())
-        .map_err(|err| anyhow::anyhow!("sealing admin DSN: {err}"))?;
-    let app_dsn = seal(
-        state.keys.platform_kek(),
-        config.app_database_url.as_deref().unwrap_or(control_url).as_bytes(),
-    )
-    .map_err(|err| anyhow::anyhow!("sealing the app DSN: {err}"))?;
-    let cluster_id = store.ensure_cluster("local", &admin_dsn, &app_dsn).await?;
+    let cluster_id = ensure_local_cluster(state).await?;
 
     for slug in ["system", "demo"] {
         let tenant = store
@@ -162,6 +153,26 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
         "bootstrap complete"
     );
     Ok(())
+}
+
+/// The local cluster row, sealed with the platform KEK. `bootstrap` and `tenant create` share it.
+pub(crate) async fn ensure_local_cluster(state: &Arc<AppState>) -> anyhow::Result<uuid::Uuid> {
+    let store = &state.store;
+    let control_url = store.config().control_url.as_str();
+    let admin_url = store.config().admin_url.as_str();
+    let admin_dsn = seal(state.keys.platform_kek(), admin_url.as_bytes())
+        .map_err(|err| anyhow::anyhow!("sealing admin DSN: {err}"))?;
+    let app_dsn = seal(
+        state.keys.platform_kek(),
+        state
+            .config
+            .app_database_url
+            .as_deref()
+            .unwrap_or(control_url)
+            .as_bytes(),
+    )
+    .map_err(|err| anyhow::anyhow!("sealing the app DSN: {err}"))?;
+    Ok(store.ensure_cluster("local", &admin_dsn, &app_dsn).await?)
 }
 
 /// Apply the control and tenant migration sets — `monaca-server migrate`.

@@ -164,6 +164,21 @@ pub async fn authorize_admin(
         .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the token has no tenant"))?;
 
     let tenant = state.store.tenant_by_id(tid.uuid()).await?;
+    // A suspended or archived tenant keeps its data but must not answer `/v1`, even with a token
+    // minted before the state changed.
+    if !tenant.is_active() {
+        return Err(match tenant.state.as_str() {
+            "suspended" => ApiError::problem(
+                kinds::TENANT_SUSPENDED,
+                "this tenant is suspended; contact its administrator",
+            ),
+            "archived" => ApiError::problem(
+                kinds::TENANT_ARCHIVED,
+                "this tenant is archived; contact its administrator",
+            ),
+            _ => ApiError::problem(kinds::UNAUTHORIZED, "the tenant is not active"),
+        });
+    }
     let jwks = state.jwks(&tenant).await?;
     let claims = monaca_crypto::verify_jws_with_audience(
         token,

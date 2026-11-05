@@ -39,6 +39,7 @@ mod session;
 mod social;
 mod sso;
 mod state;
+mod tenant;
 mod webhooks;
 
 #[cfg(test)]
@@ -72,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
             cli::AuditCommand::Verify => audit_verify().await,
         },
         Command::Rewrap(args) => rewrap::run(args).await,
+        Command::Tenant(args) => tenant::run(args).await,
     }
 }
 

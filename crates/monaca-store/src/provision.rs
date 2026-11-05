@@ -43,6 +43,14 @@ impl TenantRow {
         self.state == "active"
     }
 
+    /// `Ok` only for `active`; otherwise the state that is refusing the request.
+    pub fn serving(&self) -> Result<(), &str> {
+        if self.is_active() {
+            Ok(())
+        } else {
+            Err(self.state.as_str())
+        }
+    }
 }
 
 /// An organization as stored in its tenant's `tenant.organizations`.
@@ -148,6 +156,37 @@ impl Store {
         self.tenant_by_slug(slug).await
     }
 
+    /// Move a tenant between serving states. `provisioning` is never a target.
+    ///
+    /// The caller (the `tenant` CLI) validates and prints the transition; this method enforces the
+    /// state machine so a direct call cannot put a half-provisioned tenant into service.
+    pub async fn set_tenant_state(
+        &self,
+        slug: &str,
+        target: &str,
+    ) -> Result<TenantRow, StoreError> {
+        let tenant = self.tenant_by_slug(slug).await?;
+        let allowed = match (tenant.state.as_str(), target) {
+            ("active", "suspended") | ("active", "archived") => true,
+            ("suspended", "active") | ("suspended", "archived") => true,
+            ("archived", "active") => true,
+            (state, target) if state == target => true,
+            _ => false,
+        };
+        if !allowed {
+            return Err(StoreError::Database(format!(
+                "tenant `{slug}` cannot move from `{}` to `{target}`",
+                tenant.state
+            )));
+        }
+        sqlx::query("UPDATE tenants SET state = $2, updated_at = now() WHERE slug = $1")
+            .bind(slug)
+            .bind(target)
+            .execute(self.control())
+            .await?;
+        self.tenant_by_slug(slug).await
+    }
+
     /// Create or update the least-privilege login and grant it the request-path surface.
     ///
     /// `bootstrap` calls this for every tenant after the org roles exist. The login is `LOGIN
@@ -182,11 +221,9 @@ impl Store {
             )))
             .execute(self.admin())
             .await?;
-            sqlx::query(q(format!(
-                "GRANT CONNECT ON DATABASE {database} TO {role}"
-            )))
-            .execute(self.admin())
-            .await?;
+            sqlx::query(q(format!("GRANT CONNECT ON DATABASE {database} TO {role}")))
+                .execute(self.admin())
+                .await?;
 
             let pool = self.tenant_pool(&tenant.db_name).await?;
             for statement in [

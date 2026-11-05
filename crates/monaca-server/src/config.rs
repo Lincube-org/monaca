@@ -267,11 +267,7 @@ impl Config {
                 production,
             ),
             app_db_user: env("MONACA_APP_DB_USER").unwrap_or_else(|| "monaca_app".to_owned()),
-            app_db_password: seeded(
-                "MONACA_APP_DB_PASSWORD",
-                DEV_APP_DB_PASSWORD,
-                production,
-            ),
+            app_db_password: seeded("MONACA_APP_DB_PASSWORD", DEV_APP_DB_PASSWORD, production),
             app_database_url: env("MONACA_APP_DATABASE_URL"),
             production,
             kek_hex,

@@ -300,7 +300,11 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         &["get"],
         "SSO provider callback",
     ),
-    ("/t/{tenant}/account", &["get", "patch"], "Signed-in account"),
+    (
+        "/t/{tenant}/account",
+        &["get", "patch"],
+        "Signed-in account",
+    ),
     (
         "/t/{tenant}/account/email",
         &["post"],

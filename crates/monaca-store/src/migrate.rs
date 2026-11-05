@@ -42,6 +42,11 @@ const CONTROL: &[(i64, &str, &str)] = &[
         "email-connector index (§5.3)",
         include_str!("../migrations/control_2.sql"),
     ),
+    (
+        3,
+        "tenant lifecycle: the archived state (§5.3)",
+        include_str!("../migrations/control_3.sql"),
+    ),
 ];
 
 /// The tenant set (§5.6). Applied to each tenant database after `CREATE DATABASE`.

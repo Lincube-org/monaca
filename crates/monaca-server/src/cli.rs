@@ -38,8 +38,71 @@ pub enum Command {
     Audit(AuditArgs),
     /// Re-wrap sealed values under the current KEK (the second step of a rotation).
     Rewrap(RewrapArgs),
+    /// Create, suspend, resume or archive a tenant.
+    Tenant(TenantArgs),
     /// Print generated contracts.
     Openapi(OpenapiArgs),
+}
+
+/// `tenant` options.
+#[derive(Debug, Args)]
+pub struct TenantArgs {
+    /// The tenant lifecycle subcommand.
+    #[command(subcommand)]
+    pub command: TenantCommand,
+}
+
+/// `tenant` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum TenantCommand {
+    /// Provision a tenant, its default org, an admin account and two clients.
+    Create(TenantCreateArgs),
+    /// Stop serving a tenant; its data is retained.
+    Suspend(TenantStateArgs),
+    /// Return a suspended or archived tenant to service.
+    Resume(TenantStateArgs),
+    /// Stop serving a tenant and mark it archived; its data is retained.
+    Archive(TenantStateArgs),
+}
+
+/// `tenant create` options.
+#[derive(Debug, Args)]
+pub struct TenantCreateArgs {
+    /// Tenant slug, `[a-z0-9][a-z0-9-]{1,30}`.
+    #[arg(long)]
+    pub slug: String,
+    /// Admin account email in the new tenant.
+    #[arg(long)]
+    pub admin_email: String,
+    /// Admin account password.
+    #[arg(long)]
+    pub admin_password: String,
+    /// Management client id; the secret is `--admin-client-secret`.
+    #[arg(long, default_value = "monaca-admin")]
+    pub admin_client_id: String,
+    /// Management client secret.
+    #[arg(long)]
+    pub admin_client_secret: String,
+    /// Public client id used by an interactive sign-in.
+    #[arg(long, default_value = "e2e-login")]
+    pub login_client_id: String,
+    /// Redirect URI registered on that public client.
+    #[arg(long, default_value = "http://localhost:5173/bff/callback")]
+    pub login_redirect_uri: String,
+    /// Print the plan without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `tenant suspend|resume|archive` options.
+#[derive(Debug, Args)]
+pub struct TenantStateArgs {
+    /// Tenant slug.
+    #[arg(long)]
+    pub slug: String,
+    /// Print the transition without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `rewrap` options.
@@ -179,6 +242,38 @@ mod tests {
             vec!["monaca-server", "migrate"],
             vec!["monaca-server", "bootstrap"],
             vec!["monaca-server", "audit", "verify"],
+        ] {
+            Cli::try_parse_from(args.clone())
+                .unwrap_or_else(|err| panic!("{args:?} should parse: {err}"));
+        }
+    }
+
+    #[test]
+    fn tenant_lifecycle_subcommands_parse() {
+        for args in [
+            vec![
+                "monaca-server",
+                "tenant",
+                "create",
+                "--slug",
+                "life",
+                "--admin-email",
+                "admin@life.localhost",
+                "--admin-password",
+                "password",
+                "--admin-client-secret",
+                "secret",
+            ],
+            vec![
+                "monaca-server",
+                "tenant",
+                "suspend",
+                "--slug",
+                "life",
+                "--dry-run",
+            ],
+            vec!["monaca-server", "tenant", "resume", "--slug", "life"],
+            vec!["monaca-server", "tenant", "archive", "--slug", "life"],
         ] {
             Cli::try_parse_from(args.clone())
                 .unwrap_or_else(|err| panic!("{args:?} should parse: {err}"));

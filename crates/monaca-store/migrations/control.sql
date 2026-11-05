@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS tenants (
   cluster_id  uuid NOT NULL REFERENCES clusters(id),
   db_name     text NOT NULL UNIQUE,
   issuer      text NOT NULL UNIQUE,
-  state       text NOT NULL CHECK (state IN ('provisioning','active','suspended')),
+  -- archived retains the database and can be reactivated by `tenant resume`.
+  state       text NOT NULL CHECK (state IN ('provisioning','active','suspended','archived')),
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );

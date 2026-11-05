@@ -107,9 +107,26 @@ impl AppState {
         self.clock.now()
     }
 
-    /// A tenant by slug.
+    /// A tenant by slug that is allowed to serve requests.
+    ///
+    /// `suspended` and `archived` are explicit refusals, not a `404`: the caller learns that the
+    /// tenant exists but is not serving. `provisioning` stays a `404`, because a half-provisioned
+    /// tenant is not addressable yet. Every handler that resolves a tenant through this method
+    /// inherits the gate; `authorize_admin` has its own check because it resolves by typed id.
     pub async fn tenant(&self, slug: &str) -> Result<TenantRow, ApiError> {
-        Ok(self.store.tenant_by_slug(slug).await?)
+        let tenant = self.store.tenant_by_slug(slug).await?;
+        tenant.serving().map_err(|state| match state {
+            "suspended" => ApiError::problem(
+                kinds::TENANT_SUSPENDED,
+                "this tenant is suspended; contact its administrator",
+            ),
+            "archived" => ApiError::problem(
+                kinds::TENANT_ARCHIVED,
+                "this tenant is archived; contact its administrator",
+            ),
+            _ => ApiError::problem(kinds::NOT_FOUND, "tenant is not active"),
+        })?;
+        Ok(tenant)
     }
 
     /// Count one request against the tenant and client layers for `endpoint` (§6.2).

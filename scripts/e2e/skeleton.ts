@@ -670,6 +670,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "MONACA_TOO_MANY_ATTEMPTS; a second address is not limited, and the exhausted address can still " +
       "reach authorize because the buckets are per endpoint",
   },
+  {
+    step: "67",
+    title: "tenant lifecycle",
+    assertion:
+      "`tenant create` provisions a tenant, its org, an admin account and two clients; the admin client " +
+      "mints a management token and the public client completes a password sign-in; a dry-run suspend " +
+      "reports the transition without writing; suspend makes the same management token and the token " +
+      "endpoint answer 403 MONACA_TENANT_SUSPENDED; resume restores both; archive answers " +
+      "403 MONACA_TENANT_ARCHIVED and keeps the tenant database, and resume returns it to service",
+  },
 ];
 
 interface StepResult {
@@ -7304,6 +7314,227 @@ async function ipRateLimitFlow(base: string, adminToken: string): Promise<StepRe
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: default read → first 404 → limit+1 429 → other address → other endpoint → Retry-After`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 67 — the tenant lifecycle entry point and the suspended gate (§5.4, §6.1).
+ *
+ * The CLI provisions a new tenant while the server is running; the same management token is then
+ * used before and after suspend/resume/archive. A suspended tenant must answer the structured
+ * `MONACA_TENANT_SUSPENDED`, not keep serving.
+ */
+async function tenantLifecycleFlow(base: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `life-${runId}`;
+  const adminEmail = `admin@${slug}.localhost`;
+  const adminPassword = `Life-${runId}-9xQ`;
+  const adminSecret = `life-admin-${runId}`;
+  const loginClient = "e2e-login";
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const bin =
+    process.env.MONACA_SERVER_BIN ??
+    (process.platform === "win32"
+      ? ".monaca/bin/monaca-server.exe"
+      : ".monaca/bin/monaca-server");
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const cli = async (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const proc = Bun.spawn([bin, ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr };
+  };
+
+  const managementToken = (): Promise<HttpResult> =>
+    call(`${base}/t/${slug}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${btoa(`monaca-admin:${adminSecret}`)}`,
+      },
+      body: "grant_type=client_credentials&scope=monaca:admin",
+    });
+
+  const signIn = async (): Promise<{ signIn: HttpResult; token: HttpResult }> => {
+    const verifier = `life-${runId}-${"v".repeat(40)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${slug}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: loginClient,
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `life-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (started.status !== 302 || interaction === null) {
+      detail = `authorize answered ${started.status} ${text(started.body)}`;
+      return { signIn: started, token: started };
+    }
+    const response = await call(
+      `${base}/t/${slug}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: adminEmail, password: adminPassword }),
+      },
+    );
+    const redirectTo = (response.body as { redirect_to?: string })?.redirect_to ?? "";
+    const token = await call(`${base}/t/${slug}/oauth2/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: new URL(redirectTo, base).searchParams.get("code") ?? "",
+        redirect_uri: redirectUri,
+        client_id: loginClient,
+        code_verifier: verifier,
+      }).toString(),
+    });
+    return { signIn: response, token };
+  };
+
+  try {
+    const created = await cli([
+      "tenant",
+      "create",
+      "--slug",
+      slug,
+      "--admin-email",
+      adminEmail,
+      "--admin-password",
+      adminPassword,
+      "--admin-client-secret",
+      adminSecret,
+      "--login-client-id",
+      loginClient,
+      "--login-redirect-uri",
+      redirectUri,
+    ]);
+    checks.push([
+      "tenant create provisions the tenant and exits 0",
+      created.code === 0 && created.stdout.includes(slug),
+    ]);
+    if (created.code !== 0) throw new Error(created.stderr || created.stdout);
+
+    const minted = await managementToken();
+    const bearer = (minted.body as { access_token?: string })?.access_token ?? "";
+    checks.push([
+      "the tenant's admin client mints a management token",
+      minted.status === 200 && bearer !== "",
+    ]);
+    const before = await call(`${base}/v1/accounts?limit=1`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    checks.push(["the tenant answers /v1 before suspension", before.status === 200]);
+
+    const first = await signIn();
+    checks.push([
+      "the tenant's public client completes a password sign-in",
+      first.signIn.status === 200 && first.token.status === 200,
+    ]);
+
+    const dry = await cli(["tenant", "suspend", "--slug", slug, "--dry-run"]);
+    checks.push([
+      "tenant suspend --dry-run reports the transition without writing",
+      dry.code === 0 && dry.stdout.includes("would apply"),
+    ]);
+
+    const suspended = await cli(["tenant", "suspend", "--slug", slug]);
+    checks.push([
+      "tenant suspend moves the tenant to suspended",
+      suspended.code === 0 && suspended.stdout.includes("suspended"),
+    ]);
+    const refused = await call(`${base}/v1/accounts?limit=1`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    checks.push([
+      "the same management token is refused with MONACA_TENANT_SUSPENDED",
+      refused.status === 403 &&
+        (refused.body as { monaca_error_code?: string })?.monaca_error_code ===
+          "MONACA_TENANT_SUSPENDED",
+    ]);
+    const refusedToken = await managementToken();
+    checks.push([
+      "token issuance is refused while suspended",
+      refusedToken.status === 403 &&
+        (refusedToken.body as { monaca_error_code?: string })?.monaca_error_code ===
+          "MONACA_TENANT_SUSPENDED",
+    ]);
+
+    const resumed = await cli(["tenant", "resume", "--slug", slug]);
+    checks.push([
+      "tenant resume restores service",
+      resumed.code === 0 && resumed.stdout.includes("active"),
+    ]);
+    const afterResume = await call(`${base}/v1/accounts?limit=1`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    const secondSignIn = await signIn();
+    checks.push([
+      "the same management token and a fresh sign-in work after resume",
+      afterResume.status === 200 &&
+        secondSignIn.signIn.status === 200 &&
+        secondSignIn.token.status === 200,
+    ]);
+
+    const archived = await cli(["tenant", "archive", "--slug", slug]);
+    checks.push([
+      "tenant archive retains the database and reports it",
+      archived.code === 0 &&
+        archived.stdout.includes("archive retained") &&
+        archived.stdout.includes("resume"),
+    ]);
+    const refusedArchive = await call(`${base}/v1/accounts?limit=1`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    checks.push([
+      "an archived tenant is refused with MONACA_TENANT_ARCHIVED",
+      refusedArchive.status === 403 &&
+        (refusedArchive.body as { monaca_error_code?: string })?.monaca_error_code ===
+          "MONACA_TENANT_ARCHIVED",
+    ]);
+    const resumedArchive = await cli(["tenant", "resume", "--slug", slug]);
+    const afterArchive = await call(`${base}/v1/accounts?limit=1`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    checks.push([
+      "tenant resume returns an archived tenant to service",
+      resumedArchive.code === 0 && afterArchive.status === 200,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "67",
+    title: "tenant lifecycle",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: create → management token → sign-in → dry-run → suspend 403 → resume → archive 403 → resume`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -14859,6 +15090,7 @@ async function main(): Promise<number> {
   push(await sharedRateLimitFlow(base, adminToken, parsed.adminSecret));
   push(await metricsFlow(base, parsed.internalSecret));
   push(await sdkFlow(base, adminToken));
+  push(await tenantLifecycleFlow(base));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

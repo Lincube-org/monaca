@@ -70,6 +70,20 @@ pub mod kinds {
         "Single sign-on disabled",
         403,
     );
+    /// The tenant is suspended: sign-in, token issuance and `/v1` are refused.
+    pub const TENANT_SUSPENDED: ProblemKind = ProblemKind::new(
+        "tenant_suspended",
+        "MONACA_TENANT_SUSPENDED",
+        "Tenant suspended",
+        403,
+    );
+    /// The tenant is archived: it is retained but not addressable.
+    pub const TENANT_ARCHIVED: ProblemKind = ProblemKind::new(
+        "tenant_archived",
+        "MONACA_TENANT_ARCHIVED",
+        "Tenant archived",
+        403,
+    );
     /// The resource does not exist, or is outside the caller's tenant.
     pub const NOT_FOUND: ProblemKind =
         ProblemKind::new("not_found", "MONACA_NOT_FOUND", "Not found", 404);
