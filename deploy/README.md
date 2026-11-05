@@ -164,21 +164,24 @@ deployment total.
 ## Tenant pool connection budget
 
 Tenant pools are cached per database (`MONACA_TENANT_POOL_CACHE`, default 64) and each can open up
-to `MONACA_TENANT_POOL_SIZE` connections (default 5). The benchmark observed about two live tenant
-connections per cached pool at steady state, and the mailer no longer opens a pool for a tenant
-without an email connector. The mailer now visits up to 8 tenants concurrently, each of which may
-hold its own pool outside the request-path cache. The safe ceiling is:
+to `MONACA_TENANT_POOL_SIZE` connections (default 5). The mailer has its **own** cache over the same
+control and provisioning connections (`MONACA_MAILER_POOL_CACHE`, default 128;
+`MONACA_MAILER_POOL_SIZE`, default 1), so a sweep cannot evict the request-path working set. The
+safe ceiling is:
 
-    max_connections >= (MONACA_TENANT_POOL_CACHE + 8) × MONACA_TENANT_POOL_SIZE + control/admin headroom
+    max_connections >= MONACA_TENANT_POOL_CACHE × MONACA_TENANT_POOL_SIZE
+                    + MONACA_MAILER_POOL_CACHE × MONACA_MAILER_POOL_SIZE
+                    + control/admin headroom
 
-The default 64 × 5 plus the mailer's 8 × 5 is a worst case of 360 tenant connections plus
-control/admin. A PostgreSQL `max_connections=100` (the image default) is below the observed ~128
-tenant connections at 100 active tenants; the old all-tenant mailer stalled a 198-tenant fixture at
-`max_connections=200`. `compose.dev.yml` therefore starts PostgreSQL with `max_connections=400`.
-An external PostgreSQL must set the same headroom, or use `MONACA_TENANT_POOL_SIZE=2` with a cache
-of at most ~32 on a 100-connection server. The cache should cover the hot tenant working set, not
-every registered tenant: 400 tenants at pool size 5 would need 2,000 connections if the cache
-covered them all.
+At the defaults that is `64 × 5 + 128 × 1 + 7 = 455`, so `compose.dev.yml` starts PostgreSQL with
+`max_connections=500`. The measured peak at 400 connector tenants is 129 tenant connections; the
+formula is the worst case if every cached pool opens its full quota, not the expected peak.
+An external PostgreSQL must set the same headroom. A PostgreSQL `max_connections=100` (the image
+default) is below the observed ~128 tenant connections at 100 active tenants; the old all-tenant
+mailer stalled a 198-tenant fixture at `max_connections=200`. The request-path cache should cover
+the hot tenant working set, not every registered tenant: 400 tenants at pool size 5 would need
+2,000 connections if the cache covered them all. The mailer's cache is the one that may be sized
+near the connector count, and its one-connection pools are why 128 costs 128, not 640.
 
 ## Operating
 

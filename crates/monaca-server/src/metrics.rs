@@ -280,40 +280,40 @@ impl Metrics {
 /// They live in the store rather than here because the store owns the pool cache; `/metrics` joins
 /// the two text sections so a benchmark can tell a warm pool from a cold one without instrumenting
 /// every query.
-pub fn pool_stats_text(stats: &PoolStatsSnapshot) -> String {
+pub fn pool_stats_text(prefix: &str, stats: &PoolStatsSnapshot) -> String {
     let lookups = stats.hits.saturating_add(stats.misses);
     let mut out = String::with_capacity(512);
-    out.push_str("# HELP monaca_tenant_pool_cache_total Tenant pool cache lookups by result.\n");
-    out.push_str("# TYPE monaca_tenant_pool_cache_total counter\n");
     out.push_str(&format!(
-        "monaca_tenant_pool_cache_total{{result=\"hit\"}} {}\n",
+        "# HELP {prefix}_cache_total Tenant pool cache lookups by result.\n"
+    ));
+    out.push_str(&format!("# TYPE {prefix}_cache_total counter\n"));
+    out.push_str(&format!(
+        "{prefix}_cache_total{{result=\"hit\"}} {}\n",
         stats.hits
     ));
     out.push_str(&format!(
-        "monaca_tenant_pool_cache_total{{result=\"miss\"}} {}\n",
+        "{prefix}_cache_total{{result=\"miss\"}} {}\n",
         stats.misses
     ));
-    out.push_str(
-        "# HELP monaca_tenant_pool_cache_lookup_seconds Time spent in the tenant-pool cache lookup.\n",
-    );
-    out.push_str("# TYPE monaca_tenant_pool_cache_lookup_seconds summary\n");
     out.push_str(&format!(
-        "monaca_tenant_pool_cache_lookup_seconds_sum {}\n",
+        "# HELP {prefix}_cache_lookup_seconds Time spent in the tenant-pool cache lookup.\n"
+    ));
+    out.push_str(&format!("# TYPE {prefix}_cache_lookup_seconds summary\n"));
+    out.push_str(&format!(
+        "{prefix}_cache_lookup_seconds_sum {}\n",
         stats.lookup_nanos as f64 / 1_000_000_000.0
     ));
+    out.push_str(&format!("{prefix}_cache_lookup_seconds_count {lookups}\n"));
     out.push_str(&format!(
-        "monaca_tenant_pool_cache_lookup_seconds_count {lookups}\n"
+        "# HELP {prefix}_connect_seconds Time spent creating a tenant pool and validating a connection.\n"
     ));
-    out.push_str(
-        "# HELP monaca_tenant_pool_connect_seconds Time spent creating a tenant pool and validating a connection.\n",
-    );
-    out.push_str("# TYPE monaca_tenant_pool_connect_seconds summary\n");
+    out.push_str(&format!("# TYPE {prefix}_connect_seconds summary\n"));
     out.push_str(&format!(
-        "monaca_tenant_pool_connect_seconds_sum {}\n",
+        "{prefix}_connect_seconds_sum {}\n",
         stats.connect_nanos as f64 / 1_000_000_000.0
     ));
     out.push_str(&format!(
-        "monaca_tenant_pool_connect_seconds_count {}\n",
+        "{prefix}_connect_seconds_count {}\n",
         stats.misses
     ));
     out
@@ -424,7 +424,14 @@ pub async fn middleware(
 )]
 pub async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut body = state.metrics.render();
-    body.push_str(&pool_stats_text(&state.store.pool_stats()));
+    body.push_str(&pool_stats_text(
+        "monaca_tenant_pool",
+        &state.store.pool_stats(),
+    ));
+    body.push_str(&pool_stats_text(
+        "monaca_mailer_pool",
+        &state.mailer_store.pool_stats(),
+    ));
     body.push_str(&state.metrics.mailer_stats_text());
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }

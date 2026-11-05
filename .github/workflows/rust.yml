@@ -636,6 +636,19 @@ jobs:
           echo "--- server log (tail) ---"
           tail -n 200 .monaca/server.log 2>/dev/null || true
 
+      # §10.7/§Batch H: empty database -> migrate -> bootstrap -> seed -> backup -> restore ->
+      # verify -> rotate the KEK -> rewrap -> restart -> verify. It drops and restores
+      # monaca_control and mt_demo, so it runs after every earlier stage has finished with them.
+      - name: Stage 3 — one-command operations acceptance
+        run: |
+          cid="$(docker ps --filter ancestor=postgres:18 --format '{{.ID}}' | head -n 1)"
+          if [ -z "$cid" ]; then
+            echo "::error::the postgres:18 service container was not found"
+            exit 1
+          fi
+          bash deploy/verify-ops.sh --container "$cid" \
+            --server-bin .monaca/bin/monaca-server --port 8083
+
       # `if: always()` so the report survives a failed acceptance run, and `overwrite: true`
       # because the "Stage 1" step above rewrites skeleton.json in place when the acceptance
       # script does not exist yet — upload-artifact@v4 refuses to upload a second time into the

@@ -34,8 +34,13 @@ struct GoogleJwksCache {
 
 /// Everything a handler needs.
 pub struct AppState {
-    /// PostgreSQL.
+    /// PostgreSQL for the request path. Its tenant-pool cache is the one the mailer must not
+    /// evict.
     pub store: Arc<Store>,
+    /// The mailer's own tenant-pool cache over the same control and provisioning connections.
+    /// Bounded by `MONACA_MAILER_POOL_SIZE`/`MONACA_MAILER_POOL_CACHE`, so a sweep over every
+    /// connector tenant cannot churn the request-path working set.
+    pub mailer_store: Arc<Store>,
     /// Environment-derived configuration.
     pub config: Arc<Config>,
     /// Key provider (the environment-supplied KEK in M0; a KMS provider replaces this behind the
@@ -77,8 +82,13 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|err| anyhow::anyhow!("webhook HTTP client: {err}"))?;
+        let mailer_store = store.separate_tenant_cache(
+            store.config().mailer_pool_size,
+            store.config().mailer_pool_cache,
+        );
         Ok(Arc::new(Self {
             store: Arc::new(store),
+            mailer_store: Arc::new(mailer_store),
             config: Arc::new(config),
             keys: Arc::new(keys),
             argon: Argon2Params::from_env(),

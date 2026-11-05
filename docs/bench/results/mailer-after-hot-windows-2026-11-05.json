@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "generated_at": "2026-11-05T01:16:48.549Z",
+    "fixture": "scale-all-connectors",
+    "tenants": 400,
+    "binary": "target/release/monaca-server.exe",
+    "version": "monaca-server 0.0.0",
+    "slow_tenant": null,
+    "hot_tenant": "demo",
+    "split_pool_counters": true,
+    "host": {
+      "platform": "win32",
+      "release": "10.0.26200",
+      "arch": "x64",
+      "cpu": "Intel(R) Core(TM) Ultra 5 226V",
+      "memory_gb": 15.6
+    },
+    "pg_source": "embedded"
+  },
+  "queued_at": "2026-11-05T01:15:00.883Z",
+  "delivered": 400,
+  "missing": 0,
+  "delivery_latency_ms": {
+    "p50": 35206,
+    "p99": 106860,
+    "max": 107432,
+    "count": 400,
+    "slowest": [
+      {
+        "tenant": "bench-396",
+        "ms": 107432
+      },
+      {
+        "tenant": "bench-395",
+        "ms": 107331
+      },
+      {
+        "tenant": "bench-394",
+        "ms": 107218
+      },
+      {
+        "tenant": "bench-393",
+        "ms": 107048
+      },
+      {
+        "tenant": "bench-392",
+        "ms": 106860
+      }
+    ]
+  },
+  "first_pass_ms": 107595,
+  "tick_seconds_max": 7.369865,
+  "mailer_ticks_total": 17,
+  "mailer_tenants_last": 48,
+  "hot_path_latency_ms": {
+    "p50": 2.543199999985518,
+    "p99": 35.396000000007916,
+    "max": 118.92530000000261,
+    "count": 465,
+    "errors": 0
+  },
+  "hot_pool": {
+    "hits": 930,
+    "misses": 0,
+    "hit_rate": 1,
+    "connect_avg_ms": 0
+  },
+  "mailer_pool": {
+    "hits": 1396,
+    "misses": 781,
+    "connect_avg_ms": 961.314
+  },
+  "connections_peak": 129,
+  "sample_count": 465
+}

@@ -1,7 +1,7 @@
 # `bun run bench`
 
 Repeatable latency/throughput baseline for the M0 request paths, and the source of the numbers in
-`docs/roadmap.md` §Batch C.
+`docs/roadmap.md` §Batch C and §Batch H.
 
 ## One command
 
@@ -102,8 +102,11 @@ arbitrary eviction policy loses the working set. `mailer_ticks`, `connector_quer
 `bun scripts/bench/mailer.ts` measures the delivery loop against the all-connector fixture. It
 starts the same embedded cluster, queues one mail per connector tenant, starts the binary named by
 `MONACA_SERVER_BIN`, and records the longest tick, the enqueue-to-send latency (P50/P99/max), the
-`pg_stat_activity` peak and the delivered count. Run it after
-`bun run bench --profile scale --only-pool --all-connectors` has built the fixture:
+`pg_stat_activity` peak and the delivered count. While the mails drain it also probes a warmed
+request-path tenant (`--hot-tenant`, `demo` when present) every 200 ms, so the report carries the
+hot-path P50/P99 and the request-path pool hit rate for the same window. The mailer's own cache
+counters (`monaca_mailer_pool_*`) land in `mailer_pool`; the request-path ones in `hot_pool`. Run
+it after `bun run bench --profile scale --only-pool --all-connectors` has built the fixture:
 
 ```bash
 MONACA_SERVER_BIN=.monaca/bin/monaca-server bun scripts/bench/mailer.ts \
@@ -113,6 +116,8 @@ MONACA_SERVER_BIN=.monaca/bin/monaca-server bun scripts/bench/mailer.ts \
 `--slow-tenant <slug>` makes the mock hold that tenant's delivery past the provider timeout, which
 proves one hung provider cannot hold the tick; `--timeout <secs>` caps the wait for the last mail.
 The fixture's bench tenants are activated for the run and returned to `provisioning` afterwards.
+The binary reads `MONACA_MAILER_TENANT_CONCURRENCY`, `MONACA_MAILER_POOL_SIZE` and
+`MONACA_MAILER_POOL_CACHE`; export them to compare configurations without rebuilding.
 
 ## Reading the report
 

@@ -39,11 +39,10 @@ services:
     # `docker compose down -v` does not remove.
     image: postgres:18
     restart: unless-stopped
-    # (64 cached tenant pools + 8 concurrent mailer tenant visits) can each hold up to
-    # MONACA_TENANT_POOL_SIZE connections; the default 5 makes the worst case ~360 with the
-    # control/admin pools. The image's default of 100 is already below the observed ~128 tenant
-    # connections at 100 active tenants.
-    command: ["postgres", "-c", "max_connections=400"]
+    # (64 request-path pools × 5) + (128 mailer pools × 1) + control/admin = 455 at the defaults.
+    # The measured peak at 400 connector tenants is 129 tenant connections, so this is headroom
+    # for the worst case, not a claim that every cached pool is open at once.
+    command: ["postgres", "-c", "max_connections=500"]
     environment:
       POSTGRES_USER: monaca
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}

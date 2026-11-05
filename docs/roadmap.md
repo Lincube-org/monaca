@@ -666,6 +666,97 @@ single-flight tests), `bun run typecheck`, the local KEK drill (14/14), and the 
 above. The pushed Batch F commit's CI is the last full run; Batch G's CI is observed after the
 push and reported with the run number.
 
+## Batch H — poller isolation and the rest of the sealed surface
+
+Batch H gives the mailer its own connection budget and cache, exercises every sealed column the
+rotation drill previously only walked, and starts the one-command operations acceptance.
+
+### A second tenant-pool cache for the poller
+
+The P99 regression in Batch G was not the tick bound: it was cache churn. The pool cache held 64
+pools while the fixture had 400 connector tenants, and the mailer's sweep re-opened ~336 pools
+every pass, evicting the request path's working set on the way. `Store::separate_tenant_cache`
+builds a second cache over the same control and provisioning pools; the server keeps one for the
+request path (`MONACA_TENANT_POOL_CACHE`, 64 × 5) and one for the mailer
+(`MONACA_MAILER_POOL_CACHE`, 128 × `MONACA_MAILER_POOL_SIZE`, 1). A poller visit runs its queries
+in order, so one connection is enough, and a 128-entry cache keeps that connection through the
+visit's three lookups. `MONACA_MAILER_TENANT_CONCURRENCY` defaults to 8 (bounded 1–32).
+
+Fixture and command unchanged: 400-tenant all-connector scale fixture, one queued mail per tenant,
+embedded PostgreSQL, same Windows host, `bun scripts/bench/mailer.ts`. The benchmark now warms a
+request-path tenant (`demo`) before the sweep and probes it every 200 ms while the mail runs, so
+"the sweep did not disturb the hot path" is measured rather than argued. Reports:
+`docs/bench/results/mailer-{before,after}-hot-windows-2026-11-05.json`.
+
+| metric | before (Batch G, shared cache) | after (separate cache, 8 visits) |
+|---|---:|---:|
+| longest tick | 8.1 s | 7.4 s |
+| delivery P50 | 46.3 s | 35.2 s |
+| delivery P99 | 167.5 s | **106.9 s** |
+| delivery max | 328.0 s | 107.4 s |
+| hot-path P50 | 2.3 ms | 2.5 ms |
+| hot-path P99 | 80.6 ms | **35.4 ms** |
+| hot-path max | 488.4 ms | 118.9 ms |
+| hot-pool hit rate | 77.7 % | **100 %** |
+| connections peak | 122 | 129 |
+| delivered | 400/400 | 400/400 |
+
+The before run is the same fixture and the same probe loop against the Batch G binary; its earlier
+148 s sweep (without request-path load) is the number in the Batch G table, and it rose to 328 s
+once the probe exercised the shared cache. After the split, the sweep completes in 108 s and the
+request pool for `demo` never misses. Configurations that were measured and rejected:
+
+| configuration | result | why rejected |
+|---|---|---|
+| separate cache, 8 visits, poller cache 64 | 306/400 in 300 s, tick 14.8 s | a visit's three lookups race evictions; each visit re-opened pools |
+| separate cache, 16 visits, cache 128 | P99 146.8 s, peak 130 | more concurrent pool opens slow each open; no throughput gain |
+| separate cache, 4 visits, cache 128 | P99 105.9 s, max 165.4 s | meets P99 but below the requested 8–16 band and a worse tail |
+| slow provider held 30 s | tick max 8.5 s, 399/400 in 320 s, hot P99 73 ms | the hang occupies one worker for one delivery timeout per attempt; only the held tenant's row stays unpublished |
+
+The connection formula is now
+`MONACA_TENANT_POOL_CACHE × MONACA_TENANT_POOL_SIZE + MONACA_MAILER_POOL_CACHE ×
+MONACA_MAILER_POOL_SIZE + headroom` (455 at the defaults), so `compose.dev.yml` starts PostgreSQL
+with `max_connections=500`. The measured peak is 129, seven above the Batch G peak: the split did
+not buy latency with a connection surge. What did **not** change: the sweep still opens one pool
+per tenant (400 per full pass). The remaining reduction needs a poller with a warm, long-lived
+connection set or a control-plane pending-mail index; neither is in this batch.
+
+### The sealed surface beyond signing keys and TOTP
+
+`scripts/verify-kek-rotation.ts` now creates a webhook subscription, a GitHub-shaped social
+connector, a CAPTCHA configuration and a parked social round-trip under key A, rotates to B with A
+previous, re-wraps, then restarts with only B. The drill proves:
+
+* the webhook's signing key produces a valid `x-monaca-signature` before and after the rotation;
+* the social connector's client secret is posted to the provider's token endpoint, and the parked
+  social state verifier still completes its callback after the re-wrap;
+* the CAPTCHA secret is what the server sends to siteverify, and the sign-in still succeeds;
+* the email connector secret still delivers a reset mail;
+* for seven sealed columns (signing key, TOTP seed, email/social connector secrets, webhook secret,
+  CAPTCHA secret, social state verifier) the old KEK opened the bytes before rotation and **fails**
+  to open them afterwards, while the new KEK opens them. That is the negative control: the rows
+  really moved, rather than both keys happening to work.
+
+The drill passes 36 checks. `rewrap` migrates 8 tenant values plus the 2 cluster DSNs in this
+fixture; the additional business flows write the remaining sealed columns.
+
+### One-command operations acceptance
+
+`deploy/verify-ops.sh` (delegating to `scripts/verify-ops.ts`) runs the deployment sequence an
+operator otherwise assembles from four scripts: empty database → `migrate` → `bootstrap` → seed an
+account and an email connector through the API → `deploy/backup.sh` for the control and tenant
+databases → drop and restore both into fresh database objects with `deploy/restore-drill.sh` →
+start the server against the restored copy and verify the account and connector → rotate the KEK →
+`rewrap` → restart with only the new key → verify again. Any failing step exits non-zero; the
+report is `.monaca/reports/ops-verify.json`. It is wired into the CI e2e job after the acceptance
+walk-through, so a change to a deploy script that breaks a step turns the job red.
+
+### Verification
+
+`cargo test -p monaca-store -p monaca-server`, the mailer measurements above, the local KEK drill
+(36/36), and the CI e2e job (acceptance + KEK drill + ops acceptance). CI run numbers are reported
+with the batch summary.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

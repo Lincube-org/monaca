@@ -141,6 +141,10 @@ pub struct StoreConfig {
     pub tenant_pool_size: u32,
     /// LRU cap on cached tenant pools (`MONACA_TENANT_POOL_CACHE`).
     pub tenant_pool_cache: usize,
+    /// Connections per pool in the mailer's cache (`MONACA_MAILER_POOL_SIZE`).
+    pub mailer_pool_size: u32,
+    /// LRU cap on the mailer's own tenant pools (`MONACA_MAILER_POOL_CACHE`).
+    pub mailer_pool_cache: usize,
     /// Whether org transactions `SET LOCAL ROLE` (`MONACA_ORG_ROLE_ENFORCEMENT`).
     pub org_role_enforcement: bool,
     /// Optional least-privilege base DSN for tenant pools (`MONACA_APP_DATABASE_URL`). When set,
@@ -157,6 +161,11 @@ impl Default for StoreConfig {
             admin_url: String::from("postgres://monaca:monaca@127.0.0.1:54329/postgres"),
             tenant_pool_size: 5,
             tenant_pool_cache: 64,
+            mailer_pool_size: 1,
+            // The poller's cache must exceed its working set by enough that a visit's three
+            // lookups do not race an eviction; 128 was the smallest value that kept the 400-tenant
+            // sweep to one pool open per tenant (docs/roadmap.md §Batch H).
+            mailer_pool_cache: 128,
             org_role_enforcement: true,
             app_url: None,
         }
@@ -175,6 +184,12 @@ impl StoreConfig {
                 .max(1),
             tenant_pool_cache: env_u32("MONACA_TENANT_POOL_CACHE")
                 .unwrap_or(default.tenant_pool_cache as u32)
+                .max(1) as usize,
+            mailer_pool_size: env_u32("MONACA_MAILER_POOL_SIZE")
+                .unwrap_or(default.mailer_pool_size)
+                .max(1),
+            mailer_pool_cache: env_u32("MONACA_MAILER_POOL_CACHE")
+                .unwrap_or(default.mailer_pool_cache as u32)
                 .max(1) as usize,
             org_role_enforcement: env_bool("MONACA_ORG_ROLE_ENFORCEMENT", true),
             app_url: env_string("MONACA_APP_DATABASE_URL"),
@@ -247,6 +262,11 @@ pub struct Store {
     control: PgPool,
     admin: PgPool,
     config: StoreConfig,
+    /// Connections this cache may open per tenant pool. The request path and the mailer keep
+    /// separate values so a sweep cannot resize or evict the working set of the other.
+    tenant_pool_size: u32,
+    /// LRU cap for this store's tenant-pool cache.
+    tenant_pool_cache: usize,
     tenants: Mutex<HashMap<String, CachedPool>>,
     pool_tick: AtomicU64,
     stats: PoolStats,
@@ -270,11 +290,31 @@ impl Store {
         Ok(Self {
             control,
             admin,
+            tenant_pool_size: config.tenant_pool_size,
+            tenant_pool_cache: config.tenant_pool_cache,
             config,
             tenants: Mutex::new(HashMap::new()),
             pool_tick: AtomicU64::new(0),
             stats: PoolStats::default(),
         })
+    }
+
+    /// A second tenant-pool cache over the same control and provisioning connections.
+    ///
+    /// The mailer uses this so its sweep of every connector tenant cannot evict the pools the
+    /// request path depends on. `pool_size` is usually 1: a tenant visit runs its queries one at a
+    /// time, and a deeper pool would reserve connections it never uses.
+    pub fn separate_tenant_cache(&self, pool_size: u32, cache: usize) -> Store {
+        Store {
+            control: self.control.clone(),
+            admin: self.admin.clone(),
+            config: self.config.clone(),
+            tenant_pool_size: pool_size.max(1),
+            tenant_pool_cache: cache.max(1),
+            tenants: Mutex::new(HashMap::new()),
+            pool_tick: AtomicU64::new(0),
+            stats: PoolStats::default(),
+        }
     }
 
     /// The control-plane pool.
@@ -312,7 +352,7 @@ impl Store {
                 .database(db_name);
             let connect_started = Instant::now();
             let connected = PgPoolOptions::new()
-                .max_connections(self.config.tenant_pool_size)
+                .max_connections(self.tenant_pool_size)
                 .acquire_timeout(Duration::from_secs(10))
                 .idle_timeout(Duration::from_secs(300))
                 .connect_with(options)
@@ -355,7 +395,7 @@ impl Store {
                 // connecting is never chosen: removing it would let the next request start a
                 // second pool for the same tenant, which is exactly what the cell prevents. If
                 // every entry is connecting, the cap is exceeded briefly.
-                if pools.len() >= self.config.tenant_pool_cache
+                if pools.len() >= self.tenant_pool_cache
                     && let Some(oldest) = pools
                         .iter()
                         .filter(|(_, entry)| entry.init.get().is_some())
@@ -765,6 +805,8 @@ mod tests {
                 tenant_pool_cache,
                 ..StoreConfig::default()
             },
+            tenant_pool_size: 5,
+            tenant_pool_cache,
             tenants: Mutex::new(HashMap::new()),
             pool_tick: AtomicU64::new(0),
             stats: PoolStats::default(),
@@ -867,6 +909,26 @@ mod tests {
 
         // The failed entry is gone, so the next request is a fresh attempt.
         assert!(store.tenants.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_separate_cache_does_not_evict_the_request_path() {
+        let store = test_store(1);
+        let poller = store.separate_tenant_cache(1, 1);
+
+        store
+            .cached_pool("mt_hot", || async { Ok(lazy_pool("mt_hot")) })
+            .await
+            .expect("the hot pool opens");
+        poller
+            .cached_pool("mt_cold", || async { Ok(lazy_pool("mt_cold")) })
+            .await
+            .expect("the poller pool opens");
+
+        // A one-entry poller cache has room only for `mt_cold`; the request-path entry is intact.
+        assert!(store.tenants.lock().await.contains_key("mt_hot"));
+        assert!(!poller.tenants.lock().await.contains_key("mt_hot"));
+        assert!(poller.tenants.lock().await.contains_key("mt_cold"));
     }
 
     #[tokio::test]

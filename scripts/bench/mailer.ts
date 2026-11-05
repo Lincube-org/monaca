@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { cpus, platform, release, totalmem } from "node:os";
 
 import {
+  metric,
   raw,
   startPg,
   withDatabase,
@@ -35,13 +36,16 @@ const CONSOLE_SECRET = "bench-console-secret";
 interface Args {
   readonly out: string;
   readonly slowTenant: string | null;
+  readonly hotTenant: string | null;
   readonly timeoutSecs: number;
 }
 
 function usage(): string {
-  return `usage: bun scripts/bench/mailer.ts [--out <path>] [--slow-tenant <slug>] [--timeout <secs>]
+  return `usage: bun scripts/bench/mailer.ts [--out <path>] [--slow-tenant <slug>] [--hot-tenant <slug>]
+                                    [--timeout <secs>]
 
   --slow-tenant  the mock holds this tenant's request longer than the delivery timeout
+  --hot-tenant   the request-path tenant probed during the sweep (default: demo when present)
   --timeout      how long to wait for the last mail (default 180)
 `;
 }
@@ -49,6 +53,7 @@ function usage(): string {
 function parseArgs(argv: readonly string[]): Args {
   let out = join(ROOT, ".monaca", "reports", "mailer.json");
   let slowTenant: string | null = null;
+  let hotTenant: string | null = null;
   let timeoutSecs = 180;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? "";
@@ -61,13 +66,47 @@ function parseArgs(argv: readonly string[]): Args {
       out = arg.slice("--out=".length);
     } else if (arg === "--slow-tenant") {
       slowTenant = argv[++i] ?? null;
+    } else if (arg === "--hot-tenant") {
+      hotTenant = argv[++i] ?? null;
     } else if (arg === "--timeout") {
       timeoutSecs = Number(argv[++i] ?? timeoutSecs);
     } else {
       throw new Error(`unknown argument ${JSON.stringify(arg)}\n${usage()}`);
     }
   }
-  return { out, slowTenant, timeoutSecs };
+  return { out, slowTenant, hotTenant, timeoutSecs };
+}
+
+interface PoolCounters {
+  readonly hits: number;
+  readonly misses: number;
+  readonly connectSum: number;
+  readonly connectCount: number;
+}
+
+/** Read the cache counters behind one pool prefix (`monaca_tenant_pool`/`monaca_mailer_pool`). */
+function poolCounters(text: string, prefix: string): PoolCounters {
+  return {
+    hits: metric(text, `${prefix}_cache_total`, 'result="hit"'),
+    misses: metric(text, `${prefix}_cache_total`, 'result="miss"'),
+    connectSum: metric(text, `${prefix}_connect_seconds_sum`),
+    connectCount: metric(text, `${prefix}_connect_seconds_count`),
+  };
+}
+
+function poolDelta(before: PoolCounters, after: PoolCounters): PoolCounters & { connect_avg_ms: number } {
+  const hits = after.hits - before.hits;
+  const misses = after.misses - before.misses;
+  const connectSeconds = after.connectSum - before.connectSum;
+  const connects = after.connectCount - before.connectCount;
+  return {
+    hits,
+    misses,
+    connectSum: connectSeconds,
+    connectCount: connects,
+    connect_avg_ms:
+      connects === 0 ? 0 : Math.round((connectSeconds * 1_000 * 1_000) / connects) / 1_000,
+  };
 }
 
 function percentile(values: readonly number[], fraction: number): number {
@@ -91,6 +130,7 @@ async function main(): Promise<number> {
 
   const control = new Bun.SQL(withDatabase(pg.adminUrl, "monaca_control"));
   let server: ReturnType<typeof Bun.spawn> | undefined;
+  let serverReader: Promise<void> | undefined;
   let mock: ReturnType<typeof Bun.serve> | undefined;
   const received = new Map<string, number>();
   const finished: { id: string; tenant: string; at: number }[] = [];
@@ -195,22 +235,60 @@ async function main(): Promise<number> {
       cwd: ROOT,
       env,
       stdout: "ignore",
-      stderr: "ignore",
+      stderr: "pipe",
     });
+    const serverLog: string[] = [];
+    serverReader = (async (): Promise<void> => {
+      const stderr = server!.stderr as ReadableStream<Uint8Array>;
+      for await (const chunk of stderr) {
+        serverLog.push(String(chunk));
+        while (serverLog.join("").length > 8_000) serverLog.shift();
+      }
+    })().catch(() => undefined);
     const spawnedAt = Date.now();
+    let healthy = false;
     for (let i = 0; i < 120; i++) {
       try {
         const response = await fetch(`${BASE}/healthz`, { signal: AbortSignal.timeout(1_000) });
-        if (response.ok) break;
+        if (response.ok) {
+          healthy = true;
+          break;
+        }
       } catch {
         // not listening yet
       }
       await Bun.sleep(250);
     }
+    if (!healthy) {
+      throw new Error(
+        `the server never answered /healthz (exit ${server.exitCode})\n--- server stderr ---\n${serverLog.join("")}`,
+      );
+    }
 
-    // --- wait for every mail, sampling connections -----------------------------------------------
+    // --- a request-path tenant, warmed before the sweep -----------------------------------------
+    const hotTenant =
+      args.hotTenant ?? (tenants.some((tenant) => tenant.slug === "demo") ? "demo" : tenants[0]!.slug);
+    const hotUrl = `${BASE}/t/${hotTenant}/sign-in-experience`;
+    const warm = await fetch(hotUrl, { signal: AbortSignal.timeout(5_000) }).catch(() => undefined);
+    if (warm === undefined || !warm.ok) {
+      throw new Error(
+        `the hot tenant ${hotTenant} did not answer ${hotUrl}\n--- server stderr ---\n${serverLog.join("")}`,
+      );
+    }
+    let metricsBefore = "";
+    try {
+      metricsBefore = await (await fetch(`${BASE}/metrics`)).text();
+    } catch {
+      // the before binary has no split counters; the report records the absence below
+    }
+    const hotPoolBefore = poolCounters(metricsBefore, "monaca_tenant_pool");
+    const mailerPoolBefore = poolCounters(metricsBefore, "monaca_mailer_pool");
+
+    // --- wait for every mail, sampling connections and the hot request path ----------------------
     const admin = new Bun.SQL(pg.adminUrl);
     const connectionSamples: number[] = [];
+    const hotLatencies: number[] = [];
+    let hotErrors = 0;
     const deadline = Date.now() + args.timeoutSecs * 1_000;
     while (finished.length < tenants.length && Date.now() < deadline) {
       const rows = (await raw(
@@ -218,6 +296,15 @@ async function main(): Promise<number> {
         "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname LIKE 'mt\\_%'",
       )) as { n: number }[];
       connectionSamples.push(rows[0]?.n ?? 0);
+
+      const hotStarted = performance.now();
+      try {
+        const response = await fetch(hotUrl, { signal: AbortSignal.timeout(5_000) });
+        hotLatencies.push(performance.now() - hotStarted);
+        if (!response.ok) hotErrors += 1;
+      } catch {
+        hotErrors += 1;
+      }
       await Bun.sleep(200);
     }
     const sampled = connectionSamples;
@@ -228,20 +315,28 @@ async function main(): Promise<number> {
     let tickMax: number | null = null;
     let ticks: number | null = null;
     let tenantsLast: number | null = null;
+    let metricsAfter = "";
+    let mailerPoolAfter = mailerPoolBefore;
     try {
-      const response = await fetch(`${BASE}/metrics`);
-      const text = await response.text();
-      const maxMatch = /^monaca_mailer_tick_seconds_max ([\d.]+)$/m.exec(text);
-      const ticksMatch = /^monaca_mailer_ticks_total (\d+)$/m.exec(text);
-      const tenantsMatch = /^monaca_mailer_tenants_last (\d+)$/m.exec(text);
+      metricsAfter = await (await fetch(`${BASE}/metrics`)).text();
+      const maxMatch = /^monaca_mailer_tick_seconds_max ([\d.]+)$/m.exec(metricsAfter);
+      const ticksMatch = /^monaca_mailer_ticks_total (\d+)$/m.exec(metricsAfter);
+      const tenantsMatch = /^monaca_mailer_tenants_last (\d+)$/m.exec(metricsAfter);
       tickMax = maxMatch === null ? null : Number(maxMatch[1]);
       ticks = ticksMatch === null ? null : Number(ticksMatch[1]);
       tenantsLast = tenantsMatch === null ? null : Number(tenantsMatch[1]);
+      mailerPoolAfter = poolCounters(metricsAfter, "monaca_mailer_pool");
     } catch {
       // the metrics endpoint is optional for the before run
     }
+    const hotPool = poolDelta(hotPoolBefore, poolCounters(metricsAfter, "monaca_tenant_pool"));
+    const mailerPool = poolDelta(mailerPoolBefore, mailerPoolAfter);
 
     const latencies = finished.map((entry) => entry.at - spawnedAt);
+    const slowest = finished
+      .map((entry) => ({ tenant: entry.tenant, ms: entry.at - spawnedAt }))
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 5);
     const delivered = finished.length;
     const report = {
       meta: {
@@ -251,6 +346,8 @@ async function main(): Promise<number> {
         binary,
         version: await serverVersion(binary),
         slow_tenant: args.slowTenant,
+        hot_tenant: hotTenant,
+        split_pool_counters: metricsAfter.includes("monaca_mailer_pool_cache_total"),
         host: {
           platform: platform(),
           release: release(),
@@ -268,6 +365,7 @@ async function main(): Promise<number> {
         p99: percentile(latencies, 0.99),
         max: Math.max(0, ...latencies),
         count: latencies.length,
+        slowest,
       },
       // The old poller has no tick gauge; the first pass is the interval from spawn to the last
       // mail. The new one reports both, and `tick_seconds_max` is the tighter number.
@@ -275,6 +373,24 @@ async function main(): Promise<number> {
       tick_seconds_max: tickMax,
       mailer_ticks_total: ticks,
       mailer_tenants_last: tenantsLast,
+      hot_path_latency_ms: {
+        p50: percentile(hotLatencies, 0.5),
+        p99: percentile(hotLatencies, 0.99),
+        max: Math.max(0, ...hotLatencies),
+        count: hotLatencies.length,
+        errors: hotErrors,
+      },
+      hot_pool: {
+        hits: hotPool.hits,
+        misses: hotPool.misses,
+        hit_rate: hotPool.hits + hotPool.misses === 0 ? 0 : hotPool.hits / (hotPool.hits + hotPool.misses),
+        connect_avg_ms: hotPool.connect_avg_ms,
+      },
+      mailer_pool: {
+        hits: mailerPool.hits,
+        misses: mailerPool.misses,
+        connect_avg_ms: mailerPool.connect_avg_ms,
+      },
       connections_peak: Math.max(0, ...sampled),
       sample_count: sampled.length,
     };
@@ -285,6 +401,8 @@ async function main(): Promise<number> {
       `mailer: ${delivered}/${tenants.length} delivered, p50 ${report.delivery_latency_ms.p50} ms, ` +
         `p99 ${report.delivery_latency_ms.p99} ms, first pass ${report.first_pass_ms ?? "unfinished"} ms, ` +
         `tick max ${tickMax === null ? "n/a" : `${(tickMax * 1000).toFixed(0)} ms`}, ` +
+        `hot p99 ${report.hot_path_latency_ms.p99.toFixed(0)} ms ` +
+        `(hit ${(report.hot_pool.hit_rate * 100).toFixed(1)}%), ` +
         `connections ${report.connections_peak}\nreport: ${args.out}\n`,
     );
     return args.slowTenant === null
@@ -299,6 +417,7 @@ async function main(): Promise<number> {
       server.kill();
       await server.exited;
     }
+    await serverReader;
     mock?.stop(true);
     try {
       await raw(control, "UPDATE tenants SET state = 'provisioning' WHERE slug LIKE 'bench-%'");

@@ -95,6 +95,9 @@ pub struct Config {
     /// Per-IP requests per minute for the authentication endpoints
     /// (`MONACA_IP_RATE_LIMIT_PER_MINUTE`, 600). `0` disables the IP layer.
     pub ip_rate_limit_per_minute: u32,
+    /// Tenant visits the mailer runs at once (`MONACA_MAILER_TENANT_CONCURRENCY`, 8). Bounded to
+    /// 1–32; the poller's connection reservation is this value × `MONACA_MAILER_POOL_SIZE`.
+    pub mailer_tenant_concurrency: usize,
 }
 
 /// One entry of the `X-Forwarded-For` trust boundary.
@@ -269,6 +272,10 @@ impl Config {
             ip_rate_limit_per_minute: env("MONACA_IP_RATE_LIMIT_PER_MINUTE")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(600),
+            mailer_tenant_concurrency: env("MONACA_MAILER_TENANT_CONCURRENCY")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(8)
+                .clamp(1, 32),
         }
     }
 
@@ -472,6 +479,7 @@ mod tests {
                 TrustedProxy::parse("::1/128").expect("literal CIDR"),
             ],
             ip_rate_limit_per_minute: 600,
+            mailer_tenant_concurrency: 8,
         }
     }
 

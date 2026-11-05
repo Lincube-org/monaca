@@ -28,10 +28,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// count.
 const TICK_BUDGET: Duration = Duration::from_secs(5);
 
-/// Tenant visits in flight at once. Each visit may open one tenant pool, so the connection budget
-/// gains at most this many pools over the request path (§6.3).
-const TENANT_CONCURRENCY: usize = 8;
-
 /// The longest one provider call may take. The shared client has a 10 s timeout; the mailer's own
 /// calls are tighter so a hanging provider cannot hold a worker for the whole tick.
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,10 +61,10 @@ pub fn spawn(state: Arc<AppState>) {
 ///
 /// The cursor makes a partial pass resumable: when the tick budget runs out, the next tick starts
 /// at the first tenant this pass did not visit, so a tenant cannot be skipped forever because it
-/// sorts late. Tenants are visited with [`TENANT_CONCURRENCY`] workers; a slow provider occupies
-/// one worker, not the tick.
+/// sorts late. Tenants are visited with `MONACA_MAILER_TENANT_CONCURRENCY` workers; a slow
+/// provider occupies one worker, not the tick.
 async fn deliver_pending(state: &Arc<AppState>, cursor: &mut usize) -> usize {
-    let tenants = match state.store.tenants_with_email_connector().await {
+    let tenants = match state.mailer_store.tenants_with_email_connector().await {
         Ok(tenants) => tenants,
         Err(err) => {
             tracing::warn!(%err, "mailer could not list indexed tenants");
@@ -83,11 +79,12 @@ async fn deliver_pending(state: &Arc<AppState>, cursor: &mut usize) -> usize {
     let len = tenants.len();
     let start = *cursor % len;
     let deadline = Instant::now() + TICK_BUDGET;
+    let concurrency = state.config.mailer_tenant_concurrency;
     let mut tasks = JoinSet::new();
     let mut started = 0usize;
 
     while started < len && Instant::now() < deadline {
-        if tasks.len() >= TENANT_CONCURRENCY
+        if tasks.len() >= concurrency
             && let Some(result) = tasks.join_next().await
         {
             log_join(result);
@@ -123,7 +120,7 @@ async fn deliver_tenant(
     tenant: &TenantRow,
     deadline: Instant,
 ) -> Result<(), monaca_store::StoreError> {
-    let Some(connector) = state.store.email_connector(tenant).await? else {
+    let Some(connector) = state.mailer_store.email_connector(tenant).await? else {
         return Ok(());
     };
     if !connector.enabled {
@@ -142,14 +139,18 @@ async fn deliver_tenant(
             break;
         }
         let rows = state
-            .store
+            .mailer_store
             .outbox_claim_mail(tenant, 1, MAX_ATTEMPTS)
             .await?;
         let Some(row) = rows.into_iter().next() else {
             break;
         };
         match deliver_one(state, tenant, &connector, secret.as_deref(), &row).await {
-            Ok(status) => match state.store.outbox_mark_published(tenant, row.id).await {
+            Ok(status) => match state
+                .mailer_store
+                .outbox_mark_published(tenant, row.id)
+                .await
+            {
                 Ok(()) => {
                     let age_ms = (state.now() - row.created_at).whole_milliseconds().max(0);
                     tracing::info!(
