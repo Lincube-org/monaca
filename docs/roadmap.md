@@ -884,8 +884,17 @@ and `/v1/message-templates` exposes the locale-aware list, override writes, buil
 
 Steps 68–70 were added to the walk-through and run against local captures:
 `scripts/sms-capture.ts` receives the Twilio form and `scripts/smtp-capture.ts` receives the
-raw SMTP message. The two gateway-only skips (4/4b) are unchanged. CI numbers are reported with
-the batch summary.
+raw SMTP message. The run is **72 steps** (69 before the batch, plus three) with the same two
+gateway-only skips (4/4b); the new steps pass 8, 6 and 6 checks. The generated OpenAPI document is
+now 116 paths / 161 operations, and the five new audit actions have their own event schemas. CI
+numbers are reported with the batch summary.
+
+The missing-template negative control returns, verbatim:
+
+    status 500
+    {"type":"https://monaca.dev/errors/template_missing","title":"Message template missing",
+     "status":500,"detail":"template `sign_up` is missing for locale `en` (tried: en)",
+     "monaca_error_code":"MONACA_TEMPLATE_MISSING"}
 
 Known limits: the offline providers prove the wire shape, not a real Twilio/SMTP account; SMTP
 TLS is implemented with rustls/webpki but no live TLS relay was exercised in CI; SMS is a
