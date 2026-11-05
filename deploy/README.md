@@ -162,6 +162,9 @@ login as `LOGIN NOINHERIT` with `MONACA_APP_DB_PASSWORD`, revokes `CONNECT … F
 tenant database, grants it `CONNECT`, `USAGE` and CRUD on the `tenant` schema, and grants it every
 org role so `SET LOCAL ROLE` works. `compose.dev.yml` points the server at
 `MONACA_APP_DATABASE_URL` and leaves the one-shot `migrate`/`bootstrap` services on the owner DSN.
+Tenant and org provisioning (`tenant create`, `POST /v1/orgs`) is the exception: the DDL
+(`CREATE DATABASE`, `CREATE SCHEMA`, `CREATE ROLE`, migration sets) runs on
+`MONACA_ADMIN_DATABASE_URL`, and the new org's rows are then read through the app pool.
 
 `serve` checks the login before it binds the listener. It fails when:
 

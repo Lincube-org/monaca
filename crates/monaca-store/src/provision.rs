@@ -270,7 +270,9 @@ impl Store {
         let role_name = format!("t{}_o{oshort}", tenant.short);
         let app_user = std::env::var("MONACA_APP_DB_USER").unwrap_or_else(|_| "monaca_app".into());
 
-        let pool = self.tenant_pool(&tenant.db_name).await?;
+        // The tenant DDL below needs the provisioning login; the app login cannot create schemas,
+        // roles or tables. Every non-provisioning tenant query still runs through the app pool.
+        let pool = self.provisioning_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
 
         sqlx::query(q(format!(

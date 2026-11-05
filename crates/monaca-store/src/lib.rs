@@ -392,6 +392,27 @@ impl Store {
         .await
     }
 
+    /// A one-shot pool for org provisioning inside one tenant database.
+    ///
+    /// `provision_org` runs DDL (`CREATE SCHEMA`, `CREATE ROLE`, the org migration set) that the
+    /// request-path login deliberately cannot execute. The provisioning login (`admin_url`) created
+    /// the tenant database and owns it. The pool is not cached: org creation is rare, and a
+    /// privileged pool kept next to the least-privilege request pools would widen exactly the
+    /// surface the app login is there to narrow.
+    pub async fn provisioning_pool(&self, db_name: &str) -> Result<PgPool, StoreError> {
+        validate_database_name(db_name)?;
+        let options = PgConnectOptions::from_str(&self.config.admin_url)
+            .map_err(|err| StoreError::Database(format!("provisioning URL: {err}")))?
+            .database(db_name);
+        PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(300))
+            .connect_with(options)
+            .await
+            .map_err(StoreError::from)
+    }
+
     /// Prove the configured app login can serve tenant pools, and refuse the two unsafe shapes.
     ///
     /// `serve` calls this before it listens. A missing app DSN is already refused by
