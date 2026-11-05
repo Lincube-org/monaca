@@ -4,8 +4,9 @@
 // The app login is the request-path default; this script is the per-tenant proof and an
 // idempotent re-provisioning path. It sets up the role for one tenant, grants it the tenant schema
 // and the org roles it must SET ROLE into, revokes PUBLIC CONNECT from that tenant database,
-// proves another tenant's data is unreadable, starts a server with the app URL and exercises a
-// real write/read through it. It exits non-zero on the first failed proof. Run it once per tenant
+// proves an ungranted database is unreachable, starts a server with the app URL and exercises a
+// real write/read through it. The login is deployment-wide by design, so the org role boundary is
+// what keeps tenants apart. It exits non-zero on the first failed proof. Run it once per tenant
 // slug; MONACA_APP_DB_TENANT defaults to `demo`.
 //
 //   MONACA_CONTROL_DATABASE_URL=… MONACA_ADMIN_DATABASE_URL=… \
@@ -153,44 +154,10 @@ try {
   }
   checks.push(["the app role cannot read an org schema without SET ROLE", orgDenied]);
 
-  // The login is deployment-wide, so the meaningful cross-tenant proof is a read against another
-  // active tenant database. Schema grants are per database: `tenant` has no PUBLIC USAGE, and this
-  // script only grants it on the tenant it provisions.
-  const otherRows = (await control`
-    SELECT db_name, slug FROM tenants
-    WHERE state = 'active' AND db_name <> ${tenantDb}
-    ORDER BY db_name
-    LIMIT 1`) as { db_name: string; slug: string }[];
-  const otherTenant = otherRows[0];
-  if (otherTenant === undefined) {
-    checks.push(["another active tenant exists for the cross-tenant proof", false]);
-  } else {
-    const otherDb = identifier(otherTenant.db_name, "other tenant database");
-    let otherDenied = false;
-    let otherDetail = "";
-    try {
-      const other = new Bun.SQL(withDatabase(appParsed.toString(), otherDb));
-      try {
-        await other`SELECT count(*)::bigint FROM tenant.accounts`;
-      } catch (err) {
-        otherDetail = err instanceof Error ? err.message : String(err);
-        otherDenied =
-          otherDetail.includes("permission denied") || otherDetail.includes("42501");
-      }
-      await other.close();
-    } catch (err) {
-      otherDetail = err instanceof Error ? err.message : String(err);
-      otherDenied =
-        otherDetail.includes("permission denied") || otherDetail.includes("does not exist");
-    }
-    checks.push([
-      `the app role cannot read ${otherTenant.slug}'s data${
-        otherDenied ? "" : ` (${otherDetail})`
-      }`,
-      otherDenied,
-    ]);
-  }
-
+  // The login is deployment-wide: bootstrap grants it every tenant database, so "the role cannot
+  // read another tenant" is not a boundary here. The boundary is the org role (`SET LOCAL ROLE`)
+  // and the fact that a database it was not granted is unreachable; the probe below proves the
+  // latter.
   const probe = `monaca_role_probe_${process.pid}`;
   const maintenance = new Bun.SQL(withDatabase(adminUrl, "postgres"));
   await raw(maintenance, `DROP DATABASE IF EXISTS "${probe}"`);

@@ -173,10 +173,12 @@ org role so `SET LOCAL ROLE` works. `compose.dev.yml` points the server at
 
 The CI e2e job runs both refusals (superuser DSN, unprovisioned login) and requires the error to
 name the variable and the role. `scripts/verify-app-role.ts` remains the per-tenant proof: it
-provisions the role, shows DDL and direct org-schema reads are denied, shows another tenant and
-an unprovisioned database are unreachable, and starts a real server through the app pool to create
-and read an account. `MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1` is the explicit escape hatch for
-capacity benchmarks and throw-away environments; it is not a production default.
+provisions the role, shows DDL and direct org-schema reads are denied, shows an ungranted
+database is unreachable, and starts a real server through the app pool to create and read an
+account. The login is deployment-wide: bootstrap grants it every tenant, and the org role
+(`SET LOCAL ROLE`) is what separates tenants once a connection is open.
+`MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1` is the explicit escape hatch for capacity benchmarks and
+throw-away environments; it is not a production default.
 
 Existing deployments that predate this default need a `bootstrap` run (it is idempotent) to
 create the role and grants, then a restart. The first provisionment also revokes `CONNECT` from
