@@ -914,6 +914,12 @@
       "RevokedSessionsView": {
         "description": "`DELETE /v1/accounts/{id}/sessions`.",
         "properties": {
+          "refresh_revoked": {
+            "description": "How many live refresh tokens were revoked with them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "revoked": {
             "description": "How many sessions were revoked.",
             "format": "int64",
@@ -922,7 +928,8 @@
           }
         },
         "required": [
-          "revoked"
+          "revoked",
+          "refresh_revoked"
         ],
         "type": "object"
       },
@@ -2068,6 +2075,14 @@
       }
     },
     "/v1/accounts/{id}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Read, update or delete an account"
+      },
       "get": {
         "operationId": "get_account",
         "parameters": [

@@ -900,6 +900,72 @@ Known limits: the offline providers prove the wire shape, not a real Twilio/SMTP
 TLS is implemented with rustls/webpki but no live TLS relay was exercised in CI; SMS is a
 verification channel, not a sign-in identifier (accounts still identify by email/username).
 
+## Batch K — operator disposal and real session revocation
+
+### What was actually there before the batch
+
+The audit marked account suspension and session management as done, and the endpoints existed —
+but their effect stopped at the database row. `authorize_admin` verified the signature, `jti` and
+`monaca:admin`, then loaded the account only to check `is_tenant_admin`; a `disabled` operator's
+access token kept working on `/v1` until `exp`. `userinfo` checked the account state but not the
+session. `DELETE /v1/accounts/{id}/sessions/{session}` only set `sessions.revoked_at`: the
+refresh token had no link to its session, so the kicked browser could rotate a new access token.
+There was no administrative delete at all; the self-service mail-code flow was the only path.
+Step 23 asserted the cookie and refresh failures but never tried the already-issued access token.
+
+### Session binding
+
+`tenant_51` adds `refresh_tokens.session_id` (nullable, so rows issued before the migration keep
+their normal expiry) and a partial index on live rows. Authorization-code and refresh exchanges
+pass the session through `issue_refresh`, so every refresh token remembers the browser that
+created it. `AccessTokenClaims` gains an optional `sid` claim, absent on client-credentials and
+agent tokens.
+
+Three verifiers now consult it:
+
+* `/v1` — `authorize_admin` loads the account before the scope check, refuses a non-`active`
+  account and a revoked/expired `sid` session with `401 MONACA_UNAUTHORIZED`;
+* `userinfo` — the same account check it already had, plus the session check, as
+  `401 invalid_token`;
+* introspection — a dead account or session answers `active:false` for both access and refresh
+  tokens.
+
+The refresh exchange also re-checks the session, so a rotation racing a kick cannot mint. Suspension
+continues to revoke every session and refresh token; reactivation restores new sign-ins but the
+withdrawn tokens stay dead because their session rows remain revoked.
+
+### Administrative delete
+
+`DELETE /v1/accounts/{id}` has two deliberate steps. `?dry_run=true` reports the live session and
+refresh-token counts and the exact confirmation string; a real call requires
+`?confirm=<the account's email>`, and a missing or mismatched value is
+`400 MONACA_CONFIRMATION_REQUIRED`. Self-deletion and deleting the last active tenant
+administrator are refused. The confirmed call reuses the self-service store path: disable, revoke
+sessions and refresh tokens, drop the account's grants, agents and memberships per org, then delete
+the tenant row; audit rows are never removed, and `account.deleted` is appended with
+`self_service:false`, the operator's actor chain and the revocation counts. Both session handlers
+now revoke the matching refresh tokens too, so a kick ends renewal, and `DELETE …/sessions` reports
+`{"revoked":n,"refresh_revoked":n}`.
+
+### Verification
+
+Step 23 gained three checks: the pre-suspension access token is `401 MONACA_UNAUTHORIZED` on `/v1`
+and `401 invalid_token` on `userinfo`, and it stays refused after reactivation (12 checks total).
+Step 71 covers disposal (9 checks: dry-run counts, account kept, missing and mismatched
+confirmation, delete counts, `404`, dead access token, dead refresh token, audit still present).
+Step 72 covers kick-out (12 checks: two visible sessions, one `204` kick, exactly one browser
+dead, the other alive, both introspection answers, renewal refusal, revoke-all counts, both
+browsers dead, empty list). The run is **74 steps** (72 before the batch, plus two) with the same
+two gateway-only skips (4/4b). The OpenAPI document keeps 116 paths and gains one operation
+(162 total); `schema.gen.ts` is regenerated. CI numbers are reported with the batch summary.
+
+Known limits: the per-request account/session lookups mean `/v1`, `userinfo` and introspection now
+read the tenant database on every call (they already did for jti/account checks); no cache is
+introduced. Multi-instance behaviour is database-backed, so a kick applies to every instance
+immediately, but it was exercised on one server plus the two-process rate-limit steps, not on a
+separate multi-instance deployment. Tenant-chain audit remains readable only through
+`/internal/audit`; a management-API audit reader is still a gap.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

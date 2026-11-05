@@ -678,6 +678,9 @@ pub struct RefreshRow {
     pub family_id: Option<Uuid>,
     /// DPoP key thumbprint this refresh token is bound to, if any.
     pub dpop_jkt: Option<String>,
+    /// The SSO session that created the token; `None` for rows issued before tenant_51 or by a
+    /// flow with no session.
+    pub session_id: Option<Uuid>,
     /// The original authentication instant, for the refreshed id_token.
     pub auth_time: OffsetDateTime,
     /// Issuance time, reported by introspection as `iat`.
@@ -4539,6 +4542,78 @@ impl Store {
         .await?)
     }
 
+    /// Whether a session is still live. An access token carrying this session's `sid` is only
+    /// accepted while the answer is true.
+    pub async fn session_is_active(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let active: Option<(bool,)> = sqlx::query_as(
+            "SELECT true FROM tenant.sessions
+             WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(session_id)
+        .fetch_optional(&pool)
+        .await?;
+        Ok(active.is_some())
+    }
+
+    /// Revoke every refresh token issued by one session. A session kick must end renewal, not just
+    /// the SSO cookie.
+    pub async fn revoke_session_refresh_tokens(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+    ) -> Result<u64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.refresh_tokens SET revoked_at = now()
+             WHERE session_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(session_id)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Live sessions and active refresh tokens for the delete dry-run.
+    pub async fn account_token_counts(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<(i64, i64), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let sessions: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM tenant.sessions
+             WHERE account_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(account_id.uuid())
+        .fetch_one(&pool)
+        .await?;
+        let refresh: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM tenant.refresh_tokens
+             WHERE account_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(account_id.uuid())
+        .fetch_one(&pool)
+        .await?;
+        Ok((sessions.0, refresh.0))
+    }
+
+    /// How many active tenant administrators exist, so an operator cannot delete the last one.
+    pub async fn count_tenant_admins(&self, tenant: &TenantRow) -> Result<i64, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM tenant.accounts
+             WHERE is_tenant_admin AND state = 'active'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        Ok(row.0)
+    }
+
     /// Revoke one session. Returns whether a live session was actually revoked.
     pub async fn revoke_session(
         &self,
@@ -4830,6 +4905,7 @@ impl Store {
         rotated_from: Option<Uuid>,
         family_id: Uuid,
         dpop_jkt: Option<&str>,
+        session_id: Option<Uuid>,
         auth_time: OffsetDateTime,
         expires_at: OffsetDateTime,
     ) -> Result<Uuid, StoreError> {
@@ -4838,8 +4914,8 @@ impl Store {
         sqlx::query(
             "INSERT INTO tenant.refresh_tokens
                (id, token_hash, client_id, account_id, org_id, scope, resource, rotated_from,
-                family_id, dpop_jkt, auth_time, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                family_id, dpop_jkt, session_id, auth_time, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         )
         .bind(id)
         .bind(token_hash)
@@ -4851,6 +4927,7 @@ impl Store {
         .bind(rotated_from)
         .bind(family_id)
         .bind(dpop_jkt)
+        .bind(session_id)
         .bind(auth_time)
         .bind(expires_at)
         .execute(&pool)
@@ -4867,8 +4944,8 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, RefreshRow>(
             "SELECT id, token_hash, client_id, account_id, org_id, scope, resource,
-                    expires_at, revoked_at, rotated_from, family_id, dpop_jkt, auth_time,
-                    created_at
+                    expires_at, revoked_at, rotated_from, family_id, dpop_jkt, session_id,
+                    auth_time, created_at
              FROM tenant.refresh_tokens WHERE token_hash = $1",
         )
         .bind(token_hash)

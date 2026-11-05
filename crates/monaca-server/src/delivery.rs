@@ -34,7 +34,11 @@ pub const TOPIC_SMS: &str = "sms.verification";
 
 /// The topic a channel's mailer claims.
 pub fn topic_for(channel: &str) -> &'static str {
-    if channel == SMS { TOPIC_SMS } else { TOPIC_EMAIL }
+    if channel == SMS {
+        TOPIC_SMS
+    } else {
+        TOPIC_EMAIL
+    }
 }
 
 /// The longest one transport call may take.
@@ -50,9 +54,7 @@ pub async fn deliver(
     row: &OutboxMailRow,
 ) -> Result<String, String> {
     match (connector.channel.as_str(), connector.provider.as_str()) {
-        (EMAIL, "http") => {
-            deliver_email_http(state, tenant, connector, secret, row).await
-        }
+        (EMAIL, "http") => deliver_email_http(state, tenant, connector, secret, row).await,
         (EMAIL, "smtp") => deliver_smtp(connector, secret, &row.payload).await,
         (SMS, "http") => deliver_sms_http(state, tenant, connector, secret, row).await,
         (SMS, "twilio") => deliver_twilio(state, connector, secret, row).await,
@@ -61,7 +63,11 @@ pub async fn deliver(
 }
 
 /// The current HTTP email body: the rendered copy plus the row id for de-duplication.
-fn email_http_body(tenant: &TenantRow, connector: &DeliveryConnectorRow, row: &OutboxMailRow) -> Value {
+fn email_http_body(
+    tenant: &TenantRow,
+    connector: &DeliveryConnectorRow,
+    row: &OutboxMailRow,
+) -> Value {
     json!({
         "id": row.id.to_string(),
         "tenant": tenant.slug,
@@ -100,7 +106,11 @@ async fn deliver_email_http(
 
 /// The generic SMS gateway body. A real gateway can map these fields; tests point it at a local
 /// capture.
-fn sms_http_body(tenant: &TenantRow, connector: &DeliveryConnectorRow, row: &OutboxMailRow) -> Value {
+fn sms_http_body(
+    tenant: &TenantRow,
+    connector: &DeliveryConnectorRow,
+    row: &OutboxMailRow,
+) -> Value {
     json!({
         "id": row.id.to_string(),
         "tenant": tenant.slug,
@@ -265,9 +275,9 @@ async fn deliver_smtp(
         }
     };
     if let Some(secret) = secret {
-        let (user, password) = secret.split_once(':').ok_or_else(|| {
-            "the SMTP credential must be `username:password`".to_owned()
-        })?;
+        let (user, password) = secret
+            .split_once(':')
+            .ok_or_else(|| "the SMTP credential must be `username:password`".to_owned())?;
         builder = builder.credentials(Credentials::new(user.to_owned(), password.to_owned()));
     }
 

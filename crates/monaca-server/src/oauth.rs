@@ -104,6 +104,20 @@ pub async fn userinfo(
             "the account is not active",
         ));
     }
+    // A token minted by a session dies with that session: the console kick must invalidate the
+    // access token immediately, not wait for its `exp`.
+    if let Some(session_id) = claims
+        .get("sid")
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+        && !state.store.session_is_active(&tenant, session_id).await?
+    {
+        return Err(ApiError::bearer(
+            401,
+            "invalid_token",
+            "the session was revoked",
+        ));
+    }
 
     let body = UserInfoClaims {
         sub: account.account_id().to_typed_string(),
@@ -444,6 +458,11 @@ async fn introspect_refresh(
     if row.client_id != client.id || row.revoked_at.is_some() || row.expires_at <= state.now() {
         return Ok(Some(json!({ "active": false })));
     }
+    if let Some(session_id) = row.session_id
+        && !state.store.session_is_active(tenant, session_id).await?
+    {
+        return Ok(Some(json!({ "active": false })));
+    }
     Ok(Some(json!({
         "active": true,
         "token_type": "refresh_token",
@@ -470,6 +489,28 @@ async fn introspect_access(
     };
     if state.store.access_token_revoked(tenant, jti).await? {
         return Ok(Some(json!({ "active": false })));
+    }
+
+    // A self-contained token is only live while its account is active and the session that minted
+    // it is still live; introspection must say so, or a resource would trust a token the console
+    // already withdrew.
+    if let Some(account_id) = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .and_then(|raw| AccountId::parse(raw).ok())
+    {
+        let account = state.store.account_by_id(tenant, account_id).await?;
+        if account.is_none_or(|account| account.state != "active") {
+            return Ok(Some(json!({ "active": false })));
+        }
+        if let Some(session_id) = claims
+            .get("sid")
+            .and_then(Value::as_str)
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+            && !state.store.session_is_active(tenant, session_id).await?
+        {
+            return Ok(Some(json!({ "active": false })));
+        }
     }
 
     let token_type = if claims.get("cnf").is_some() {

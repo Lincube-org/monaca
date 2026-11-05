@@ -325,6 +325,8 @@ pub struct AccessTokenClaims {
     pub grant_id: Option<String>,
     /// `cnf`, the proof-of-possession binding (RFC 7800); `{"jkt": …}` for DPoP tokens.
     pub cnf: Option<Value>,
+    /// `sid`, the SSO session this token was issued from; absent on client-only tokens.
+    pub sid: Option<String>,
 }
 
 impl AccessTokenClaims {
@@ -349,6 +351,9 @@ impl AccessTokenClaims {
         }
         if let Some(cnf) = &self.cnf {
             value["cnf"] = cnf.clone();
+        }
+        if let Some(sid) = &self.sid {
+            value["sid"] = Value::String(sid.clone());
         }
         value
     }
@@ -606,12 +611,14 @@ mod tests {
             act: None,
             grant_id: None,
             cnf: None,
+            sid: None,
         };
         let value = claims.to_json();
         assert_eq!(value["scope"], json!(["tools:read"]));
         assert!(value.get("act").is_none());
         assert!(value.get("grant_id").is_none());
         assert!(value.get("cnf").is_none());
+        assert!(value.get("sid").is_none());
     }
 
     #[test]
@@ -629,8 +636,10 @@ mod tests {
             act: None,
             grant_id: None,
             cnf: Some(json!({ "jkt": "jkt" })),
+            sid: Some("ses_x".into()),
         };
         assert_eq!(claims.to_json()["cnf"], json!({ "jkt": "jkt" }));
+        assert_eq!(claims.to_json()["sid"], "ses_x");
     }
 
     #[test]

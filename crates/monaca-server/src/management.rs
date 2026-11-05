@@ -210,6 +210,45 @@ pub async fn authorize_admin(
             "an agent token may not call the management API",
         ));
     }
+
+    let sub = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+
+    // A user token is only usable while its account is active and the session that minted it is
+    // still live. A disable or a session kick must stop the old token from reaching `/v1`, not
+    // merely prevent the next sign-in.
+    let account = match AccountId::parse(&sub) {
+        Ok(account_id) => {
+            let account = state
+                .store
+                .account_by_id(&tenant, account_id)
+                .await?
+                .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the account is gone"))?;
+            if account.state != "active" {
+                return Err(ApiError::problem(
+                    kinds::UNAUTHORIZED,
+                    "the account is disabled",
+                ));
+            }
+            if let Some(session_id) = claims
+                .get("sid")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                && !state.store.session_is_active(&tenant, session_id).await?
+            {
+                return Err(ApiError::problem(
+                    kinds::UNAUTHORIZED,
+                    "the session was revoked",
+                ));
+            }
+            Some((account_id, account))
+        }
+        Err(_) => None,
+    };
+
     let scopes: Vec<String> = claims
         .get("scope")
         .and_then(Value::as_array)
@@ -228,19 +267,9 @@ pub async fn authorize_admin(
         ));
     }
 
-    let sub = claims
-        .get("sub")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
     // A user token must belong to an account that is still a tenant admin; `monaca:admin` is only
     // minted for one, but a demotion has to take effect before the token expires.
-    if let Ok(account_id) = AccountId::parse(sub) {
-        let account = state
-            .store
-            .account_by_id(&tenant, account_id)
-            .await?
-            .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the account is gone"))?;
+    if let Some((account_id, account)) = account {
         if !account.is_tenant_admin {
             return Err(ApiError::problem(
                 kinds::INSUFFICIENT_SCOPE,
@@ -253,7 +282,7 @@ pub async fn authorize_admin(
         return Ok((
             tenant,
             AdminPrincipal {
-                subject: sub.to_owned(),
+                subject: sub,
                 account_id: Some(account_id),
                 actor_uuid: account_id.uuid(),
             },
@@ -262,7 +291,7 @@ pub async fn authorize_admin(
 
     // The automation client (§6.2). Its scope was checked above and `monaca:admin` is only
     // registered on that seeded client, so the client id is the actor.
-    let client_id = monaca_types::ClientId::parse(sub).map_err(|_| {
+    let client_id = monaca_types::ClientId::parse(&sub).map_err(|_| {
         ApiError::problem(kinds::UNAUTHORIZED, "the token subject is not a principal")
     })?;
     let client = state
@@ -276,7 +305,7 @@ pub async fn authorize_admin(
     Ok((
         tenant,
         AdminPrincipal {
-            subject: sub.to_owned(),
+            subject: sub,
             account_id: None,
             actor_uuid: client.id,
         },
@@ -632,6 +661,148 @@ pub async fn update_account(
         &roles,
         username.as_deref(),
     )))
+}
+
+/// The query string of `DELETE /v1/accounts/{id}` (§6.2).
+///
+/// Deletion is permanent, so the endpoint has two deliberate steps: `?dry_run=true` reports what
+/// would be destroyed, and a real call must repeat the account's email in `?confirm=`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct DeleteAccountQuery {
+    /// Report the live sessions and refresh tokens without deleting anything.
+    pub dry_run: Option<bool>,
+    /// The account's email address, proving the destructive call is intentional.
+    pub confirm: Option<String>,
+}
+
+/// `DELETE /v1/accounts/{id}` — delete an account and everything that depends on it (§6.2).
+///
+/// The store disables the account and revokes its sessions and refresh tokens before removing the
+/// rows, so a partial failure leaves it unable to sign in. The tenant audit chain keeps the
+/// `account.deleted` event: history is not account data.
+#[utoipa::path(
+    delete,
+    path = "/v1/accounts/{id}",
+    tag = "management",
+    summary = "Delete an account",
+    params(
+        ("id" = String, Path, description = "The `acc_…` id."),
+        DeleteAccountQuery
+    ),
+    responses(
+        (status = 200, description = "The dry-run counts, or the deletion result."),
+        (status = 400, description = "The confirmation is missing or names another address."),
+        (status = 404, description = "No such account.")
+    )
+)]
+pub async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteAccountQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let account_id = parse_account(&id)?;
+    let account = state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
+
+    if admin.account_id == Some(account_id) {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "an administrator cannot delete their own account here",
+        ));
+    }
+
+    let (sessions, refresh_tokens) = state
+        .store
+        .account_token_counts(&tenant, account_id)
+        .await?;
+
+    if query.dry_run == Some(true) {
+        return Ok(Json(json!({
+            "dry_run": true,
+            "account_id": account.account_id().to_typed_string(),
+            "email": account.primary_email,
+            "state": account.state,
+            "sessions": sessions,
+            "refresh_tokens": refresh_tokens,
+            "confirmation": format!(
+                "repeat DELETE with ?confirm={}",
+                account.primary_email
+            ),
+        })));
+    }
+
+    let confirmed = query
+        .confirm
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(confirmed) = confirmed else {
+        return Err(ApiError::problem(
+            kinds::CONFIRMATION_REQUIRED,
+            format!(
+                "send ?dry_run=true first, then ?confirm={} to delete",
+                account.primary_email
+            ),
+        ));
+    };
+    if !confirmed.eq_ignore_ascii_case(&account.primary_email) {
+        return Err(ApiError::problem(
+            kinds::CONFIRMATION_REQUIRED,
+            "confirm must repeat the account's email address",
+        ));
+    }
+
+    // The last active administrator must stay: otherwise the tenant would have no one who can
+    // reach `/v1` any more.
+    if account.is_tenant_admin
+        && account.state == "active"
+        && state.store.count_tenant_admins(&tenant).await? <= 1
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the last active tenant administrator cannot be deleted",
+        ));
+    }
+
+    if !state.store.delete_account(&tenant, account_id).await? {
+        return Err(ApiError::not_found("account"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "account.deleted".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account.account_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "email": account.primary_email,
+            "self_service": false,
+            "sessions": sessions,
+            "refresh_tokens": refresh_tokens,
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append account.deleted audit event");
+    }
+
+    Ok(Json(json!({
+        "deleted": true,
+        "account_id": account.account_id().to_typed_string(),
+        "email": account.primary_email,
+        "sessions_revoked": sessions,
+        "refresh_tokens_revoked": refresh_tokens,
+    })))
 }
 
 /// The optional hosted-page branding in `PATCH /v1/sign-in-experience` (§6.2).
@@ -1707,6 +1878,12 @@ pub async fn revoke_account_session(
     if !state.store.revoke_session(&tenant, owned.id).await? {
         return Err(ApiError::not_found("session"));
     }
+    // A kick ends renewal too, not just the SSO cookie: every refresh token this session issued
+    // stops working immediately.
+    let refresh_revoked = state
+        .store
+        .revoke_session_refresh_tokens(&tenant, owned.id)
+        .await?;
 
     let event = AuditEvent {
         id: EventId::new(),
@@ -1720,7 +1897,7 @@ pub async fn revoke_account_session(
         decision: AuditDecision::Deny,
         grant_id: None,
         jti: None,
-        payload: json!({ "account_id": account_id.to_typed_string() }),
+        payload: json!({ "account_id": account_id.to_typed_string(), "refresh_revoked": refresh_revoked }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
         tracing::warn!(%err, "could not append session.revoked audit event");
@@ -1757,6 +1934,12 @@ pub async fn revoke_account_sessions(
         .store
         .revoke_account_sessions(&tenant, account_id)
         .await?;
+    // Ending sessions must end renewal as well; legacy tokens without a `session_id` are covered
+    // by the account-wide refresh revocation.
+    let refresh_revoked = state
+        .store
+        .revoke_account_refresh_tokens(&tenant, account_id)
+        .await?;
     let event = AuditEvent {
         id: EventId::new(),
         at: state.now(),
@@ -1769,12 +1952,15 @@ pub async fn revoke_account_sessions(
         decision: AuditDecision::Deny,
         grant_id: None,
         jti: None,
-        payload: json!({ "revoked": revoked }),
+        payload: json!({ "revoked": revoked, "refresh_revoked": refresh_revoked }),
     };
     if let Err(err) = state.audit_tenant(&tenant, &event).await {
         tracing::warn!(%err, "could not append session.revoked_all audit event");
     }
-    Ok(Json(crate::schemas::RevokedSessionsView { revoked }))
+    Ok(Json(crate::schemas::RevokedSessionsView {
+        revoked,
+        refresh_revoked,
+    }))
 }
 
 pub(crate) fn parse_account(raw: &str) -> Result<AccountId, ApiError> {

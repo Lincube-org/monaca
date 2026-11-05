@@ -115,6 +115,13 @@ pub mod kinds {
         "Password too short",
         400,
     );
+    /// A destructive request arrived without the confirmation the endpoint requires.
+    pub const CONFIRMATION_REQUIRED: ProblemKind = ProblemKind::new(
+        "confirmation_required",
+        "MONACA_CONFIRMATION_REQUIRED",
+        "Confirmation required",
+        400,
+    );
     /// The email code is unknown, expired, already used, or does not match.
     pub const INVALID_VERIFICATION_CODE: ProblemKind = ProblemKind::new(
         "invalid_verification_code",
@@ -524,6 +531,7 @@ mod tests {
             kinds::GRANT_REVOKED,
             kinds::ACCOUNT_EXISTS,
             kinds::WEAK_PASSWORD,
+            kinds::CONFIRMATION_REQUIRED,
             kinds::INVALID_VERIFICATION_CODE,
             kinds::TOO_MANY_ATTEMPTS,
             kinds::CAPTCHA_FAILED,

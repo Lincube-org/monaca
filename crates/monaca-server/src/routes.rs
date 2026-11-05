@@ -403,8 +403,8 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
     ("/v1/accounts", &["get", "post"], "List and create accounts"),
     (
         "/v1/accounts/{id}",
-        &["get", "patch"],
-        "Read and update an account",
+        &["get", "patch", "delete"],
+        "Read, update or delete an account",
     ),
     (
         "/v1/accounts/{id}/sessions",
@@ -901,7 +901,9 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/accounts/{id}",
-            get(crate::management::get_account).patch(crate::management::update_account),
+            get(crate::management::get_account)
+                .patch(crate::management::update_account)
+                .delete(crate::management::delete_account),
         )
         .route(
             "/v1/accounts/{id}/sessions",

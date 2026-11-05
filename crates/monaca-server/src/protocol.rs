@@ -3703,6 +3703,7 @@ async fn authorization_code_grant(
         act: None,
         grant_id: None,
         cnf: jkt.as_deref().map(binding),
+        sid: row.session_id.map(|id| id.to_string()),
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -3769,6 +3770,7 @@ async fn authorization_code_grant(
                 None,
                 Uuid::now_v7(),
                 jkt.clone(),
+                row.session_id,
                 row.auth_time,
             )
             .await?,
@@ -3844,6 +3846,17 @@ async fn refresh_grant(
         ));
     }
 
+    // A kicked session must end renewal, not just the SSO cookie: the refresh token remembers the
+    // session that created it, and a revoked session fails every rotation derived from it.
+    if let Some(session_id) = row.session_id
+        && !state.store.session_is_active(&tenant, session_id).await?
+    {
+        return Err(ApiError::token(
+            TokenErrorCode::InvalidGrant,
+            "session was revoked",
+        ));
+    }
+
     let scope = match request.scope {
         Some(requested) => {
             if !scope_subset(&requested, &row.scope) {
@@ -3879,6 +3892,7 @@ async fn refresh_grant(
         Some(row.id),
         family,
         jkt.clone(),
+        row.session_id,
         row.auth_time,
     )
     .await?;
@@ -3907,6 +3921,7 @@ async fn refresh_grant(
         act: None,
         grant_id: None,
         cnf: jkt.as_deref().map(binding),
+        sid: row.session_id.map(|id| id.to_string()),
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -4019,6 +4034,7 @@ async fn client_credentials_grant(
         act: None,
         grant_id: None,
         cnf: jkt.as_deref().map(binding),
+        sid: None,
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -4180,6 +4196,7 @@ async fn agent_token(
         act: Some(json!({ "sub": agent_id.to_typed_string() })),
         grant_id: Some(grant_id.to_typed_string()),
         cnf: None,
+        sid: None,
     };
     let access_token = key
         .sign("at+jwt", &claims.to_json())
@@ -4227,6 +4244,7 @@ async fn issue_refresh(
     rotated_from: Option<Uuid>,
     family_id: Uuid,
     dpop_jkt: Option<String>,
+    session_id: Option<Uuid>,
     auth_time: OffsetDateTime,
 ) -> Result<String, ApiError> {
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -4251,6 +4269,7 @@ async fn issue_refresh(
             rotated_from,
             family_id,
             dpop_jkt.as_deref(),
+            session_id,
             auth_time,
             state.now() + Duration::seconds(refresh_ttl_secs as i64),
         )

@@ -281,4 +281,6 @@ pub struct SessionList {
 pub struct RevokedSessionsView {
     /// How many sessions were revoked.
     pub revoked: u64,
+    /// How many live refresh tokens were revoked with them.
+    pub refresh_revoked: u64,
 }

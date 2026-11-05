@@ -2309,7 +2309,25 @@ export interface paths {
         get: operations["get_account"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** Read, update or delete an account */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description See docs/contracts/m0.md for the body. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
         options?: never;
         head?: never;
         /**
@@ -4692,6 +4710,11 @@ export interface components {
         };
         /** @description `DELETE /v1/accounts/{id}/sessions`. */
         RevokedSessionsView: {
+            /**
+             * Format: int64
+             * @description How many live refresh tokens were revoked with them.
+             */
+            refresh_revoked: number;
             /**
              * Format: int64
              * @description How many sessions were revoked.

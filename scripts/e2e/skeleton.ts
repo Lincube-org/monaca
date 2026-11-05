@@ -235,8 +235,9 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
     assertion:
       "GET /v1/accounts?query=… finds an account by a substring of its email; " +
       "PATCH /v1/accounts/{id} {state:disabled} suspends it — the password is 401, the previously " +
-      "issued session cookie is 401 and the refresh token is 400 invalid_grant — and {state:active} " +
-      "restores sign-in; an invalid state is 400 and an unknown account is 404",
+      "issued session cookie is 401, the previous access token is 401 on /v1 and userinfo, and the " +
+      "refresh token is 400 invalid_grant — and {state:active} restores sign-in without resurrecting " +
+      "the withdrawn token; an invalid state is 400 and an unknown account is 404",
   },
   {
     step: "24",
@@ -708,6 +709,25 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "en sign_up row is removed a sign-up request fails 500 MONACA_TEMPLATE_MISSING naming `sign_up` " +
       "and `en`, the metric records it, and restoring the built-in row makes the same request succeed",
   },
+  {
+    step: "71",
+    title: "administrative disposal",
+    assertion:
+      "DELETE /v1/accounts/{id}?dry_run=true reports the live sessions and refresh tokens and deletes " +
+      "nothing; a delete without `confirm` or with another address is 400 MONACA_CONFIRMATION_REQUIRED; " +
+      "`confirm=<email>` deletes the account, its access token is 401 on userinfo, its refresh token is " +
+      "400 invalid_grant, the account is 404, and the tenant audit chain still holds account.deleted " +
+      "with the operator as actor",
+  },
+  {
+    step: "72",
+    title: "session kick-out",
+    assertion:
+      "two console sign-ins appear as two `ses_…` sessions; DELETE one answers 204, exactly that browser's " +
+      "access token is 401 on userinfo while the other still works, introspection reports the kicked " +
+      "access and refresh tokens inactive, its refresh token is 400 invalid_grant, and DELETE all ends " +
+      "the remaining browser and empties the list",
+  },
 ];
 
 interface StepResult {
@@ -895,6 +915,75 @@ function jwtClaims(token: unknown): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** A console sign-in's outcome: the browser cookie and the tokens the code exchange minted. */
+interface ConsoleSignIn {
+  cookie?: string;
+  accessToken: string;
+  refreshToken: string;
+}
+
+/**
+ * Sign a password account in through the hosted page and exchange the code.
+ *
+ * Each call starts a new interaction, so two calls model two independent browsers even when they
+ * name the same account. A failure is returned rather than thrown so the calling step can report
+ * the exact leg that broke.
+ */
+async function consoleSignIn(
+  base: string,
+  email: string,
+  password: string,
+  consoleSecret: string,
+  tag: string,
+): Promise<{ session?: ConsoleSignIn; error?: string }> {
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const verifier = `e-${tag}-${Date.now().toString(36)}-${"w".repeat(32)}`;
+  const challenge = base64Url(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+  );
+  const authorize = await call(
+    `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: redirectUri,
+      scope: "openid profile email offline_access",
+      state: `st-${tag}`,
+      nonce: `n-${tag}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+      resource: `${base}/v1`,
+    })}`,
+    { redirect: "manual" },
+  );
+  const interaction = new URL(authorize.headers.get("location") ?? "", base).searchParams.get("interaction");
+  if (authorize.status !== 302 || interaction === null) {
+    return { error: `authorize(${tag}) → ${authorize.status} ${text(authorize.body)}` };
+  }
+  const signIn = await call(`${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-in`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ identifier: email, password }),
+  });
+  const redirectTo = (signIn.body as { redirect_to?: unknown })?.redirect_to;
+  if (signIn.status !== 200 || typeof redirectTo !== "string") {
+    return { error: `sign-in(${tag}) → ${signIn.status} ${text(signIn.body)}` };
+  }
+  const cookie = /monaca_session=([0-9a-f-]{36})/.exec(signIn.headers.get("set-cookie") ?? "")?.[1];
+  const code = new URL(redirectTo).searchParams.get("code") ?? "";
+  const token = await tokenCall(
+    base,
+    { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: verifier },
+    btoa(`monaca-console:${consoleSecret}`),
+  );
+  const accessToken = (token.body as { access_token?: unknown })?.access_token;
+  const refreshToken = (token.body as { refresh_token?: unknown })?.refresh_token;
+  if (token.status !== 200 || typeof accessToken !== "string" || typeof refreshToken !== "string") {
+    return { error: `token(${tag}) → ${token.status} ${text(token.body)}` };
+  }
+  return { session: { cookie, accessToken, refreshToken } };
 }
 
 function text(body: unknown, max = 160): string {
@@ -4975,6 +5064,9 @@ async function userManagementFlow(
       code_challenge: challenge,
       code_challenge_method: "S256",
       organization: ORG,
+      // The management audience is what makes the /v1 state and session checks observable; with
+      // the default audience the token is refused for the wrong reason (audience mismatch).
+      resource: `${base}/v1`,
     })}`;
     const response = await call(url, { redirect: "manual" });
     const interaction = new URL(response.headers.get("location") ?? "", base).searchParams.get("interaction");
@@ -4985,10 +5077,10 @@ async function userManagementFlow(
     return { interaction: encodeURIComponent(interaction), verifier };
   };
 
-  /** Sign in and exchange the code, returning the cookie and refresh token it issued. */
+  /** Sign in and exchange the code, returning the cookie, access token and refresh token it issued. */
   const signIn = async (
     tag: string,
-  ): Promise<{ cookie?: string; refreshToken?: string } | undefined> => {
+  ): Promise<{ cookie?: string; accessToken?: string; refreshToken?: string } | undefined> => {
     const started = await begin(tag);
     if (started === undefined) return undefined;
     const response = await call(`${base}/t/${TENANT}/interaction/${started.interaction}/sign-in`, {
@@ -5008,12 +5100,13 @@ async function userManagementFlow(
       { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: "monaca-console", code_verifier: started.verifier },
       basic,
     );
+    const accessToken = (token.body as { access_token?: unknown })?.access_token;
     const refreshToken = (token.body as { refresh_token?: unknown })?.refresh_token;
-    if (token.status !== 200 || typeof refreshToken !== "string") {
+    if (token.status !== 200 || typeof refreshToken !== "string" || typeof accessToken !== "string") {
       detail = `token(${tag}) → ${token.status} ${text(token.body)}`;
       return undefined;
     }
-    return { cookie, refreshToken };
+    return { cookie, accessToken, refreshToken };
   };
 
   try {
@@ -5093,6 +5186,26 @@ async function userManagementFlow(
       renewed.status === 400 && (renewed.body as { error?: unknown })?.error === "invalid_grant",
     ]);
 
+    // --- the already-issued access token stops reaching /v1 and userinfo -------------------------
+    const managementProbe = await call(`${base}/v1/accounts?limit=1`, {
+      headers: managementHeaders(live.accessToken ?? ""),
+    });
+    checks.push([
+      "the previous access token cannot call /v1 after suspension",
+      managementProbe.status === 401 &&
+        (managementProbe.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_UNAUTHORIZED" &&
+        String((managementProbe.body as { detail?: unknown })?.detail ?? "").includes("disabled"),
+    ]);
+
+    const userinfoProbe = await call(`${base}/t/${TENANT}/oauth2/userinfo`, {
+      headers: { authorization: `Bearer ${live.accessToken}` },
+    });
+    checks.push([
+      "the previous access token is refused by userinfo",
+      userinfoProbe.status === 401 && (userinfoProbe.body as { error?: unknown })?.error === "invalid_token",
+    ]);
+
     // --- reactivation restores sign-in ---------------------------------------------------------
     const restored = await call(`${base}/v1/accounts/${accountId}`, {
       method: "PATCH",
@@ -5106,6 +5219,17 @@ async function userManagementFlow(
 
     const after = await signIn("after");
     checks.push(["the reactivated account signs in again", after !== undefined]);
+
+    // The suspension revoked the old session, so its token stays dead even now that the account is
+    // active again; reactivation must not resurrect what an operator withdrew.
+    const resurrected = await call(`${base}/v1/accounts?limit=1`, {
+      headers: managementHeaders(live.accessToken ?? ""),
+    });
+    checks.push([
+      "reactivation does not resurrect the withdrawn token",
+      resurrected.status === 401 &&
+        (resurrected.body as { monaca_error_code?: unknown })?.monaca_error_code === "MONACA_UNAUTHORIZED",
+    ]);
 
     // --- bad input -----------------------------------------------------------------------------
     const invalid = await call(`${base}/v1/accounts/${accountId}`, {
@@ -5133,7 +5257,354 @@ async function userManagementFlow(
     status: ok ? "pass" : "fail",
     ms: Math.round(performance.now() - t),
     detail: ok
-      ? `${checks.length} checks: search → suspend → password 401 → session 401 → refresh invalid → reactivate → sign-in → 400 → 404`
+      ? `${checks.length} checks: search → suspend → password 401 → session 401 → /v1 401 → userinfo 401 → refresh invalid → reactivate → sign-in → withdrawn token stays 401 → 400 → 404`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 71 — administrative disposal (§6.2).
+ *
+ * Deleting an account is destructive, so the endpoint must first report what would go (`dry_run`)
+ * and then demand the account's email back. The real effects are asserted from the outside: the
+ * deleted account's access and refresh tokens must stop working, and the tenant audit chain must
+ * still name the deletion after the account row is gone.
+ */
+async function administrativeDisposalFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+  internalSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const email = `dispose-${runId}@demo.localhost`;
+  const password = `pw-${runId}-dispose`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "71",
+    title: "administrative disposal",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  const errorCode = (body: unknown): unknown => (body as { monaca_error_code?: unknown })?.monaca_error_code;
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Disposable User", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const signedIn = await consoleSignIn(base, email, password, consoleSecret, "dispose");
+    if (signedIn.session === undefined) return fail(signedIn.error ?? "sign-in failed");
+    const live = signedIn.session;
+
+    const dryRun = await call(`${base}/v1/accounts/${accountId}?dry_run=true`, {
+      method: "DELETE",
+      headers,
+    });
+    const dry = dryRun.body as {
+      dry_run?: unknown;
+      email?: unknown;
+      sessions?: unknown;
+      refresh_tokens?: unknown;
+    };
+    checks.push([
+      "dry_run reports the account, sessions and refresh tokens",
+      dryRun.status === 200 &&
+        dry.dry_run === true &&
+        dry.email === email &&
+        Number(dry.sessions) >= 1 &&
+        Number(dry.refresh_tokens) >= 1,
+    ]);
+
+    const afterDryRun = await call(`${base}/v1/accounts/${accountId}`, { headers });
+    checks.push(["dry_run leaves the account in place", afterDryRun.status === 200]);
+
+    const unconfirmed = await call(`${base}/v1/accounts/${accountId}`, { method: "DELETE", headers });
+    checks.push([
+      "deleting without confirm is 400 MONACA_CONFIRMATION_REQUIRED",
+      unconfirmed.status === 400 && errorCode(unconfirmed.body) === "MONACA_CONFIRMATION_REQUIRED",
+    ]);
+
+    const mismatched = await call(
+      `${base}/v1/accounts/${accountId}?confirm=${encodeURIComponent("someone-else@demo.localhost")}`,
+      { method: "DELETE", headers },
+    );
+    checks.push([
+      "a confirm naming another address is refused",
+      mismatched.status === 400 && errorCode(mismatched.body) === "MONACA_CONFIRMATION_REQUIRED",
+    ]);
+
+    const deleted = await call(`${base}/v1/accounts/${accountId}?confirm=${encodeURIComponent(email)}`, {
+      method: "DELETE",
+      headers,
+    });
+    const result = deleted.body as {
+      deleted?: unknown;
+      sessions_revoked?: unknown;
+      refresh_tokens_revoked?: unknown;
+    };
+    checks.push([
+      "the confirmed delete removes the account and reports what it revoked",
+      deleted.status === 200 &&
+        result.deleted === true &&
+        Number(result.sessions_revoked) >= 1 &&
+        Number(result.refresh_tokens_revoked) >= 1,
+    ]);
+
+    const gone = await call(`${base}/v1/accounts/${accountId}`, { headers });
+    checks.push(["the deleted account is 404", gone.status === 404]);
+
+    const userinfo = await call(`${base}/t/${TENANT}/oauth2/userinfo`, {
+      headers: { authorization: `Bearer ${live.accessToken}` },
+    });
+    checks.push([
+      "the deleted account's access token is refused",
+      userinfo.status === 401 && (userinfo.body as { error?: unknown })?.error === "invalid_token",
+    ]);
+
+    const renewed = await tokenCall(
+      base,
+      { grant_type: "refresh_token", refresh_token: live.refreshToken },
+      basic,
+    );
+    checks.push([
+      "the deleted account's refresh token is refused",
+      renewed.status === 400 && (renewed.body as { error?: unknown })?.error === "invalid_grant",
+    ]);
+
+    // The account row is gone, but the audit chain is history and must keep the event.
+    const audit = await call(
+      `${base}/internal/audit?${new URLSearchParams({ tenant: TENANT, action: "account.deleted", limit: "200" })}`,
+      { headers: { "x-monaca-internal-secret": internalSecret } },
+    );
+    const events =
+      (
+        audit.body as
+          | {
+              items?: {
+                payload?: { email?: unknown; self_service?: unknown };
+                actor_chain?: unknown[];
+              }[];
+            }
+          | undefined
+      )?.items ?? [];
+    const match = events.find((event) => event.payload?.email === email);
+    checks.push([
+      "the deletion survives in the tenant audit chain with its actor",
+      audit.status === 200 &&
+        match !== undefined &&
+        match.payload?.self_service === false &&
+        Array.isArray(match.actor_chain) &&
+        match.actor_chain.length >= 1,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "71",
+    title: "administrative disposal",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: dry-run counts → account kept → confirm required → mismatch refused → delete → 404 → access 401 → refresh invalid → audit survives`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 72 — session visibility and kick-out (§6.2).
+ *
+ * Two browsers sign into one account. Revoking one session must kill exactly that browser's
+ * access token and renewal, leaving the other untouched; revoking all must end both and empty the
+ * list. Introspection is the resource-server view, so it is asserted too.
+ */
+async function sessionKickFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const basic = btoa(`monaca-console:${consoleSecret}`);
+  const headers = managementHeaders(adminToken);
+  const email = `kick-${runId}@demo.localhost`;
+  const password = `pw-${runId}-kick`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "72",
+    title: "session kick-out",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  const userinfo = (token: string): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/oauth2/userinfo`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  const introspect = (token: string, hint: "access_token" | "refresh_token"): Promise<HttpResult> =>
+    call(`${base}/t/${TENANT}/oauth2/introspect`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${basic}`,
+      },
+      body: new URLSearchParams({ token, token_type_hint: hint }).toString(),
+    });
+
+  try {
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Kick Target", password }),
+    });
+    const accountId = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof accountId !== "string") {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const first = await consoleSignIn(base, email, password, consoleSecret, "kick-a");
+    if (first.session === undefined) return fail(first.error ?? "the first sign-in failed");
+    // Distinct insertion times let the session list order the two browsers deterministically.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const second = await consoleSignIn(base, email, password, consoleSecret, "kick-b");
+    if (second.session === undefined) return fail(second.error ?? "the second sign-in failed");
+
+    const listed = await call(`${base}/v1/accounts/${accountId}/sessions`, { headers });
+    const sessions =
+      (listed.body as { items?: { id?: unknown }[] } | undefined)?.items ?? [];
+    checks.push([
+      "both browsers are visible on the account",
+      listed.status === 200 &&
+        sessions.length === 2 &&
+        sessions.every((row) => String(row.id).startsWith("ses_")),
+    ]);
+    const target = sessions[0]?.id;
+    if (typeof target !== "string") return fail(`session list → ${listed.status} ${text(listed.body)}`);
+
+    const kicked = await call(`${base}/v1/accounts/${accountId}/sessions/${target}`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push(["deleting one session answers 204", kicked.status === 204]);
+
+    const firstProbe = await userinfo(first.session.accessToken);
+    const secondProbe = await userinfo(second.session.accessToken);
+    checks.push([
+      "the kick ends exactly one browser",
+      (firstProbe.status === 401) !== (secondProbe.status === 401),
+    ]);
+    const dead = secondProbe.status === 401 ? second.session : first.session;
+    const alive = secondProbe.status === 401 ? first.session : second.session;
+    const aliveProbeInitial = secondProbe.status === 401 ? firstProbe : secondProbe;
+    checks.push([
+      "the untouched browser keeps working",
+      aliveProbeInitial.status === 200 &&
+        typeof (aliveProbeInitial.body as { sub?: unknown })?.sub === "string",
+    ]);
+
+    const deadIntrospection = await introspect(dead.accessToken, "access_token");
+    checks.push([
+      "introspection reports the kicked access token inactive",
+      deadIntrospection.status === 200 &&
+        (deadIntrospection.body as { active?: unknown })?.active === false,
+    ]);
+
+    const deadRenewal = await tokenCall(
+      base,
+      { grant_type: "refresh_token", refresh_token: dead.refreshToken },
+      basic,
+    );
+    checks.push([
+      "the kicked session's refresh token is refused",
+      deadRenewal.status === 400 && (deadRenewal.body as { error?: unknown })?.error === "invalid_grant",
+    ]);
+
+    const deadRefreshIntrospection = await introspect(dead.refreshToken, "refresh_token");
+    checks.push([
+      "introspection reports the kicked refresh token inactive",
+      deadRefreshIntrospection.status === 200 &&
+        (deadRefreshIntrospection.body as { active?: unknown })?.active === false,
+    ]);
+
+    const aliveRefreshIntrospection = await introspect(alive.refreshToken, "refresh_token");
+    checks.push([
+      "the untouched refresh token is still active",
+      aliveRefreshIntrospection.status === 200 &&
+        (aliveRefreshIntrospection.body as { active?: unknown })?.active === true,
+    ]);
+
+    const revokedAll = await call(`${base}/v1/accounts/${accountId}/sessions`, {
+      method: "DELETE",
+      headers,
+    });
+    const counts = revokedAll.body as { revoked?: unknown; refresh_revoked?: unknown };
+    checks.push([
+      "revoke-all ends the remaining session and its renewal",
+      revokedAll.status === 200 && Number(counts.revoked) >= 1 && Number(counts.refresh_revoked) >= 1,
+    ]);
+
+    const aliveProbe = await userinfo(alive.accessToken);
+    checks.push([
+      "the remaining access token is refused after revoke-all",
+      aliveProbe.status === 401 && (aliveProbe.body as { error?: unknown })?.error === "invalid_token",
+    ]);
+
+    const aliveRenewal = await tokenCall(
+      base,
+      { grant_type: "refresh_token", refresh_token: alive.refreshToken },
+      basic,
+    );
+    checks.push([
+      "the remaining refresh token is refused after revoke-all",
+      aliveRenewal.status === 400 && (aliveRenewal.body as { error?: unknown })?.error === "invalid_grant",
+    ]);
+
+    const remaining = await call(`${base}/v1/accounts/${accountId}/sessions`, { headers });
+    checks.push([
+      "no live session remains listed",
+      remaining.status === 200 &&
+        ((remaining.body as { items?: unknown[] } | undefined)?.items ?? []).length === 0,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "72",
+    title: "session kick-out",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: two sessions listed → one kick 204 → exactly one browser dead → other alive → introspection inactive → renewal refused → revoke-all → both dead → list empty`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -15549,6 +16020,8 @@ async function main(): Promise<number> {
   push(await smsVerificationFlow(base, adminToken));
   push(await smtpDeliveryFlow(base, adminToken));
   push(await templateFallbackFlow(base, adminToken));
+  push(await administrativeDisposalFlow(base, adminToken, parsed.consoleSecret, parsed.internalSecret));
+  push(await sessionKickFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;
