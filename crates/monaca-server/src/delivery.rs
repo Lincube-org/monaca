@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use monaca_store::{DeliveryConnectorRow, OutboxMailRow, TenantRow};
 use serde_json::{Value, json};
@@ -255,9 +256,13 @@ async fn deliver_smtp(
         SmtpMode::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
             .map_err(|err| format!("SMTP STARTTLS configuration: {err}"))?
             .port(port),
-        SmtpMode::ImplicitTls => AsyncSmtpTransport::<Tokio1Executor>::smtps_relay(&host)
-            .map_err(|err| format!("SMTP TLS configuration: {err}"))?
-            .port(port),
+        SmtpMode::ImplicitTls => {
+            let tls = TlsParameters::new(host.clone())
+                .map_err(|err| format!("SMTP TLS parameters: {err}"))?;
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&host)
+                .tls(Tls::Wrapper(tls))
+                .port(port)
+        }
     };
     if let Some(secret) = secret {
         let (user, password) = secret.split_once(':').ok_or_else(|| {

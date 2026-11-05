@@ -252,20 +252,18 @@ pub async fn update_account(
             if raw.trim().is_empty() {
                 Ok(None)
             } else {
-                crate::copy::normalise_language(raw).map(Some).ok_or_else(|| {
-                    ApiError::problem(
-                        kinds::INVALID_REQUEST,
-                        "locale must be a BCP 47 language tag or empty",
-                    )
-                })
+                crate::copy::normalise_language(raw)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        ApiError::problem(
+                            kinds::INVALID_REQUEST,
+                            "locale must be a BCP 47 language tag or empty",
+                        )
+                    })
             }
         })
         .transpose()?;
-    if display_name.is_none()
-        && username.is_none()
-        && avatar_url.is_none()
-        && locale.is_none()
-    {
+    if display_name.is_none() && username.is_none() && avatar_url.is_none() && locale.is_none() {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "nothing to update; send `display_name`, `username`, `avatar_url` and/or `locale`",
@@ -385,7 +383,14 @@ pub async fn verify_email_change(
         .update_primary_email(&tenant, account.account_id(), &email)
         .await?;
     // The previous owner of the address is told the address no longer belongs to this account.
-    notify(&state, &tenant, account.account_id(), &previous, "email_changed").await?;
+    notify(
+        &state,
+        &tenant,
+        account.account_id(),
+        &previous,
+        "email_changed",
+    )
+    .await?;
     Ok(Json(profile_json(&state, &tenant, &account).await?))
 }
 

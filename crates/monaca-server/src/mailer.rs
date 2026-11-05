@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use monaca_store::{DeliveryConnectorRow, OutboxMailRow, TenantRow};
+use monaca_store::{DeliveryConnectorRow, TenantRow};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
@@ -158,19 +158,23 @@ async fn deliver_channel(
             break;
         };
         if row.attempts > 1 {
-            state.metrics.record_delivery_retry(if connector.channel == delivery::SMS {
-                "sms"
-            } else {
-                "email"
-            });
-        }
-        match delivery::deliver(state, tenant, connector, secret, &row).await {
-            Ok(status) => {
-                state.metrics.record_delivery_sent(if connector.channel == delivery::SMS {
+            state
+                .metrics
+                .record_delivery_retry(if connector.channel == delivery::SMS {
                     "sms"
                 } else {
                     "email"
                 });
+        }
+        match delivery::deliver(state, tenant, connector, secret, &row).await {
+            Ok(status) => {
+                state
+                    .metrics
+                    .record_delivery_sent(if connector.channel == delivery::SMS {
+                        "sms"
+                    } else {
+                        "email"
+                    });
                 match state
                     .mailer_store
                     .outbox_mark_published(tenant, row.id)
@@ -202,11 +206,13 @@ async fn deliver_channel(
                 }
             }
             Err(err) => {
-                state.metrics.record_delivery_failed(if connector.channel == delivery::SMS {
-                    "sms"
-                } else {
-                    "email"
-                });
+                state
+                    .metrics
+                    .record_delivery_failed(if connector.channel == delivery::SMS {
+                        "sms"
+                    } else {
+                        "email"
+                    });
                 tracing::warn!(
                     tenant = %tenant.slug,
                     channel = %connector.channel,
@@ -258,9 +264,6 @@ mod tests {
             updated_at: OffsetDateTime::now_utc(),
         };
         assert_eq!(super::delivery::topic_for(&row.channel), "sms.verification");
-        assert_eq!(
-            super::delivery::topic_for("email"),
-            "mail.verification"
-        );
+        assert_eq!(super::delivery::topic_for("email"), "mail.verification");
     }
 }

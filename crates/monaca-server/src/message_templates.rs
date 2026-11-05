@@ -43,23 +43,75 @@ const INVITE_VARIABLES: &[&str] = &["tenant", "org"];
 
 /// Every purpose the outbox can deliver, in console order.
 pub(crate) const PURPOSES: &[MessagePurpose] = &[
-    MessagePurpose { name: "sign_up", channel: "email", variables: CODE_VARIABLES },
-    MessagePurpose { name: "sign_in", channel: "email", variables: CODE_VARIABLES },
-    MessagePurpose { name: "password_reset", channel: "email", variables: CODE_VARIABLES },
-    MessagePurpose { name: "email_change", channel: "email", variables: CODE_VARIABLES },
-    MessagePurpose { name: "delete_account", channel: "email", variables: CODE_VARIABLES },
-    MessagePurpose { name: "sign_in_link", channel: "email", variables: LINK_VARIABLES },
-    MessagePurpose { name: "email_changed", channel: "email", variables: NOTICE_VARIABLES },
-    MessagePurpose { name: "password_changed", channel: "email", variables: NOTICE_VARIABLES },
-    MessagePurpose { name: "account_deleted", channel: "email", variables: NOTICE_VARIABLES },
-    MessagePurpose { name: "invitation", channel: "email", variables: INVITE_VARIABLES },
-    MessagePurpose { name: "sms_verification", channel: "sms", variables: CODE_VARIABLES },
+    MessagePurpose {
+        name: "sign_up",
+        channel: "email",
+        variables: CODE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "sign_in",
+        channel: "email",
+        variables: CODE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "password_reset",
+        channel: "email",
+        variables: CODE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "email_change",
+        channel: "email",
+        variables: CODE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "delete_account",
+        channel: "email",
+        variables: CODE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "sign_in_link",
+        channel: "email",
+        variables: LINK_VARIABLES,
+    },
+    MessagePurpose {
+        name: "email_changed",
+        channel: "email",
+        variables: NOTICE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "password_changed",
+        channel: "email",
+        variables: NOTICE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "account_deleted",
+        channel: "email",
+        variables: NOTICE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "invitation",
+        channel: "email",
+        variables: INVITE_VARIABLES,
+    },
+    MessagePurpose {
+        name: "sms_verification",
+        channel: "sms",
+        variables: CODE_VARIABLES,
+    },
 ];
 
 /// The purposes the legacy `/v1/email-templates` surface has always listed.
-const LEGACY_PURPOSES: &[&str] =
-    &["sign_up", "sign_in", "password_reset", "email_change", "delete_account", "sign_in_link",
-      "email_changed", "password_changed", "account_deleted"];
+const LEGACY_PURPOSES: &[&str] = &[
+    "sign_up",
+    "sign_in",
+    "password_reset",
+    "email_change",
+    "delete_account",
+    "sign_in_link",
+    "email_changed",
+    "password_changed",
+    "account_deleted",
+];
 
 /// The spec for a purpose, or `None` for a name the server never sends.
 pub(crate) fn purpose(name: &str) -> Option<&'static MessagePurpose> {
@@ -131,21 +183,22 @@ pub(crate) async fn message_copy(
     user_locale: Option<&str>,
     values: &[(&str, &str)],
 ) -> Result<(String, String), ApiError> {
-    let spec = purpose(purpose_name).ok_or_else(|| {
-        state.metrics.record_template_missing(purpose_name, "unknown");
+    purpose(purpose_name).ok_or_else(|| {
+        state
+            .metrics
+            .record_template_missing(purpose_name, "unknown");
         ApiError::problem(
             kinds::TEMPLATE_MISSING,
             format!("template `{purpose_name}` is not a known purpose"),
         )
     })?;
 
-    let tenant_default = state
-        .store
-        .sign_in_experience(tenant)
-        .await?
-        .language;
+    let tenant_default = state.store.sign_in_experience(tenant).await?.language;
     let chain = locale_chain(user_locale, &tenant_default);
-    let requested = chain.first().cloned().unwrap_or_else(|| FALLBACK_LOCALE.to_owned());
+    let requested = chain
+        .first()
+        .cloned()
+        .unwrap_or_else(|| FALLBACK_LOCALE.to_owned());
 
     for locale in &chain {
         if let Some(row) = state
@@ -274,10 +327,26 @@ pub async fn update_email_template(
 
     let row = state
         .store
-        .upsert_message_template_override(&tenant, spec.name, "en", spec.channel, subject, mail_body)
+        .upsert_message_template_override(
+            &tenant,
+            spec.name,
+            "en",
+            spec.channel,
+            subject,
+            mail_body,
+        )
         .await?;
-    audit_template(&state, &tenant, &admin, "email_template.updated", spec.name, "en", subject, mail_body)
-        .await;
+    audit_template(
+        &state,
+        &tenant,
+        &admin,
+        "email_template.updated",
+        spec.name,
+        "en",
+        subject,
+        mail_body,
+    )
+    .await;
     Ok(Json(effective_json(spec, "en", &row, true)))
 }
 
@@ -299,8 +368,17 @@ pub async fn reset_email_template(
         .delete_message_template_override(&tenant, &purpose_name, "en")
         .await?
     {
-        audit_template(&state, &tenant, &admin, "email_template.reset", &purpose_name, "en", "", "")
-            .await;
+        audit_template(
+            &state,
+            &tenant,
+            &admin,
+            "email_template.reset",
+            &purpose_name,
+            "en",
+            "",
+            "",
+        )
+        .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -364,21 +442,41 @@ pub async fn update_message_template(
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let spec = purpose(&purpose_name).ok_or_else(|| {
-        ApiError::problem(kinds::NOT_FOUND, format!("unknown message purpose {purpose_name:?}"))
+        ApiError::problem(
+            kinds::NOT_FOUND,
+            format!("unknown message purpose {purpose_name:?}"),
+        )
     })?;
     let locale = normalise_language(&locale).ok_or_else(|| {
-        ApiError::problem(kinds::INVALID_REQUEST, "locale must be a BCP 47 language tag")
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "locale must be a BCP 47 language tag",
+        )
     })?;
     let (subject, mail_body) = checked_copy(spec, &body.subject, &body.body)?;
 
     let row = state
         .store
         .upsert_message_template_override(
-            &tenant, spec.name, &locale, spec.channel, subject, mail_body,
+            &tenant,
+            spec.name,
+            &locale,
+            spec.channel,
+            subject,
+            mail_body,
         )
         .await?;
-    audit_template(&state, &tenant, &admin, "message_template.updated", spec.name, &locale, subject, mail_body)
-        .await;
+    audit_template(
+        &state,
+        &tenant,
+        &admin,
+        "message_template.updated",
+        spec.name,
+        &locale,
+        subject,
+        mail_body,
+    )
+    .await;
     Ok(Json(effective_json(spec, &locale, &row, true)))
 }
 
@@ -402,10 +500,16 @@ pub async fn delete_message_template(
 ) -> Result<StatusCode, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let spec = purpose(&purpose_name).ok_or_else(|| {
-        ApiError::problem(kinds::NOT_FOUND, format!("unknown message purpose {purpose_name:?}"))
+        ApiError::problem(
+            kinds::NOT_FOUND,
+            format!("unknown message purpose {purpose_name:?}"),
+        )
     })?;
     let locale = normalise_language(&locale).ok_or_else(|| {
-        ApiError::problem(kinds::INVALID_REQUEST, "locale must be a BCP 47 language tag")
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "locale must be a BCP 47 language tag",
+        )
     })?;
 
     let removed = state
@@ -421,8 +525,17 @@ pub async fn delete_message_template(
         false
     };
     if removed || removed_builtin {
-        audit_template(&state, &tenant, &admin, "message_template.deleted", spec.name, &locale, "", "")
-            .await;
+        audit_template(
+            &state,
+            &tenant,
+            &admin,
+            "message_template.deleted",
+            spec.name,
+            &locale,
+            "",
+            "",
+        )
+        .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -435,10 +548,16 @@ pub async fn restore_message_template(
 ) -> Result<StatusCode, ApiError> {
     let (tenant, admin) = authorize_admin(&state, &headers).await?;
     let spec = purpose(&purpose_name).ok_or_else(|| {
-        ApiError::problem(kinds::NOT_FOUND, format!("unknown message purpose {purpose_name:?}"))
+        ApiError::problem(
+            kinds::NOT_FOUND,
+            format!("unknown message purpose {purpose_name:?}"),
+        )
     })?;
     let locale = normalise_language(&locale).ok_or_else(|| {
-        ApiError::problem(kinds::INVALID_REQUEST, "locale must be a BCP 47 language tag")
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "locale must be a BCP 47 language tag",
+        )
     })?;
     if !state
         .store
@@ -450,8 +569,17 @@ pub async fn restore_message_template(
             format!("no built-in copy for `{}` in `{locale}`", spec.name),
         ));
     }
-    audit_template(&state, &tenant, &admin, "message_template.restored", spec.name, &locale, "", "")
-        .await;
+    audit_template(
+        &state,
+        &tenant,
+        &admin,
+        "message_template.restored",
+        spec.name,
+        &locale,
+        "",
+        "",
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -464,10 +592,16 @@ fn checked_copy<'a>(
     let subject = subject.trim();
     let body = body.trim();
     if subject.is_empty() || subject.chars().count() > 200 {
-        return Err(ApiError::problem(kinds::INVALID_REQUEST, "subject must be 1–200 characters"));
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "subject must be 1–200 characters",
+        ));
     }
     if body.is_empty() || body.chars().count() > 10_000 {
-        return Err(ApiError::problem(kinds::INVALID_REQUEST, "body must be 1–10000 characters"));
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "body must be 1–10000 characters",
+        ));
     }
     for (field, text) in [("subject", subject), ("body", body)] {
         check_placeholders(text, spec.variables)

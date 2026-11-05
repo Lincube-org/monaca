@@ -57,9 +57,7 @@ pub async fn request_code(
     Json(body): Json<SmsRequestBody>,
 ) -> Result<Json<Value>, ApiError> {
     let tenant = state.tenant(&tenant).await?;
-    state
-        .enforce_ip_rate_limit(client_ip.0, "sms")
-        .await?;
+    state.enforce_ip_rate_limit(client_ip.0, "sms").await?;
     let phone = normalise_phone(&body.phone)?;
 
     if state
@@ -151,9 +149,7 @@ pub async fn verify_code(
     Json(body): Json<SmsVerifyBody>,
 ) -> Result<Json<Value>, ApiError> {
     let tenant = state.tenant(&tenant).await?;
-    state
-        .enforce_ip_rate_limit(client_ip.0, "sms")
-        .await?;
+    state.enforce_ip_rate_limit(client_ip.0, "sms").await?;
     let phone = normalise_phone(&body.phone)?;
     let invalid = || {
         ApiError::problem(
@@ -235,8 +231,14 @@ mod tests {
 
     #[test]
     fn phone_numbers_keep_at_most_one_plus_and_no_formatting() {
-        assert_eq!(normalise_phone("+15551234567").expect("plus"), "+15551234567");
-        assert_eq!(normalise_phone(" 15551234567 ").expect("trim"), "15551234567");
+        assert_eq!(
+            normalise_phone("+15551234567").expect("plus"),
+            "+15551234567"
+        );
+        assert_eq!(
+            normalise_phone(" 15551234567 ").expect("trim"),
+            "15551234567"
+        );
         assert!(normalise_phone("+1 555 123 4567").is_err());
         assert!(normalise_phone("12345").is_err());
         assert!(normalise_phone("+1555123456789012").is_err());

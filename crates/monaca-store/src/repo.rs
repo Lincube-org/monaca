@@ -1613,7 +1613,7 @@ impl Store {
     }
 
     /// Remove a built-in row. This is the explicit "no copy for this locale" state: a send that
-/// falls through to it fails rather than carrying a placeholder.
+    /// falls through to it fails rather than carrying a placeholder.
     pub async fn delete_builtin_message_template(
         &self,
         tenant: &TenantRow,
@@ -1778,11 +1778,10 @@ impl Store {
         channel: &str,
     ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        let result =
-            sqlx::query("DELETE FROM tenant.delivery_connector WHERE channel = $1")
-                .bind(channel)
-                .execute(&pool)
-                .await?;
+        let result = sqlx::query("DELETE FROM tenant.delivery_connector WHERE channel = $1")
+            .bind(channel)
+            .execute(&pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 

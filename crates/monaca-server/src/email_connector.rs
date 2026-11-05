@@ -112,8 +112,7 @@ async fn update_connector(
     body: UpdateConnectorBody,
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, admin) = authorize_admin(state, headers).await?;
-    let (provider, endpoint, from_address, from_name) =
-        validate_route(state, channel, &body)?;
+    let (provider, endpoint, from_address, from_name) = validate_route(state, channel, &body)?;
     let secret_enc = seal_secret(state, &tenant, body.secret.as_deref(), &provider)?;
     let set_secret = body.secret.is_some();
     let existing = state.store.delivery_connector(&tenant, channel).await?;
@@ -125,10 +124,7 @@ async fn update_connector(
 
     // Index before the tenant-database write: if the upsert fails, the worst case is a tenant the
     // mailer queries and finds without a connector, not a connector it never discovers.
-    state
-        .store
-        .mark_delivery_connector_present(&tenant)
-        .await?;
+    state.store.mark_delivery_connector_present(&tenant).await?;
     let row = state
         .store
         .upsert_delivery_connector(
@@ -144,15 +140,7 @@ async fn update_connector(
         )
         .await?;
 
-    audit_connector(
-        state,
-        &tenant,
-        &admin,
-        channel,
-        "updated",
-        &row,
-    )
-    .await;
+    audit_connector(state, &tenant, &admin, channel, "updated", &row).await;
 
     Ok(Json(connector_json(channel, Some(&row))))
 }
@@ -163,7 +151,10 @@ async fn delete_connector(
     channel: &str,
 ) -> Result<Response, ApiError> {
     let (tenant, admin) = authorize_admin(state, headers).await?;
-    let deleted = state.store.delete_delivery_connector(&tenant, channel).await?;
+    let deleted = state
+        .store
+        .delete_delivery_connector(&tenant, channel)
+        .await?;
     // Reconcile rather than removing the index outright: the other channel may still be routed.
     if let Err(err) = state
         .store
@@ -176,8 +167,15 @@ async fn delete_connector(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    audit_connector_action(state, &tenant, &admin, channel, "deleted", json!({ "channel": channel }))
-        .await;
+    audit_connector_action(
+        state,
+        &tenant,
+        &admin,
+        channel,
+        "deleted",
+        json!({ "channel": channel }),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -219,9 +217,8 @@ fn validate_route(
                     ));
                 }
             } else {
-                crate::delivery::validate_smtp_endpoint(endpoint).map_err(|why| {
-                    ApiError::problem(kinds::INVALID_REQUEST, why)
-                })?;
+                crate::delivery::validate_smtp_endpoint(endpoint)
+                    .map_err(|why| ApiError::problem(kinds::INVALID_REQUEST, why))?;
             }
         }
         SMS => {
@@ -259,9 +256,7 @@ fn validate_route(
             "from_address must be 1–320 characters",
         ));
     }
-    if channel == EMAIL
-        && (!from_address.contains('@') || from_address.len() < 3)
-    {
+    if channel == EMAIL && (!from_address.contains('@') || from_address.len() < 3) {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
             "from_address must contain `@`",
@@ -294,7 +289,12 @@ fn validate_route(
     }
     let from_name = from_name.filter(|name| !name.is_empty()).map(str::to_owned);
 
-    Ok((provider.to_owned(), endpoint.to_owned(), from_address.to_owned(), from_name))
+    Ok((
+        provider.to_owned(),
+        endpoint.to_owned(),
+        from_address.to_owned(),
+        from_name,
+    ))
 }
 
 /// Seal the submitted credential, validating its shape first.

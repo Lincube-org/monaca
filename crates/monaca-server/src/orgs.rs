@@ -405,10 +405,7 @@ pub async fn create_invitation(
         &tenant,
         "invitation",
         body.locale.as_deref(),
-        &[
-            ("tenant", tenant.slug.as_str()),
-            ("org", org.slug.as_str()),
-        ],
+        &[("tenant", tenant.slug.as_str()), ("org", org.slug.as_str())],
     )
     .await?;
     let mut tx = state.store.begin_tenant(&tenant).await?;

@@ -42,7 +42,8 @@ pub use repo::{
     MessageTemplateRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow,
     RateLimitRow, RefreshRow, RoleRow, SessionRow, SignInExperienceRow, SignInGuardrailsPatch,
     SignInPhraseRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow,
-    SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow, WebhookRow,
+    SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow,
+    WebhookRow,
 };
 pub use runtime_state::InteractionRow;
 
@@ -458,7 +459,11 @@ impl Store {
             )));
         }
 
-        let Some(tenant) = self.tenants().await?.into_iter().find(|tenant| tenant.is_active())
+        let Some(tenant) = self
+            .tenants()
+            .await?
+            .into_iter()
+            .find(|tenant| tenant.is_active())
         else {
             return Ok(());
         };

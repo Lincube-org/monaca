@@ -1764,11 +1764,15 @@ pub async fn sign_up(
                 "email verification is required; send the password and profile fields to sign-up/verify",
             ));
         }
-        return Ok(
-            request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email, body.locale.as_deref())
-                .await?
-                .into_response(),
-        );
+        return Ok(request_verification(
+            &state,
+            &tenant,
+            PURPOSE_SIGN_UP,
+            &email,
+            body.locale.as_deref(),
+        )
+        .await?
+        .into_response());
     }
     let Some(password) = body.password else {
         return Err(ApiError::problem(
@@ -1901,7 +1905,14 @@ pub async fn sign_in_code(
     )
     .await?;
     let email = normalise_email(&body.email)?;
-    request_verification(&state, &tenant, PURPOSE_SIGN_IN, &email, body.locale.as_deref()).await
+    request_verification(
+        &state,
+        &tenant,
+        PURPOSE_SIGN_IN,
+        &email,
+        body.locale.as_deref(),
+    )
+    .await
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/sign-in/code/verify`.
