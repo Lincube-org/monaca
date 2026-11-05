@@ -120,14 +120,20 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 /// The complete route surface, with the methods each path accepts.
 ///
 /// The typed slice (`healthz`, `version`, `metrics`, `/v1/rate-limits`) is annotated on the
-/// handlers and carries schemas. The rest is registered here with a summary, so the document
-/// never claims a path exists that the router does not mount, and an SDK operation exists for
-/// every mounted method while the response schemas are filled in incrementally.
+/// handlers and carries schemas. The rest is registered here with a summary. Every mounted path
+/// and method outside `/internal/*` appears here; `/internal/*` is excluded because the gateway
+/// never proxies it. Response schemas are filled in incrementally, but the path/method set is not
+/// a gap.
 const SURFACE: &[(&str, &[&str], &str)] = &[
     (
         "/t/{tenant}/.well-known/openid-configuration",
         &["get"],
         "Tenant discovery",
+    ),
+    (
+        "/.well-known/oauth-authorization-server/t/{tenant}",
+        &["get"],
+        "Tenant discovery (RFC 8414 path)",
     ),
     ("/t/{tenant}/.well-known/jwks.json", &["get"], "Tenant JWKS"),
     (
@@ -169,6 +175,76 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "Sign-up",
     ),
     (
+        "/t/{tenant}/interaction/{iid}/sign-up/verify",
+        &["post"],
+        "Verify a sign-up code",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/sign-in/code",
+        &["post"],
+        "Sign-in by email code",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/sign-in/code/verify",
+        &["post"],
+        "Verify a sign-in code",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/sign-in/link",
+        &["post"],
+        "Sign-in by emailed link",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/sign-in/link/verify",
+        &["get"],
+        "Redeem a sign-in link",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/sign-in/passkey/options",
+        &["post"],
+        "Passkey sign-in options",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/sign-in/passkey",
+        &["post"],
+        "Passkey sign-in",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/mfa/passkey/options",
+        &["post"],
+        "Passkey second-factor options",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/mfa/passkey",
+        &["post"],
+        "Passkey second factor",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/password/forgot",
+        &["post"],
+        "Request a password reset",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/password/reset",
+        &["post"],
+        "Reset a password",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/mfa/verify",
+        &["post"],
+        "Verify a second factor",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/mfa/enroll",
+        &["post"],
+        "Begin second-factor enrollment",
+    ),
+    (
+        "/t/{tenant}/interaction/{iid}/mfa/enroll/verify",
+        &["post"],
+        "Finish second-factor enrollment",
+    ),
+    (
         "/t/{tenant}/interaction/{iid}/consent",
         &["post"],
         "Consent",
@@ -187,6 +263,138 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "/t/{tenant}/sign-in-experience",
         &["get"],
         "Public sign-in experience",
+    ),
+    ("/t/{tenant}/sign-in-copy", &["get"], "Public sign-in copy"),
+    (
+        "/t/{tenant}/connectors/{connector}/authorize",
+        &["get"],
+        "Start a social sign-in",
+    ),
+    (
+        "/t/{tenant}/connectors/{connector}/callback",
+        &["get"],
+        "Social provider callback",
+    ),
+    (
+        "/t/{tenant}/social/link/{token}",
+        &["get"],
+        "Pending social link",
+    ),
+    (
+        "/t/{tenant}/social/link/{token}/confirm",
+        &["post"],
+        "Confirm a social link",
+    ),
+    (
+        "/t/{tenant}/sso-connectors",
+        &["get"],
+        "Public SSO connectors",
+    ),
+    (
+        "/t/{tenant}/sso/{connector}/authorize",
+        &["get"],
+        "Start an SSO sign-in",
+    ),
+    (
+        "/t/{tenant}/sso/{connector}/callback",
+        &["get"],
+        "SSO provider callback",
+    ),
+    ("/t/{tenant}/account", &["get", "patch"], "Signed-in account"),
+    (
+        "/t/{tenant}/account/email",
+        &["post"],
+        "Request an email change",
+    ),
+    (
+        "/t/{tenant}/account/email/verify",
+        &["post"],
+        "Verify an email change",
+    ),
+    (
+        "/t/{tenant}/account/deletion",
+        &["post"],
+        "Request account deletion",
+    ),
+    (
+        "/t/{tenant}/account/deletion/confirm",
+        &["post"],
+        "Confirm account deletion",
+    ),
+    (
+        "/t/{tenant}/account/password",
+        &["post"],
+        "Change the account password",
+    ),
+    (
+        "/t/{tenant}/account/sessions",
+        &["get", "delete"],
+        "Account sessions",
+    ),
+    (
+        "/t/{tenant}/account/sessions/{session}",
+        &["delete"],
+        "Revoke one account session",
+    ),
+    (
+        "/t/{tenant}/account/authorized-apps",
+        &["get"],
+        "Authorized applications",
+    ),
+    (
+        "/t/{tenant}/account/authorized-apps/{client}",
+        &["delete"],
+        "Withdraw an authorized application",
+    ),
+    (
+        "/t/{tenant}/account/mfa/totp",
+        &["post", "delete"],
+        "TOTP second factor",
+    ),
+    (
+        "/t/{tenant}/account/mfa/totp/verify",
+        &["post"],
+        "Verify TOTP enrollment",
+    ),
+    (
+        "/t/{tenant}/account/mfa/devices",
+        &["get"],
+        "Trusted devices",
+    ),
+    (
+        "/t/{tenant}/account/mfa/devices/{device}",
+        &["delete"],
+        "Revoke a trusted device",
+    ),
+    (
+        "/t/{tenant}/account/mfa/backup-codes",
+        &["get", "post", "delete"],
+        "Backup codes",
+    ),
+    (
+        "/t/{tenant}/account/passkeys/options",
+        &["post"],
+        "Passkey registration options",
+    ),
+    (
+        "/t/{tenant}/account/passkeys",
+        &["get", "post"],
+        "Registered passkeys",
+    ),
+    (
+        "/t/{tenant}/account/passkeys/{passkey}",
+        &["patch", "delete"],
+        "One registered passkey",
+    ),
+    (
+        "/t/{tenant}/account/social/{connector}/authorize",
+        &["get"],
+        "Connect a social provider",
+    ),
+    (
+        "/t/{tenant}/account/social/{connector}",
+        &["delete"],
+        "Disconnect a social provider",
     ),
     ("/v1/accounts", &["get", "post"], "List and create accounts"),
     (

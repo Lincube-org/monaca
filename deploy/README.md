@@ -63,15 +63,27 @@ is exactly what the compose file sets.
 startup checks (§2.2). The bootstrap secrets are read only when the seeded rows do not exist:
 an existing admin password or client secret is never overwritten by a later deploy.
 
-**KEK rotation is not supported.** `MONACA_KEK` derives every tenant DEK, and sealed signing keys
-and account secrets are encrypted under those DEKs. Changing the value silently makes existing
-rows unreadable; there is no re-encryption tool in M0. Treat it as a permanent secret (§10.7).
+**KEK rotation is an offline, three-step procedure** (§10.7). `MONACA_KEK` derives every tenant
+DEK, and sealed signing keys, TOTP seeds, passkey blobs and connector secrets are encrypted under
+those DEKs. There is no stored key id: decryption tries the current key first and the retiring key
+second.
 
-This also applies to switching an existing deployment from dev to prod: the KEK changes from
-`MONACA_DEV_KEK` to `MONACA_KEK`, so rows sealed by the old key stop decrypting. Either start
-from an empty database, or set `MONACA_KEK` to the exact hex value the existing data was sealed
-with (copy the old `MONACA_DEV_KEK`, or `1111…` if that deployment used the built-in fallback)
-and only then remove `MONACA_DEV_KEK`.
+1. Put the **new** key in `MONACA_KEK` and the old one in `MONACA_KEK_PREVIOUS`, then restart (or
+   roll) every server instance. Reads try both; writes use the new key.
+2. Run `monaca-server rewrap` (optionally `--tenant <slug>` or `--dry-run`). It walks every sealed
+   column and the control-plane `clusters` DSNs, re-seals values that only the old key opens,
+   skips values already under the new key, and exits non-zero if any value opens with neither. It
+   is idempotent, so an interrupted run is resumed by running it again.
+3. Restart with only the new `MONACA_KEK` after `rewrap` reports zero failures.
+
+Not supported: a KMS-hosted KEK, automatic or online rotation, per-ciphertext key ids, and
+rotating while an instance still runs with only the old key (that instance would write under the
+retiring key). The CI e2e job runs the rotation drill against a disposable database on every
+build.
+
+Switching an existing deployment from dev to prod changes the key from `MONACA_DEV_KEK` to
+`MONACA_KEK`: use the procedure above with the dev key as `MONACA_KEK_PREVIOUS`, or start from an
+empty database.
 
 ## Backups and recovery
 

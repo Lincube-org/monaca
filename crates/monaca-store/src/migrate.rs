@@ -286,6 +286,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "shared fixed-window rate-limit counters (M1)",
         include_str!("../migrations/tenant_48.sql"),
     ),
+    (
+        49,
+        "remove the unused phone identifier kind (M1)",
+        include_str!("../migrations/tenant_49.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

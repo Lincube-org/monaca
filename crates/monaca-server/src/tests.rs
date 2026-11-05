@@ -154,7 +154,14 @@ fn the_openapi_document_covers_the_mounted_surface() {
     let paths = value["paths"].as_object().expect("paths");
     for (path, method) in [
         ("/t/{tenant}/oauth2/token", "post"),
+        ("/t/{tenant}/interaction/{iid}/password/forgot", "post"),
+        ("/t/{tenant}/interaction/{iid}/sign-in/code/verify", "post"),
+        ("/t/{tenant}/account", "patch"),
+        ("/t/{tenant}/account/passkeys/{passkey}", "delete"),
+        ("/t/{tenant}/connectors/{connector}/callback", "get"),
+        ("/t/{tenant}/sso/{connector}/callback", "get"),
         ("/v1/accounts", "get"),
+        ("/v1/accounts/{id}/roles/{role}", "post"),
         ("/v1/clients/{client}/secret", "post"),
         ("/v1/webhooks/{webhook}/deliveries", "get"),
         ("/metrics", "get"),
@@ -165,6 +172,11 @@ fn the_openapi_document_covers_the_mounted_surface() {
             "{method} {path} must be described"
         );
     }
+    // `/internal/*` is deliberately not in the public document: the gateway never proxies it.
+    assert!(
+        !paths.keys().any(|path| path.starts_with("/internal/")),
+        "internal routes must stay out of the public document"
+    );
 }
 
 /// Both documented responses carry a schema, so the SDK generator has something to emit.

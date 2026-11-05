@@ -33,7 +33,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS accounts_primary_email_idx ON accounts (lower(
 CREATE TABLE IF NOT EXISTS account_identifiers (
   id           uuid PRIMARY KEY,
   account_id   uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  kind         text NOT NULL CHECK (kind IN ('email','phone','username')),
+  -- Email and username identifiers are implemented. There is no phone identifier flow, so the
+  -- check does not reserve `phone` (tenant_49 removes it from databases created before that).
+  kind         text NOT NULL CHECK (kind IN ('email','username')),
   value        text NOT NULL,
   verified_at  timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now(),

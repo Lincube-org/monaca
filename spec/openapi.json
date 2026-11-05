@@ -1265,6 +1265,16 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/.well-known/oauth-authorization-server/t/{tenant}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant discovery (RFC 8414 path)"
+      }
+    },
     "/healthz": {
       "get": {
         "description": "Always 200 with {\"status\":\"ok\"} while the process can serve.",
@@ -1325,6 +1335,262 @@
         "summary": "Tenant discovery"
       }
     },
+    "/t/{tenant}/account": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Signed-in account"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Signed-in account"
+      }
+    },
+    "/t/{tenant}/account/authorized-apps": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Authorized applications"
+      }
+    },
+    "/t/{tenant}/account/authorized-apps/{client}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Withdraw an authorized application"
+      }
+    },
+    "/t/{tenant}/account/deletion": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Request account deletion"
+      }
+    },
+    "/t/{tenant}/account/deletion/confirm": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Confirm account deletion"
+      }
+    },
+    "/t/{tenant}/account/email": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Request an email change"
+      }
+    },
+    "/t/{tenant}/account/email/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify an email change"
+      }
+    },
+    "/t/{tenant}/account/mfa/backup-codes": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Backup codes"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Backup codes"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Backup codes"
+      }
+    },
+    "/t/{tenant}/account/mfa/devices": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Trusted devices"
+      }
+    },
+    "/t/{tenant}/account/mfa/devices/{device}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Revoke a trusted device"
+      }
+    },
+    "/t/{tenant}/account/mfa/totp": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "TOTP second factor"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "TOTP second factor"
+      }
+    },
+    "/t/{tenant}/account/mfa/totp/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify TOTP enrollment"
+      }
+    },
+    "/t/{tenant}/account/passkeys": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Registered passkeys"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Registered passkeys"
+      }
+    },
+    "/t/{tenant}/account/passkeys/options": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Passkey registration options"
+      }
+    },
+    "/t/{tenant}/account/passkeys/{passkey}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One registered passkey"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One registered passkey"
+      }
+    },
+    "/t/{tenant}/account/password": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Change the account password"
+      }
+    },
+    "/t/{tenant}/account/sessions": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Account sessions"
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Account sessions"
+      }
+    },
+    "/t/{tenant}/account/sessions/{session}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Revoke one account session"
+      }
+    },
+    "/t/{tenant}/account/social/{connector}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Disconnect a social provider"
+      }
+    },
+    "/t/{tenant}/account/social/{connector}/authorize": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Connect a social provider"
+      }
+    },
     "/t/{tenant}/connectors": {
       "get": {
         "responses": {
@@ -1333,6 +1599,26 @@
           }
         },
         "summary": "Public social connectors"
+      }
+    },
+    "/t/{tenant}/connectors/{connector}/authorize": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Start a social sign-in"
+      }
+    },
+    "/t/{tenant}/connectors/{connector}/callback": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Social provider callback"
       }
     },
     "/t/{tenant}/interaction/{iid}": {
@@ -1365,6 +1651,76 @@
         "summary": "Consent"
       }
     },
+    "/t/{tenant}/interaction/{iid}/mfa/enroll": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Begin second-factor enrollment"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/mfa/enroll/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Finish second-factor enrollment"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/mfa/passkey": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Passkey second factor"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/mfa/passkey/options": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Passkey second-factor options"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/mfa/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify a second factor"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/password/forgot": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Request a password reset"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/password/reset": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Reset a password"
+      }
+    },
     "/t/{tenant}/interaction/{iid}/sign-in": {
       "post": {
         "responses": {
@@ -1375,6 +1731,66 @@
         "summary": "Password sign-in"
       }
     },
+    "/t/{tenant}/interaction/{iid}/sign-in/code": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-in by email code"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-in/code/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify a sign-in code"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-in/link": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Sign-in by emailed link"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-in/link/verify": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Redeem a sign-in link"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-in/passkey": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Passkey sign-in"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-in/passkey/options": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Passkey sign-in options"
+      }
+    },
     "/t/{tenant}/interaction/{iid}/sign-up": {
       "post": {
         "responses": {
@@ -1383,6 +1799,16 @@
           }
         },
         "summary": "Sign-up"
+      }
+    },
+    "/t/{tenant}/interaction/{iid}/sign-up/verify": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Verify a sign-up code"
       }
     },
     "/t/{tenant}/oauth2/authorize": {
@@ -1471,6 +1897,16 @@
         "summary": "UserInfo"
       }
     },
+    "/t/{tenant}/sign-in-copy": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Public sign-in copy"
+      }
+    },
     "/t/{tenant}/sign-in-experience": {
       "get": {
         "responses": {
@@ -1479,6 +1915,56 @@
           }
         },
         "summary": "Public sign-in experience"
+      }
+    },
+    "/t/{tenant}/social/link/{token}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Pending social link"
+      }
+    },
+    "/t/{tenant}/social/link/{token}/confirm": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Confirm a social link"
+      }
+    },
+    "/t/{tenant}/sso-connectors": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Public SSO connectors"
+      }
+    },
+    "/t/{tenant}/sso/{connector}/authorize": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Start an SSO sign-in"
+      }
+    },
+    "/t/{tenant}/sso/{connector}/callback": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SSO provider callback"
       }
     },
     "/v1/accounts": {
