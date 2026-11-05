@@ -7840,14 +7840,14 @@ async function smtpDeliveryFlow(base: string, adminToken: string): Promise<StepR
       raw.includes("Subject: Reset your demo password"),
     ]);
     checks.push([
-      "the raw message is text/plain and carries the code",
-      raw.includes("Content-Type: text/plain") &&
+      "the raw message is 7bit and carries the code",
+      raw.includes("Content-Transfer-Encoding: 7bit") &&
         typeof code === "string" &&
         raw.includes(code),
     ]);
     if (
       !raw.includes("Subject: Reset your demo password") ||
-      !raw.includes("Content-Type: text/plain") ||
+      !raw.includes("Content-Transfer-Encoding: 7bit") ||
       typeof code !== "string" ||
       !raw.includes(code)
     ) {
