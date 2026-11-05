@@ -1,0 +1,57 @@
+{
+  "sign_up": {
+    "channel": "email",
+    "subject": "{{tenant}} 验证码",
+    "body": "请输入 {{code}} 完成注册。验证码将在 {{expires_in}} 分钟后失效。"
+  },
+  "sign_in": {
+    "channel": "email",
+    "subject": "{{tenant}} 登录验证码",
+    "body": "请输入 {{code}} 登录。验证码将在 {{expires_in}} 分钟后失效。"
+  },
+  "password_reset": {
+    "channel": "email",
+    "subject": "重置你的 {{tenant}} 密码",
+    "body": "请输入 {{code}} 设置新密码。验证码将在 {{expires_in}} 分钟后失效。"
+  },
+  "email_change": {
+    "channel": "email",
+    "subject": "确认你的 {{tenant}} 新邮箱",
+    "body": "请输入 {{code}} 在本账号启用该邮箱。验证码将在 {{expires_in}} 分钟后失效。"
+  },
+  "delete_account": {
+    "channel": "email",
+    "subject": "删除你的 {{tenant}} 账号",
+    "body": "请输入 {{code}} 删除账号。此操作不可撤销。验证码将在 {{expires_in}} 分钟后失效。"
+  },
+  "sign_in_link": {
+    "channel": "email",
+    "subject": "你的 {{tenant}} 登录链接",
+    "body": "打开 {{url}} 登录。链接将在 {{expires_in}} 分钟后失效。"
+  },
+  "email_changed": {
+    "channel": "email",
+    "subject": "{{tenant}} 邮箱已变更",
+    "body": "你的 {{tenant}} 账号邮箱已变更。如非本人操作，请联系管理员。"
+  },
+  "password_changed": {
+    "channel": "email",
+    "subject": "{{tenant}} 密码已变更",
+    "body": "你的 {{tenant}} 账号密码已变更。如非本人操作，请立即重置。"
+  },
+  "account_deleted": {
+    "channel": "email",
+    "subject": "{{tenant}} 账号已删除",
+    "body": "你的 {{tenant}} 账号已删除。如非本人操作，请联系管理员。"
+  },
+  "invitation": {
+    "channel": "email",
+    "subject": "邀请你加入 {{tenant}} 的 {{org}}",
+    "body": "{{tenant}} 的管理员邀请你加入组织 {{org}}。使用该邮箱登录即可接受邀请。"
+  },
+  "sms_verification": {
+    "channel": "sms",
+    "subject": "{{tenant}} 验证码",
+    "body": "你的 {{tenant}} 验证码是 {{code}}，{{expires_in}} 分钟内有效。"
+  }
+}

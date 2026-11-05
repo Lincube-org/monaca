@@ -388,6 +388,15 @@ jobs:
       # Acceptance step 59 starts a local GitHub/Google mock on this base. The server accepts the
       # override only in dev/CI; a production process always calls the provider's real endpoints.
       MONACA_SOCIAL_PROVIDER_BASE_URL: http://127.0.0.1:38200
+      # Step 68 starts the local SMS capture on this port and points the server's Twilio base at
+      # it; the shortened TTL/cooldown make the expiry and resend branches testable without a
+      # ten-minute wait. The server ignores these outside dev/ci.
+      MONACA_SMS_PROVIDER_BASE_URL: http://127.0.0.1:38300
+      MONACA_SMS_CODE_TTL_SECS: "15"
+      MONACA_SMS_RESEND_SECS: "3"
+      MONACA_SMS_CAPTURE_PORT: "38300"
+      # Step 69 starts the local SMTP capture on this port.
+      MONACA_SMTP_CAPTURE_PORT: "2525"
       # The acceptance script calls the server directly on loopback, so that peer is a trusted
       # proxy for the per-IP gate and the X-Forwarded-For negative/positive checks can name an
       # address other than 127.0.0.1.

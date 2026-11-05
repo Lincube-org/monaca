@@ -18,6 +18,8 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describeNetError } from "../lib/net.ts";
+import { startSmsCapture } from "../sms-capture.ts";
+import { startSmtpCapture } from "../smtp-capture.ts";
 import { createMonacaClient } from "../../packages/sdk/src/index.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -679,6 +681,32 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "reports the transition without writing; suspend makes the same management token and the token " +
       "endpoint answer 403 MONACA_TENANT_SUSPENDED; resume restores both; archive answers " +
       "403 MONACA_TENANT_ARCHIVED and keeps the tenant database, and resume returns it to service",
+  },
+  {
+    step: "68",
+    title: "SMS verification",
+    assertion:
+      "without an SMS connector a code request is 503 MONACA_SMS_NOT_CONFIGURED; after a Twilio-shaped " +
+      "connector is configured, a zh-CN request reaches the local capture as a form POST to " +
+      "`/2010-04-01/Accounts/<sid>/Messages.json` with basic auth and a Chinese body containing the " +
+      "code; an immediate resend is 429, a wrong code is 401, the right code verifies, and a code " +
+      "left past its TTL is 401 MONACA_VERIFICATION_CODE_EXPIRED",
+  },
+  {
+    step: "69",
+    title: "SMTP delivery",
+    assertion:
+      "an `smtp://127.0.0.1` connector delivers a rendered password-reset mail to the local SMTP " +
+      "capture: MAIL FROM and RCPT TO carry the configured addresses and the raw message carries the " +
+      "Subject header and body with the code",
+  },
+  {
+    step: "70",
+    title: "template fallback and missing rejection",
+    assertion:
+      "the message-template list carries en and zh-cn copy for sms_verification; after the built-in " +
+      "en sign_up row is removed a sign-up request fails 500 MONACA_TEMPLATE_MISSING naming `sign_up` " +
+      "and `en`, the metric records it, and restoring the built-in row makes the same request succeed",
   },
 ];
 
@@ -7535,6 +7563,420 @@ async function tenantLifecycleFlow(base: string): Promise<StepResult> {
     ms: Math.round(performance.now() - t),
     detail: ok
       ? `${checks.length} checks: create → management token → sign-in → dry-run → suspend 403 → resume → archive 403 → resume`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 68 — SMS verification through the Twilio-shaped connector.
+ *
+ * The server's documented Twilio host is replaced with a local capture by the dev/CI-only
+ * `MONACA_SMS_PROVIDER_BASE_URL`; the form body, basic auth and Messages path are the real
+ * provider contract. The step also proves the fail-closed default (no connector → 503), the
+ * shared per-address cooldown, wrong/right code handling and expiry.
+ */
+async function smsVerificationFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const capturePort = Number(process.env.MONACA_SMS_CAPTURE_PORT ?? 38300);
+  const capture = startSmsCapture(capturePort);
+  const sid = `AC${runId.replace(/[^a-z0-9]/gi, "").slice(0, 16)}`;
+  const token = `token-${runId}`;
+  const phone = `+1${String(Date.now()).slice(-10)}`;
+  const expiredPhone = `+2${String(Date.now()).slice(-10)}`;
+  const ttl = Number(process.env.MONACA_SMS_CODE_TTL_SECS ?? 600);
+
+  try {
+    const unconfigured = await call(`${base}/t/${TENANT}/verification/sms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone, locale: "zh-CN" }),
+    });
+    checks.push([
+      "an unconfigured tenant refuses the request with MONACA_SMS_NOT_CONFIGURED",
+      unconfigured.status === 503 &&
+        (unconfigured.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_SMS_NOT_CONFIGURED",
+    ]);
+
+    const configured = await call(`${base}/v1/sms-connector`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        provider: "twilio",
+        endpoint: "https://api.twilio.com",
+        from_address: "+15550000000",
+        secret: `${sid}:${token}`,
+        enabled: true,
+      }),
+    });
+    checks.push([
+      "PATCH stores the Twilio route and never echoes the secret",
+      configured.status === 200 &&
+        (configured.body as { provider?: unknown })?.provider === "twilio" &&
+        (configured.body as { secret_set?: unknown })?.secret_set === true &&
+        !JSON.stringify(configured.body).includes(token),
+    ]);
+
+    const sent = await call(`${base}/t/${TENANT}/verification/sms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone, locale: "zh-CN" }),
+    });
+    checks.push([
+      "a configured send answers verification_required",
+      sent.status === 200 &&
+        (sent.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+
+    const resend = await call(`${base}/t/${TENANT}/verification/sms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone, locale: "zh-CN" }),
+    });
+    checks.push([
+      "an immediate resend is refused by the shared per-address cooldown",
+      resend.status === 429 &&
+        (resend.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_TOO_MANY_ATTEMPTS",
+    ]);
+
+    const deadline = performance.now() + 20_000;
+    const match = () =>
+      capture.requests.find((entry) => {
+        const form = new URLSearchParams(entry.body);
+        return form.get("To") === phone;
+      });
+    while (match() === undefined && performance.now() < deadline) {
+      await Bun.sleep(250);
+    }
+    const request = match();
+    const form = request === undefined ? undefined : new URLSearchParams(request.body);
+    const body = form?.get("Body") ?? "";
+    const code = body.match(/\b\d{6}\b/)?.[0];
+    checks.push([
+      "the capture receives the documented Messages form with basic auth and Chinese copy",
+      request !== undefined &&
+        request.method === "POST" &&
+        request.path === `/2010-04-01/Accounts/${sid}/Messages.json` &&
+        request.authorization === `Basic ${btoa(`${sid}:${token}`)}` &&
+        form?.get("From") === "+15550000000" &&
+        typeof code === "string" &&
+        body.includes("验证码") &&
+        body.includes(code),
+    ]);
+
+    const wrongCode = code === "000000" ? "999999" : "000000";
+    const wrong = await call(`${base}/t/${TENANT}/verification/sms/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone, code: wrongCode }),
+    });
+    checks.push([
+      "a wrong code is 401 MONACA_INVALID_VERIFICATION_CODE",
+      wrong.status === 401 &&
+        (wrong.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_INVALID_VERIFICATION_CODE",
+    ]);
+
+    const right = await call(`${base}/t/${TENANT}/verification/sms/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone, code }),
+    });
+    checks.push([
+      "the right code verifies",
+      right.status === 200 && (right.body as { verified?: unknown })?.verified === true,
+    ]);
+
+    const expiring = await call(`${base}/t/${TENANT}/verification/sms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone: expiredPhone, locale: "en" }),
+    });
+    if (expiring.status !== 200) {
+      throw new Error(`the expiring-code request answered ${expiring.status}`);
+    }
+    await Bun.sleep((Math.min(ttl, 60) + 2) * 1000);
+    const expired = await call(`${base}/t/${TENANT}/verification/sms/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone: expiredPhone, code: "000000" }),
+    });
+    checks.push([
+      "a code past its TTL is 401 MONACA_VERIFICATION_CODE_EXPIRED",
+      expired.status === 401 &&
+        (expired.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+          "MONACA_VERIFICATION_CODE_EXPIRED",
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    capture.stop();
+    const removed = await call(`${base}/v1/sms-connector`, { method: "DELETE", headers });
+    if (removed.status !== 204) detail = detail || `delete sms connector answered ${removed.status}`;
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "68",
+    title: "SMS verification",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: unconfigured 503 → Twilio form → resend 429 → wrong 401 → verified → expired 401`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/** A fresh console interaction id for an email flow. */
+async function consoleInteraction(base: string, tag: string): Promise<string | undefined> {
+  const runId = Date.now().toString(36);
+  const verifier = `${tag}-${runId}-${"z".repeat(32)}`;
+  const challenge = base64Url(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+  );
+  const authorize = await call(
+    `${base}/t/${TENANT}/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: "monaca-console",
+      redirect_uri: "http://localhost:5173/bff/callback",
+      scope: "openid profile email",
+      state: `st-${tag}-${runId}`,
+      nonce: `n-${tag}-${runId}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`,
+    { redirect: "manual" },
+  );
+  return (
+    new URL(authorize.headers.get("location") ?? "", base).searchParams.get("interaction") ?? undefined
+  );
+}
+
+/**
+ * Step 69 — SMTP delivery to a local capture.
+ *
+ * The connector uses `smtp://127.0.0.1:2525` (the only plaintext form the server accepts) and the
+ * capture records the wire message, so the envelope and the rendered MIME body are both proven
+ * without a relay or an outbound network.
+ */
+async function smtpDeliveryFlow(base: string, adminToken: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const port = Number(process.env.MONACA_SMTP_CAPTURE_PORT ?? 2525);
+  const capture = startSmtpCapture(port);
+  const email = `smtp-${runId}@demo.localhost`;
+  const fail = (why: string): StepResult => ({
+    step: "69",
+    title: "SMTP delivery",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+
+  try {
+    const configured = await call(`${base}/v1/email-connector`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        provider: "smtp",
+        endpoint: `smtp://127.0.0.1:${port}`,
+        from_address: "no-reply@demo.localhost",
+        from_name: "Monaca Demo",
+        enabled: true,
+      }),
+    });
+    checks.push([
+      "PATCH accepts a loopback SMTP route",
+      configured.status === 200 &&
+        (configured.body as { provider?: unknown })?.provider === "smtp",
+    ]);
+
+    const interaction = await consoleInteraction(base, "smtp");
+    if (interaction === undefined) return fail("authorize did not open an interaction");
+    const requested = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/password/forgot`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      },
+    );
+    checks.push([
+      "a password-reset request queues a mail",
+      requested.status === 200,
+    ]);
+
+    const deadline = performance.now() + 25_000;
+    while (capture.messages.length === 0 && performance.now() < deadline) {
+      await Bun.sleep(250);
+    }
+    const message = capture.messages.find((entry) => entry.to.some((to) => to.includes(email)));
+    const raw = message?.raw ?? "";
+    const code = raw.match(/\b\d{6}\b/)?.[0];
+    checks.push([
+      "the local SMTP capture receives exactly one message for the address",
+      capture.messages.length === 1 && message !== undefined,
+    ]);
+    checks.push([
+      "MAIL FROM and RCPT TO carry the configured addresses",
+      (message?.from ?? "").includes("no-reply@demo.localhost") &&
+        (message?.to ?? []).some((to) => to.includes(email)),
+    ]);
+    checks.push([
+      "the raw message carries the rendered Subject header and body with the code",
+      raw.includes("Subject: Reset your demo password") &&
+        raw.includes("Content-Type: text/plain") &&
+        typeof code === "string" &&
+        raw.includes(code),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    capture.stop();
+    const removed = await call(`${base}/v1/email-connector`, { method: "DELETE", headers });
+    if (removed.status !== 204) detail = detail || `delete email connector answered ${removed.status}`;
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "69",
+    title: "SMTP delivery",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: loopback SMTP route → reset queued → capture envelope → Subject/body code`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 70 — locale fallback and the explicit missing-template failure.
+ *
+ * The English row for `sign_up` is removed through the locale-aware API, a real sign-up request
+ * must fail with `MONACA_TEMPLATE_MISSING` naming the purpose and locale (and increment the
+ * metric), and restoring the built-in row makes the same request succeed.
+ */
+async function templateFallbackFlow(
+  base: string,
+  adminToken: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const fail = (why: string): StepResult => ({
+    step: "70",
+    title: "template fallback and missing rejection",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why,
+  });
+
+  try {
+    const listed = await call(`${base}/v1/message-templates?channel=sms`, { headers });
+    const items =
+      (listed.body as { items?: { purpose?: unknown; locale?: unknown; subject?: unknown; body?: unknown }[] })
+        ?.items ?? [];
+    const english = items.find((item) => item.purpose === "sms_verification" && item.locale === "en");
+    const chinese = items.find((item) => item.purpose === "sms_verification" && item.locale === "zh-cn");
+    checks.push([
+      "the list carries en and zh-cn SMS copy",
+      listed.status === 200 &&
+        typeof english?.body === "string" &&
+        english.body.includes("{{code}}") &&
+        typeof chinese?.body === "string" &&
+        chinese.body.includes("验证码"),
+    ]);
+
+    // Remove the override (if one exists) and then the seeded built-in row.
+    const cleared = await call(`${base}/v1/message-templates/sign_up/en`, {
+      method: "DELETE",
+      headers,
+    });
+    const purged = await call(`${base}/v1/message-templates/sign_up/en?builtin=true`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push([
+      "the generated en sign_up row can be explicitly removed",
+      cleared.status === 204 && purged.status === 204,
+    ]);
+
+    const interaction = await consoleInteraction(base, "template");
+    if (interaction === undefined) return fail("authorize did not open an interaction");
+    const email = `missing-${runId}@demo.localhost`;
+    const missing = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-up`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, locale: "en" }),
+      },
+    );
+    const problem = missing.body as
+      | { monaca_error_code?: unknown; detail?: unknown }
+      | undefined;
+    checks.push([
+      "a send with no template fails 500 MONACA_TEMPLATE_MISSING naming the key and locale",
+      missing.status === 500 &&
+        problem?.monaca_error_code === "MONACA_TEMPLATE_MISSING" &&
+        typeof problem.detail === "string" &&
+        problem.detail.includes("sign_up") &&
+        problem.detail.includes("en"),
+    ]);
+
+    const metrics = await call(`${base}/metrics`);
+    checks.push([
+      "the missing-template rejection is counted",
+      typeof metrics.body === "string" &&
+        metrics.body.includes('monaca_template_missing_total{purpose="sign_up",locale="en"}'),
+    ]);
+
+    const restored = await call(`${base}/v1/message-templates/sign_up/en/restore`, {
+      method: "POST",
+      headers,
+    });
+    checks.push(["POST restore re-seeds the built-in row", restored.status === 204]);
+
+    const retried = await call(
+      `${base}/t/${TENANT}/interaction/${encodeURIComponent(interaction)}/sign-up`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, locale: "en" }),
+      },
+    );
+    checks.push([
+      "the same request succeeds after the restore",
+      retried.status === 200 &&
+        (retried.body as { verification_required?: unknown })?.verification_required === true,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "70",
+    title: "template fallback and missing rejection",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: en/zh list → purge en → 500 names sign_up/en → metric → restore → send`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }
@@ -15091,6 +15533,9 @@ async function main(): Promise<number> {
   push(await metricsFlow(base, parsed.internalSecret));
   push(await sdkFlow(base, adminToken));
   push(await tenantLifecycleFlow(base));
+  push(await smsVerificationFlow(base, adminToken));
+  push(await smtpDeliveryFlow(base, adminToken));
+  push(await templateFallbackFlow(base, adminToken));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

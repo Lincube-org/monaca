@@ -525,31 +525,39 @@ pub struct AuthorizedAppRow {
     pub updated_at: OffsetDateTime,
 }
 
-/// One purpose's customised mail copy; a missing row means the built-in default.
+/// One locale's copy for a purpose, either built in or a tenant override.
 #[derive(Debug, Clone, FromRow)]
-pub struct EmailTemplateRow {
-    /// The mail purpose the copy applies to.
+pub struct MessageTemplateRow {
+    /// The message purpose the copy applies to.
     pub purpose: String,
+    /// Lowercase BCP 47 tag.
+    pub locale: String,
+    /// `email` or `sms`.
+    pub channel: String,
     /// The subject line, with `{{variable}}` placeholders already allowed by the server.
     pub subject: String,
     /// The plain-text body.
     pub body: String,
-    /// When the copy was last written.
-    pub updated_at: OffsetDateTime,
+    /// When the copy was last written; `None` for a built-in row.
+    pub updated_at: Option<OffsetDateTime>,
+    /// Whether this row came from `message_templates` rather than an override.
+    pub builtin: bool,
 }
 
-/// The tenant's outbound mail route in `tenant.email_connector` (§6.3).
+/// The tenant's outbound route for one channel in `tenant.delivery_connector` (§6.3).
 #[derive(Debug, Clone, FromRow)]
-pub struct EmailConnectorRow {
-    /// The delivery mechanism. `http` is the only provider; SMTP is a later increment.
+pub struct DeliveryConnectorRow {
+    /// `email` or `sms`.
+    pub channel: String,
+    /// The delivery mechanism: `http`, `smtp` (email) or `twilio` (sms).
     pub provider: String,
-    /// The absolute http(s) endpoint each mail is posted to.
+    /// The endpoint or relay URL each message is posted to.
     pub endpoint: String,
-    /// The envelope sender, e.g. `no-reply@example.com`.
+    /// The envelope sender for email, or the sender id for SMS.
     pub from_address: String,
     /// An optional display name for the sender.
     pub from_name: Option<String>,
-    /// The bearer token, sealed by the caller — the store never sees plaintext.
+    /// The credential blob, sealed by the caller — the store never sees plaintext.
     pub secret_enc: Option<Vec<u8>>,
     /// Whether delivery is attempted at all.
     pub enabled: bool,
@@ -945,19 +953,22 @@ impl Store {
         is_tenant_admin: bool,
         username: Option<&str>,
         username_display: Option<&str>,
+        locale: Option<&str>,
     ) -> Result<AccountRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
 
         let row = sqlx::query_as::<_, AccountRow>(
-            "INSERT INTO tenant.accounts (id, primary_email, display_name, state, is_tenant_admin)
-             VALUES ($1,$2,$3,'active',$4)
+            "INSERT INTO tenant.accounts
+               (id, primary_email, display_name, state, is_tenant_admin, locale)
+             VALUES ($1,$2,$3,'active',$4,$5)
              RETURNING id, primary_email, display_name, avatar_url, state, is_tenant_admin, created_at",
         )
         .bind(account_id.uuid())
         .bind(email)
         .bind(display_name)
         .bind(is_tenant_admin)
+        .bind(locale)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -1015,6 +1026,37 @@ impl Store {
         .bind(account_id.uuid())
         .fetch_optional(&pool)
         .await?)
+    }
+
+    /// An account's stored language, if it set one.
+    pub async fn account_locale(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+    ) -> Result<Option<String>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT locale FROM tenant.accounts WHERE id = $1")
+                .bind(account_id.uuid())
+                .fetch_optional(&pool)
+                .await?;
+        Ok(row.and_then(|(locale,)| locale))
+    }
+
+    /// Replace an account's stored language. `None` clears it and returns to the tenant default.
+    pub async fn set_account_locale(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        locale: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query("UPDATE tenant.accounts SET locale = $2 WHERE id = $1")
+            .bind(account_id.uuid())
+            .bind(locale)
+            .execute(&pool)
+            .await?;
+        Ok(())
     }
 
     /// Accounts newest first, optionally filtered by a case-insensitive substring of the email or
@@ -1452,97 +1494,246 @@ impl Store {
         .await?)
     }
 
-    // ------------------------------------------------------------ email templates
+    // ---------------------------------------------------------- message templates
 
-    /// Every purpose the tenant customised. Purposes without a row use the built-in default.
-    pub async fn email_templates(
+    /// Every built-in row for this tenant, ordered for the console.
+    pub async fn builtin_message_templates(
         &self,
         tenant: &TenantRow,
-    ) -> Result<Vec<EmailTemplateRow>, StoreError> {
+    ) -> Result<Vec<MessageTemplateRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, EmailTemplateRow>(
-            "SELECT purpose, subject, body, updated_at
-             FROM tenant.email_templates ORDER BY purpose",
+        Ok(sqlx::query_as::<_, MessageTemplateRow>(
+            "SELECT purpose, locale, channel, subject, body,
+                    NULL::timestamptz AS updated_at, true AS builtin
+             FROM tenant.message_templates ORDER BY purpose, locale",
         )
         .fetch_all(&pool)
         .await?)
     }
 
-    /// One purpose's customised copy, or `None` when the default applies.
-    pub async fn email_template(
+    /// Every tenant override for this tenant, ordered for the console.
+    pub async fn message_template_overrides(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<MessageTemplateRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, MessageTemplateRow>(
+            "SELECT purpose, locale, channel, subject, body, updated_at, false AS builtin
+             FROM tenant.message_template_overrides ORDER BY purpose, locale",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One locale's built-in copy.
+    pub async fn builtin_message_template(
         &self,
         tenant: &TenantRow,
         purpose: &str,
-    ) -> Result<Option<EmailTemplateRow>, StoreError> {
+        locale: &str,
+    ) -> Result<Option<MessageTemplateRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, EmailTemplateRow>(
-            "SELECT purpose, subject, body, updated_at
-             FROM tenant.email_templates WHERE purpose = $1",
+        Ok(sqlx::query_as::<_, MessageTemplateRow>(
+            "SELECT purpose, locale, channel, subject, body,
+                    NULL::timestamptz AS updated_at, true AS builtin
+             FROM tenant.message_templates WHERE purpose = $1 AND locale = $2",
         )
         .bind(purpose)
+        .bind(locale)
         .fetch_optional(&pool)
         .await?)
     }
 
-    /// Replace one purpose's copy; the next mail for that purpose renders it.
-    pub async fn upsert_email_template(
+    /// One locale's tenant override.
+    pub async fn message_template_override(
         &self,
         tenant: &TenantRow,
         purpose: &str,
-        subject: &str,
-        body: &str,
-    ) -> Result<EmailTemplateRow, StoreError> {
+        locale: &str,
+    ) -> Result<Option<MessageTemplateRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, EmailTemplateRow>(
-            "INSERT INTO tenant.email_templates (purpose, subject, body)
-             VALUES ($1,$2,$3)
-             ON CONFLICT (purpose) DO UPDATE
-             SET subject = EXCLUDED.subject, body = EXCLUDED.body, updated_at = now()
-             RETURNING purpose, subject, body, updated_at",
+        Ok(sqlx::query_as::<_, MessageTemplateRow>(
+            "SELECT purpose, locale, channel, subject, body, updated_at, false AS builtin
+             FROM tenant.message_template_overrides WHERE purpose = $1 AND locale = $2",
         )
         .bind(purpose)
+        .bind(locale)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Replace one locale's copy.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_message_template_override(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        locale: &str,
+        channel: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<MessageTemplateRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, MessageTemplateRow>(
+            "INSERT INTO tenant.message_template_overrides
+               (purpose, locale, channel, subject, body)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (purpose, locale) DO UPDATE
+             SET channel = EXCLUDED.channel,
+                 subject = EXCLUDED.subject,
+                 body = EXCLUDED.body,
+                 updated_at = now()
+             RETURNING purpose, locale, channel, subject, body, updated_at, false AS builtin",
+        )
+        .bind(purpose)
+        .bind(locale)
+        .bind(channel)
         .bind(subject)
         .bind(body)
         .fetch_one(&pool)
         .await?)
     }
 
-    /// Drop the customisation so the built-in default applies again; `false` when none existed.
+    /// Drop the tenant override so the built-in copy applies again; `false` when none existed.
+    pub async fn delete_message_template_override(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        locale: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "DELETE FROM tenant.message_template_overrides WHERE purpose = $1 AND locale = $2",
+        )
+        .bind(purpose)
+        .bind(locale)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove a built-in row. This is the explicit "no copy for this locale" state: a send that
+/// falls through to it fails rather than carrying a placeholder.
+    pub async fn delete_builtin_message_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        locale: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result =
+            sqlx::query("DELETE FROM tenant.message_templates WHERE purpose = $1 AND locale = $2")
+                .bind(purpose)
+                .bind(locale)
+                .execute(&pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Re-seed one built-in row from the JSON resources; `false` when the resources have no such
+    /// purpose/locale.
+    pub async fn restore_builtin_message_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        locale: &str,
+    ) -> Result<bool, StoreError> {
+        let Some(row) = crate::templates::builtins()
+            .into_iter()
+            .find(|row| row.purpose == purpose && row.locale == locale)
+        else {
+            return Ok(false);
+        };
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.message_templates (purpose, locale, channel, subject, body)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (purpose, locale) DO UPDATE
+             SET channel = EXCLUDED.channel, subject = EXCLUDED.subject, body = EXCLUDED.body",
+        )
+        .bind(row.purpose)
+        .bind(row.locale)
+        .bind(row.channel)
+        .bind(row.subject)
+        .bind(row.body)
+        .execute(&pool)
+        .await?;
+        Ok(true)
+    }
+
+    /// The English override for a purpose, for the legacy `/v1/email-templates` view.
+    pub async fn email_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+    ) -> Result<Option<MessageTemplateRow>, StoreError> {
+        self.message_template_override(tenant, purpose, "en").await
+    }
+
+    /// Replace the English override for a purpose.
+    pub async fn upsert_email_template(
+        &self,
+        tenant: &TenantRow,
+        purpose: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<MessageTemplateRow, StoreError> {
+        self.upsert_message_template_override(tenant, purpose, "en", "email", subject, body)
+            .await
+    }
+
+    /// Drop the English override so the built-in copy applies again; `false` when none existed.
     pub async fn delete_email_template(
         &self,
         tenant: &TenantRow,
         purpose: &str,
     ) -> Result<bool, StoreError> {
-        let pool = self.tenant_pool(&tenant.db_name).await?;
-        let result = sqlx::query("DELETE FROM tenant.email_templates WHERE purpose = $1")
-            .bind(purpose)
-            .execute(&pool)
-            .await?;
-        Ok(result.rows_affected() > 0)
+        self.delete_message_template_override(tenant, purpose, "en")
+            .await
     }
 
-    // ------------------------------------------------------------ email connector
+    // ------------------------------------------------------------ delivery connectors
 
-    /// The tenant's outbound mail route, or `None` while nothing is configured.
-    pub async fn email_connector(
+    /// Every configured route for this tenant, one row per channel.
+    pub async fn delivery_connectors(
         &self,
         tenant: &TenantRow,
-    ) -> Result<Option<EmailConnectorRow>, StoreError> {
+    ) -> Result<Vec<DeliveryConnectorRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, EmailConnectorRow>(
-            "SELECT provider, endpoint, from_address, from_name, secret_enc, enabled, updated_at
-             FROM tenant.email_connector WHERE singleton",
+        Ok(sqlx::query_as::<_, DeliveryConnectorRow>(
+            "SELECT channel, provider, endpoint, from_address, from_name, secret_enc,
+                    enabled, updated_at
+             FROM tenant.delivery_connector ORDER BY channel",
         )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// The tenant's route for one channel, or `None` while nothing is configured.
+    pub async fn delivery_connector(
+        &self,
+        tenant: &TenantRow,
+        channel: &str,
+    ) -> Result<Option<DeliveryConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, DeliveryConnectorRow>(
+            "SELECT channel, provider, endpoint, from_address, from_name, secret_enc,
+                    enabled, updated_at
+             FROM tenant.delivery_connector WHERE channel = $1",
+        )
+        .bind(channel)
         .fetch_optional(&pool)
         .await?)
     }
 
-    /// Create or replace the route. When `set_secret` is false the stored secret is preserved, so
-    /// an endpoint change cannot silently drop authentication; `enabled=None` also preserves it.
+    /// Create or replace one channel's route. When `set_secret` is false the stored secret is
+    /// preserved, so an endpoint change cannot silently drop authentication; `enabled=None` also
+    /// preserves it.
     #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_email_connector(
+    pub async fn upsert_delivery_connector(
         &self,
         tenant: &TenantRow,
+        channel: &str,
         provider: &str,
         endpoint: &str,
         from_address: &str,
@@ -1550,23 +1741,25 @@ impl Store {
         secret_enc: Option<&[u8]>,
         set_secret: bool,
         enabled: Option<bool>,
-    ) -> Result<EmailConnectorRow, StoreError> {
+    ) -> Result<DeliveryConnectorRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        Ok(sqlx::query_as::<_, EmailConnectorRow>(
-            "INSERT INTO tenant.email_connector
-               (singleton, provider, endpoint, from_address, from_name, secret_enc, enabled)
-             VALUES (true, $1, $2, $3, $4, $5, COALESCE($6, true))
-             ON CONFLICT (singleton) DO UPDATE
+        Ok(sqlx::query_as::<_, DeliveryConnectorRow>(
+            "INSERT INTO tenant.delivery_connector
+               (channel, provider, endpoint, from_address, from_name, secret_enc, enabled)
+             VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,true))
+             ON CONFLICT (channel) DO UPDATE
              SET provider = EXCLUDED.provider,
                  endpoint = EXCLUDED.endpoint,
                  from_address = EXCLUDED.from_address,
                  from_name = EXCLUDED.from_name,
-                 secret_enc = CASE WHEN $7 THEN EXCLUDED.secret_enc
-                                   ELSE tenant.email_connector.secret_enc END,
-                 enabled = COALESCE($6, tenant.email_connector.enabled),
+                 secret_enc = CASE WHEN $8 THEN EXCLUDED.secret_enc
+                                   ELSE tenant.delivery_connector.secret_enc END,
+                 enabled = COALESCE($7, tenant.delivery_connector.enabled),
                  updated_at = now()
-             RETURNING provider, endpoint, from_address, from_name, secret_enc, enabled, updated_at",
+             RETURNING channel, provider, endpoint, from_address, from_name, secret_enc,
+                       enabled, updated_at",
         )
+        .bind(channel)
         .bind(provider)
         .bind(endpoint)
         .bind(from_address)
@@ -1578,12 +1771,18 @@ impl Store {
         .await?)
     }
 
-    /// Remove the route; `false` when there was none. Mail stays in the outbox either way.
-    pub async fn delete_email_connector(&self, tenant: &TenantRow) -> Result<bool, StoreError> {
+    /// Remove one channel's route; `false` when there was none. Queued messages stay in the outbox.
+    pub async fn delete_delivery_connector(
+        &self,
+        tenant: &TenantRow,
+        channel: &str,
+    ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        let result = sqlx::query("DELETE FROM tenant.email_connector WHERE singleton")
-            .execute(&pool)
-            .await?;
+        let result =
+            sqlx::query("DELETE FROM tenant.delivery_connector WHERE channel = $1")
+                .bind(channel)
+                .execute(&pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -5403,14 +5602,18 @@ impl Store {
         Ok(())
     }
 
-    /// Claim up to `limit` unpublished mail rows for delivery, counting this attempt.
+    /// Claim up to `limit` unpublished rows of `topic`, counting this attempt and scheduling the
+    /// next one.
     ///
     /// `SKIP LOCKED` keeps two server processes from sending the same row at once; a row that
     /// reaches `max_attempts` is excluded from later claims, which is how a permanently failing
-    /// endpoint stops costing requests while the row stays visible to `/internal/mail`.
-    pub async fn outbox_claim_mail(
+    /// endpoint stops costing requests while the row stays visible to `/internal/mail`. The delay
+    /// grows 5 s → 15 s → 45 s → 135 s (capped at 300 s) so a broken provider is not retried on
+    /// every tick.
+    pub async fn outbox_claim(
         &self,
         tenant: &TenantRow,
+        topic: &str,
         limit: i64,
         max_attempts: i32,
     ) -> Result<Vec<OutboxMailRow>, StoreError> {
@@ -5418,21 +5621,25 @@ impl Store {
         Ok(sqlx::query_as::<_, OutboxMailRow>(
             "WITH claimed AS (
                SELECT id FROM tenant.outbox
-               WHERE topic = 'mail.verification'
+               WHERE topic = $3
                  AND published_at IS NULL
                  AND attempts < $2
+                 AND (next_attempt_at IS NULL OR next_attempt_at <= now())
                ORDER BY created_at
                LIMIT $1
                FOR UPDATE SKIP LOCKED
              )
              UPDATE tenant.outbox AS o
-             SET attempts = o.attempts + 1
+             SET attempts = o.attempts + 1,
+                 next_attempt_at = now() + make_interval(
+                   secs => LEAST(300.0, 5.0 * power(3.0, claimed.attempts::double precision)))
              FROM claimed
              WHERE o.id = claimed.id
              RETURNING o.id, o.payload, o.attempts, o.created_at",
         )
         .bind(limit)
         .bind(max_attempts)
+        .bind(topic)
         .fetch_all(&pool)
         .await?)
     }

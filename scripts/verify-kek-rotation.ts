@@ -357,7 +357,7 @@ async function sealedSnapshot(): Promise<{ tenantUuid: string; values: Record<st
             "secret_enc",
             "tenant.credentials WHERE kind = 'totp'",
           ),
-          "email connector secret": await read("secret_enc", "tenant.email_connector"),
+          "email connector secret": await read("secret_enc", "tenant.delivery_connector WHERE channel = 'email'"),
           "social connector secret": await read(
             "client_secret_enc",
             "tenant.social_connectors WHERE connector_id = 'drill-social'",

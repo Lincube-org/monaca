@@ -827,6 +827,70 @@ sign-in, dry-runs suspend, suspends (both the token and token issuance answer 40
 the CAPTCHA/social mocks or the per-IP limit), and the CI e2e job (walk-through, KEK drill and
 ops acceptance). CI run numbers are reported with the batch summary.
 
+## Batch J — delivery channels, SMTP and multilingual copy
+
+### What was actually there before the batch
+
+The outbox was email-only and HTTP-only: `tenant.email_connector` held one `http` route, the
+mailer posted JSON with an optional bearer and gave up after five attempts. Copy was nine English
+strings in Rust plus a per-tenant override row; there was no locale dimension, no invitation mail
+and no SMS. The only locale was `sign_in_experience.language`, used for hosted-page copy. The 60 s
+verification cooldown lived in `verification_codes.created_at`, not in the shared
+`tenant.rate_limit_counters`. This differs from the audit's assumption that a channel abstraction
+already existed: the batch creates it rather than extending one.
+
+### The shared layer and the transports
+
+`tenant_50` renames `email_connector` to `delivery_connector` and keys it by channel (`email` /
+`sms`), with `(email: http|smtp, sms: http|twilio)` enforced by a check. `control_4` renames the
+control index to `tenant_delivery_connectors`; the mailer visits a tenant once and delivers each
+configured channel. Email keeps the existing JSON `http` payload and gains SMTP; SMS gets a JSON
+`http` gateway and a Twilio-shaped `twilio` transport (form body, basic `sid:token`,
+`/2010-04-01/Accounts/<sid>/Messages.json`). SMTP supports `smtps://` (implicit TLS),
+`smtp+starttls://` (STARTTLS required) and `smtp://` only on loopback. Both TLS paths use the
+default rustls verification; there is no certificate-skip switch and no plaintext non-loopback
+relay. Credentials are sealed with the existing tenant-DEK mechanism.
+
+The shared parts are deliberate: one outbox, one claim path, one backoff schedule, one metric
+family, and one per-address cooldown in `tenant.rate_limit_counters` (`verification|email|…` and
+`sms|verification|…`). The cooldown is now visible to every server instance instead of being a
+per-request check on the latest code row. `outbox_claim` increments `attempts` and schedules
+`next_attempt_at` at 5/15/45/135 s (capped at 300 s); after five attempts the row is abandoned.
+Metrics add `monaca_delivery_sent_total`, `monaca_delivery_failed_total`,
+`monaca_delivery_retries_total` (by channel) and `monaca_template_missing_total` (by purpose and
+locale).
+
+SMS verification is fail-closed: `POST /t/{tenant}/verification/sms` answers
+`503 MONACA_SMS_NOT_CONFIGURED` before minting a code when no enabled SMS route exists. With a
+route it writes the same single-use `verification_codes` row (purpose `sms_verification`), queues
+topic `sms.verification`, and `POST …/verify` distinguishes wrong/unknown (`401
+MONACA_INVALID_VERIFICATION_CODE`), expired (`401 MONACA_VERIFICATION_CODE_EXPIRED`) and
+exhausted (`429`).
+
+### Multilingual copy
+
+Built-in copy now lives in `crates/monaca-store/templates/{en,zh-cn}.json` and is seeded into
+`message_templates` by `apply_tenant`; tenant edits live in `message_template_overrides` keyed by
+`(purpose, locale)`. Every send resolves user locale → tenant default → `en`, taking an override
+before the built-in row at each step. A purpose missing at every level fails `500
+MONACA_TEMPLATE_MISSING` naming the purpose and requested locale; there is no English placeholder
+and no empty body. Eleven purposes have both languages, including `invitation` and
+`sms_verification`; the legacy `/v1/email-templates` surface keeps its nine-purpose English view,
+and `/v1/message-templates` exposes the locale-aware list, override writes, built-in removal
+(`?builtin=true`) and restore. Accounts store an optional `locale` (set at sign-up or
+`PATCH /t/{tenant}/account`); the invitation body and the SMS request accept one too.
+
+### Verification
+
+Steps 68–70 were added to the walk-through and run against local captures:
+`scripts/sms-capture.ts` receives the Twilio form and `scripts/smtp-capture.ts` receives the
+raw SMTP message. The two gateway-only skips (4/4b) are unchanged. CI numbers are reported with
+the batch summary.
+
+Known limits: the offline providers prove the wire shape, not a real Twilio/SMTP account; SMTP
+TLS is implemented with rustls/webpki but no live TLS relay was exercised in CI; SMS is a
+verification channel, not a sign-in identifier (accounts still identify by email/username).
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

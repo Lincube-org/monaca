@@ -1091,6 +1091,9 @@ pub struct EmailBody {
     pub email: String,
     /// The CAPTCHA widget's token when the tenant gates this request.
     pub captcha_token: Option<String>,
+    /// The recipient's language for this message; the tenant default and then English follow.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// `POST …/sign-up` body.
@@ -1109,6 +1112,9 @@ pub struct SignUpBody {
     pub avatar_url: Option<String>,
     /// The CAPTCHA widget's token when the tenant gates sign-up.
     pub captcha_token: Option<String>,
+    /// The account's language; stored on the account after verification.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// `POST …/sign-up/verify` body.
@@ -1126,6 +1132,9 @@ pub struct SignUpVerifyBody {
     pub username: Option<String>,
     /// An optional avatar URL when the tenant collects one at sign-up.
     pub avatar_url: Option<String>,
+    /// The account's language; the tenant default applies when absent.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// The body of the email-code sign-in verification.
@@ -1405,6 +1414,7 @@ pub(crate) async fn request_verification(
     tenant: &TenantRow,
     purpose: &str,
     email: &str,
+    user_locale: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     let now = state.now();
     if let Some(row) = state
@@ -1421,23 +1431,42 @@ pub(crate) async fn request_verification(
 
     let code = generate_numeric_code(DEFAULT_CODE_DIGITS);
     let expires_at = now + Duration::seconds(VERIFICATION_CODE_TTL_SECS);
-    state
-        .store
-        .insert_verification_code(tenant, purpose, email, &hash_secret(&code), expires_at)
-        .await?;
-
     let expires_in = (VERIFICATION_CODE_TTL_SECS / 60).to_string();
-    let (subject, body) = crate::email_templates::mail_copy(
+    let (subject, body) = crate::message_templates::message_copy(
         state,
         tenant,
         purpose,
+        user_locale,
         &[
             ("tenant", tenant.slug.as_str()),
             ("code", code.as_str()),
             ("expires_in", expires_in.as_str()),
         ],
     )
-    .await;
+    .await?;
+
+    // The same shared fixed-window counter the SMS path uses: a second instance sees this send
+    // immediately, and the email channel no longer keeps its cooldown only in process memory.
+    let (count, _window_start) = state
+        .store
+        .rate_limit_hit(
+            tenant,
+            &format!("verification|email|{purpose}|{email}"),
+            VERIFICATION_RESEND_SECS as u32,
+            now,
+        )
+        .await?;
+    if count > 1 {
+        return Err(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "a code was requested moments ago; try again shortly",
+        ));
+    }
+
+    state
+        .store
+        .insert_verification_code(tenant, purpose, email, &hash_secret(&code), expires_at)
+        .await?;
 
     // §6.3: the outbox is how the Bun side and the acceptance script see what would be mailed.
     let mut tx = state.store.begin_tenant(tenant).await?;
@@ -1595,6 +1624,7 @@ async fn complete_sign_up(
     username_display: Option<String>,
     display_name: Option<String>,
     avatar_url: Option<String>,
+    locale: Option<String>,
 ) -> Result<Response, ApiError> {
     let phc = hash_password(password.to_owned(), state.argon)
         .await
@@ -1612,6 +1642,7 @@ async fn complete_sign_up(
             false,
             username.as_deref(),
             username_display.as_deref(),
+            locale.as_deref(),
         )
         .await?;
     let account = match avatar_url.as_deref() {
@@ -1734,7 +1765,7 @@ pub async fn sign_up(
             ));
         }
         return Ok(
-            request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email)
+            request_verification(&state, &tenant, PURPOSE_SIGN_UP, &email, body.locale.as_deref())
                 .await?
                 .into_response(),
         );
@@ -1774,6 +1805,7 @@ pub async fn sign_up(
         username_display,
         display_name,
         avatar_url,
+        body.locale,
     )
     .await
 }
@@ -1837,6 +1869,7 @@ pub async fn sign_up_verify(
         username_display,
         display_name,
         avatar_url,
+        body.locale,
     )
     .await
 }
@@ -1868,7 +1901,7 @@ pub async fn sign_in_code(
     )
     .await?;
     let email = normalise_email(&body.email)?;
-    request_verification(&state, &tenant, PURPOSE_SIGN_IN, &email).await
+    request_verification(&state, &tenant, PURPOSE_SIGN_IN, &email, body.locale.as_deref()).await
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/sign-in/code/verify`.
@@ -1959,16 +1992,6 @@ pub async fn sign_in_link(
 
     let token = hex::encode(generate_challenge());
     let expires_at = now + Duration::seconds(VERIFICATION_CODE_TTL_SECS);
-    state
-        .store
-        .insert_verification_code(
-            &tenant,
-            PURPOSE_SIGN_IN_LINK,
-            &email,
-            &hash_secret(&token),
-            expires_at,
-        )
-        .await?;
 
     let url = append_query(
         &format!(
@@ -1980,17 +2003,45 @@ pub async fn sign_in_link(
         &[("token", token.as_str())],
     );
     let expires_in = (VERIFICATION_CODE_TTL_SECS / 60).to_string();
-    let (subject, body) = crate::email_templates::mail_copy(
+    let (subject, body) = crate::message_templates::message_copy(
         &state,
         &tenant,
         PURPOSE_SIGN_IN_LINK,
+        body.locale.as_deref(),
         &[
             ("tenant", tenant.slug.as_str()),
             ("url", url.as_str()),
             ("expires_in", expires_in.as_str()),
         ],
     )
-    .await;
+    .await?;
+
+    let (count, _window_start) = state
+        .store
+        .rate_limit_hit(
+            &tenant,
+            &format!("verification|email|{PURPOSE_SIGN_IN_LINK}|{email}"),
+            VERIFICATION_RESEND_SECS as u32,
+            now,
+        )
+        .await?;
+    if count > 1 {
+        return Err(ApiError::problem(
+            kinds::TOO_MANY_ATTEMPTS,
+            "a link was requested moments ago; try again shortly",
+        ));
+    }
+
+    state
+        .store
+        .insert_verification_code(
+            &tenant,
+            PURPOSE_SIGN_IN_LINK,
+            &email,
+            &hash_secret(&token),
+            expires_at,
+        )
+        .await?;
     let mut tx = state.store.begin_tenant(&tenant).await?;
     state
         .store
@@ -2128,7 +2179,14 @@ pub async fn password_forgot(
     )
     .await?;
     let email = normalise_email(&body.email)?;
-    request_verification(&state, &tenant, PURPOSE_PASSWORD_RESET, &email).await
+    request_verification(
+        &state,
+        &tenant,
+        PURPOSE_PASSWORD_RESET,
+        &email,
+        body.locale.as_deref(),
+    )
+    .await
 }
 
 /// `POST /t/{tenant}/interaction/{iid}/password/reset` — prove the address, set a new password.

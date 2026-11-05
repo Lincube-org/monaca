@@ -21,6 +21,7 @@ mod migrate;
 mod provision;
 mod repo;
 mod runtime_state;
+mod templates;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -37,11 +38,11 @@ pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
     AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditRow, AuthCodeRow, AuthorizedAppRow,
-    BrandingRow, ClientRow, ConsentRow, EmailConnectorRow, EmailTemplateRow, GrantRow,
-    LoginFailureRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow, RateLimitRow,
-    RefreshRow, RoleRow, SessionRow, SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow,
-    SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow, SsoConnectorRow,
-    SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow, WebhookRow,
+    BrandingRow, ClientRow, ConsentRow, DeliveryConnectorRow, GrantRow, LoginFailureRow,
+    MessageTemplateRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow, ParRow, PasskeyRow,
+    RateLimitRow, RefreshRow, RoleRow, SessionRow, SignInExperienceRow, SignInGuardrailsPatch,
+    SignInPhraseRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow,
+    SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow, WebhookDeliveryRow, WebhookRow,
 };
 pub use runtime_state::InteractionRow;
 
@@ -137,6 +138,8 @@ pub mod topics {
     pub const AGENT: &str = "agent";
     /// A dev mail message, read back by `GET /internal/mail`; a real relay consumes it later.
     pub const MAIL: &str = "mail.verification";
+    /// An SMS message the mailer claims for the tenant's SMS connector.
+    pub const SMS: &str = "sms.verification";
 }
 
 /// How the store reaches PostgreSQL — §2.2.
@@ -699,16 +702,16 @@ impl Store {
         .await?)
     }
 
-    /// Active tenants whose database has an email connector, ordered by slug.
+    /// Active tenants whose database has at least one delivery connector, ordered by slug.
     ///
     /// The index is maintained by connector writes and reconciled by `migrate`; without it the
     /// mailer would open every active tenant database on every poll just to discover that most
     /// have no connector.
-    pub async fn tenants_with_email_connector(&self) -> Result<Vec<TenantRow>, StoreError> {
+    pub async fn tenants_with_delivery_connector(&self) -> Result<Vec<TenantRow>, StoreError> {
         Ok(sqlx::query_as::<_, TenantRow>(
             "SELECT t.id, t.slug, t.short, t.db_name, t.issuer, t.state
              FROM tenants t
-             JOIN tenant_email_connectors c ON c.tenant_id = t.id
+             JOIN tenant_delivery_connectors c ON c.tenant_id = t.id
              WHERE t.state = 'active'
              ORDER BY t.slug",
         )
@@ -716,11 +719,14 @@ impl Store {
         .await?)
     }
 
-    /// Record that a tenant has an email connector row. Called before the tenant-database write on
-    /// the create path, so a failed index write cannot leave a connector that the mailer never sees.
-    pub async fn mark_email_connector_present(&self, tenant: &TenantRow) -> Result<(), StoreError> {
+    /// Record that a tenant has a connector row. Called before the tenant-database write on the
+    /// create path, so a failed index write cannot leave a connector that the mailer never sees.
+    pub async fn mark_delivery_connector_present(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO tenant_email_connectors (tenant_id) VALUES ($1)
+            "INSERT INTO tenant_delivery_connectors (tenant_id) VALUES ($1)
              ON CONFLICT (tenant_id) DO UPDATE SET updated_at = now()",
         )
         .bind(tenant.id)
@@ -729,9 +735,12 @@ impl Store {
         Ok(())
     }
 
-    /// Remove a tenant from the email-connector index.
-    pub async fn forget_email_connector_index(&self, tenant: &TenantRow) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM tenant_email_connectors WHERE tenant_id = $1")
+    /// Remove a tenant from the delivery-connector index.
+    pub async fn forget_delivery_connector_index(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM tenant_delivery_connectors WHERE tenant_id = $1")
             .bind(tenant.id)
             .execute(&self.control)
             .await?;
@@ -740,14 +749,14 @@ impl Store {
 
     /// Make the index row match the tenant database. Called by `migrate`, which is the upgrade
     /// path for connectors that predate the index.
-    pub async fn reconcile_email_connector_index(
+    pub async fn reconcile_delivery_connector_index(
         &self,
         tenant: &TenantRow,
     ) -> Result<(), StoreError> {
-        if self.email_connector(tenant).await?.is_some() {
-            self.mark_email_connector_present(tenant).await
+        if !self.delivery_connectors(tenant).await?.is_empty() {
+            self.mark_delivery_connector_present(tenant).await
         } else {
-            self.forget_email_connector_index(tenant).await
+            self.forget_delivery_connector_index(tenant).await
         }
     }
 

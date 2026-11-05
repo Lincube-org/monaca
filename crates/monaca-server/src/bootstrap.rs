@@ -57,6 +57,7 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
                     true,
                     None,
                     None,
+                    None,
                 )
                 .await?;
             (account, true)
@@ -200,7 +201,7 @@ pub async fn migrate(store: &Store) -> anyhow::Result<()> {
         }
         // Upgrade path for connectors created before the control-plane index existed. The
         // connector write path maintains the index from here on.
-        store.reconcile_email_connector_index(&tenant).await?;
+        store.reconcile_delivery_connector_index(&tenant).await?;
     }
     Ok(())
 }

@@ -177,6 +177,8 @@ pub struct UpdateProfileBody {
     pub username: Option<String>,
     /// An absolute http(s) avatar URL; an empty string clears it.
     pub avatar_url: Option<String>,
+    /// The account's message language; an empty string clears it and returns to the tenant default.
+    pub locale: Option<String>,
 }
 
 /// Reject a display name that is blank or too long, trimming the accepted one.
@@ -243,10 +245,30 @@ pub async fn update_account(
         .as_deref()
         .map(check_avatar_url)
         .transpose()?;
-    if display_name.is_none() && username.is_none() && avatar_url.is_none() {
+    let locale = body
+        .locale
+        .as_deref()
+        .map(|raw| {
+            if raw.trim().is_empty() {
+                Ok(None)
+            } else {
+                crate::copy::normalise_language(raw).map(Some).ok_or_else(|| {
+                    ApiError::problem(
+                        kinds::INVALID_REQUEST,
+                        "locale must be a BCP 47 language tag or empty",
+                    )
+                })
+            }
+        })
+        .transpose()?;
+    if display_name.is_none()
+        && username.is_none()
+        && avatar_url.is_none()
+        && locale.is_none()
+    {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            "nothing to update; send `display_name`, `username` and/or `avatar_url`",
+            "nothing to update; send `display_name`, `username`, `avatar_url` and/or `locale`",
         ));
     }
 
@@ -272,6 +294,12 @@ pub async fn update_account(
                 &username.value,
                 username.display.as_deref(),
             )
+            .await?;
+    }
+    if let Some(locale) = locale {
+        state
+            .store
+            .set_account_locale(&tenant, account.account_id(), locale.as_deref())
             .await?;
     }
     Ok(Json(profile_json(&state, &tenant, &account).await?))
@@ -320,11 +348,16 @@ pub async fn request_email_change(
             "email is already taken",
         ));
     }
+    let locale = state
+        .store
+        .account_locale(&tenant, account.account_id())
+        .await?;
     crate::protocol::request_verification(
         &state,
         &tenant,
         crate::protocol::PURPOSE_EMAIL_CHANGE,
         &email,
+        locale.as_deref(),
     )
     .await
 }
@@ -352,7 +385,7 @@ pub async fn verify_email_change(
         .update_primary_email(&tenant, account.account_id(), &email)
         .await?;
     // The previous owner of the address is told the address no longer belongs to this account.
-    notify(&state, &tenant, &previous, "email_changed").await?;
+    notify(&state, &tenant, account.account_id(), &previous, "email_changed").await?;
     Ok(Json(profile_json(&state, &tenant, &account).await?))
 }
 
@@ -360,16 +393,19 @@ pub async fn verify_email_change(
 async fn notify(
     state: &Arc<AppState>,
     tenant: &TenantRow,
+    account: monaca_types::AccountId,
     to: &str,
     purpose: &str,
 ) -> Result<(), ApiError> {
-    let (subject, body) = crate::email_templates::mail_copy(
+    let locale = state.store.account_locale(tenant, account).await?;
+    let (subject, body) = crate::message_templates::message_copy(
         state,
         tenant,
         purpose,
+        locale.as_deref(),
         &[("tenant", tenant.slug.as_str())],
     )
-    .await;
+    .await?;
     let mut tx = state.store.begin_tenant(tenant).await?;
     state
         .store
@@ -400,11 +436,16 @@ pub async fn request_deletion(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let (tenant, account) = signed_in_account(&state, &tenant, &headers).await?;
+    let locale = state
+        .store
+        .account_locale(&tenant, account.account_id())
+        .await?;
     crate::protocol::request_verification(
         &state,
         &tenant,
         crate::protocol::PURPOSE_DELETE_ACCOUNT,
         &account.primary_email,
+        locale.as_deref(),
     )
     .await
 }
@@ -428,7 +469,14 @@ pub async fn confirm_deletion(
         &body.code,
     )
     .await?;
-    notify(&state, &tenant, &account.primary_email, "account_deleted").await?;
+    notify(
+        &state,
+        &tenant,
+        account.account_id(),
+        &account.primary_email,
+        "account_deleted",
+    )
+    .await?;
     if !state
         .store
         .delete_account(&tenant, account.account_id())
@@ -542,7 +590,14 @@ pub async fn change_password(
         .store
         .revoke_other_sessions(&tenant, account.account_id(), current_session)
         .await?;
-    notify(&state, &tenant, &account.primary_email, "password_changed").await?;
+    notify(
+        &state,
+        &tenant,
+        account.account_id(),
+        &account.primary_email,
+        "password_changed",
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -335,6 +335,9 @@ pub struct CreateInvitationBody {
     pub role: Option<String>,
     /// How long the invitation keeps admitting its address; defaults to 7 days.
     pub expires_in_days: Option<i64>,
+    /// The invitee's language; the tenant default and then English follow.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// `GET /v1/orgs/{org}/invitations` — the invitations that still admit their address (§6.2).
@@ -352,8 +355,8 @@ pub async fn list_invitations(
 
 /// `POST /v1/orgs/{org}/invitations` — invite an email address to join the org.
 ///
-/// The invitation writes a tenant-chain audit event and nothing else: no token is minted and no
-/// email is sent, because acceptance is the invited account signing in (§6.2).
+/// The invitation writes a tenant-chain audit event and queues the localized `invitation` mail.
+/// No token is minted: acceptance is the invited account signing in (§6.2).
 pub async fn create_invitation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -396,6 +399,33 @@ pub async fn create_invitation(
             expires_at,
         )
         .await?;
+
+    let (subject, text) = crate::message_templates::message_copy(
+        &state,
+        &tenant,
+        "invitation",
+        body.locale.as_deref(),
+        &[
+            ("tenant", tenant.slug.as_str()),
+            ("org", org.slug.as_str()),
+        ],
+    )
+    .await?;
+    let mut tx = state.store.begin_tenant(&tenant).await?;
+    state
+        .store
+        .outbox_append(
+            &mut *tx,
+            monaca_store::topics::MAIL,
+            &json!({
+                "to": row.email,
+                "purpose": "invitation",
+                "subject": subject,
+                "body": text,
+            }),
+        )
+        .await?;
+    tx.commit().await?;
 
     let event = AuditEvent {
         id: EventId::new(),

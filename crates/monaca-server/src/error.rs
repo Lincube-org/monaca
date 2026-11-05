@@ -267,6 +267,27 @@ pub mod kinds {
         "Social provider error",
         502,
     );
+    /// No copy exists for the purpose in any locale of the fallback chain.
+    pub const TEMPLATE_MISSING: ProblemKind = ProblemKind::new(
+        "template_missing",
+        "MONACA_TEMPLATE_MISSING",
+        "Message template missing",
+        500,
+    );
+    /// The tenant has no enabled SMS connector.
+    pub const SMS_NOT_CONFIGURED: ProblemKind = ProblemKind::new(
+        "sms_not_configured",
+        "MONACA_SMS_NOT_CONFIGURED",
+        "SMS channel not configured",
+        503,
+    );
+    /// The SMS code exists but its expiry passed.
+    pub const VERIFICATION_CODE_EXPIRED: ProblemKind = ProblemKind::new(
+        "verification_code_expired",
+        "MONACA_VERIFICATION_CODE_EXPIRED",
+        "Verification code expired",
+        401,
+    );
     /// The server could not complete a valid request.
     pub const INTERNAL: ProblemKind =
         ProblemKind::new("internal", "MONACA_INTERNAL", "Internal error", 500);

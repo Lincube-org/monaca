@@ -559,6 +559,32 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         &["get", "patch", "delete"],
         "Delivery connector",
     ),
+    (
+        "/v1/sms-connector",
+        &["get", "patch", "delete"],
+        "SMS connector",
+    ),
+    ("/v1/message-templates", &["get"], "Message templates"),
+    (
+        "/v1/message-templates/{purpose}/{locale}",
+        &["patch", "delete"],
+        "One message template",
+    ),
+    (
+        "/v1/message-templates/{purpose}/{locale}/restore",
+        &["post"],
+        "Restore a built-in message template",
+    ),
+    (
+        "/t/{tenant}/verification/sms",
+        &["post"],
+        "Send an SMS verification code",
+    ),
+    (
+        "/t/{tenant}/verification/sms/verify",
+        &["post"],
+        "Verify an SMS code",
+    ),
     ("/v1/resources", &["get", "post"], "API resources"),
     (
         "/v1/resources/{resource}",
@@ -652,6 +678,14 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
         .route(
             "/t/{tenant}/oauth2/end-session",
             get(crate::protocol::end_session).post(crate::protocol::end_session_post),
+        )
+        .route(
+            "/t/{tenant}/verification/sms",
+            post(crate::sms::request_code),
+        )
+        .route(
+            "/t/{tenant}/verification/sms/verify",
+            post(crate::sms::verify_code),
         )
         .route(
             "/t/{tenant}/interaction/{iid}",
@@ -1008,18 +1042,37 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/email-templates",
-            get(crate::email_templates::list_email_templates),
+            get(crate::message_templates::list_email_templates),
         )
         .route(
             "/v1/email-templates/{purpose}",
-            patch(crate::email_templates::update_email_template)
-                .delete(crate::email_templates::reset_email_template),
+            patch(crate::message_templates::update_email_template)
+                .delete(crate::message_templates::reset_email_template),
+        )
+        .route(
+            "/v1/message-templates",
+            get(crate::message_templates::list_message_templates),
+        )
+        .route(
+            "/v1/message-templates/{purpose}/{locale}",
+            patch(crate::message_templates::update_message_template)
+                .delete(crate::message_templates::delete_message_template),
+        )
+        .route(
+            "/v1/message-templates/{purpose}/{locale}/restore",
+            post(crate::message_templates::restore_message_template),
         )
         .route(
             "/v1/email-connector",
             get(crate::email_connector::get_email_connector)
                 .patch(crate::email_connector::update_email_connector)
                 .delete(crate::email_connector::delete_email_connector),
+        )
+        .route(
+            "/v1/sms-connector",
+            get(crate::email_connector::get_sms_connector)
+                .patch(crate::email_connector::update_sms_connector)
+                .delete(crate::email_connector::delete_sms_connector),
         )
         .route(
             "/v1/resources",

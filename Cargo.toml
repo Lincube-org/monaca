@@ -44,6 +44,15 @@ hyper = { version = "1.12.0", features = ["server", "http1", "http2"] }
 # userinfo read. `rustls-tls` keeps the TLS stack sqlx already uses (rustls + ring) instead of
 # adding a second native-TLS provider.
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+# SMTP is the self-hosted delivery path. `tokio1-rustls-tls` keeps the rustls/webpki stack used
+# everywhere else; there is deliberately no native-tls or "accept invalid certs" feature.
+lettre = { version = "0.11.23", default-features = false, features = [
+    "builder",
+    "hostname",
+    "smtp-transport",
+    "pool",
+    "tokio1-rustls-tls",
+] }
 
 # --- storage ----------------------------------------------------------------
 # Runtime queries only (query_as + FromRow); the `macros` feature is deliberately

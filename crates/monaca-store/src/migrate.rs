@@ -47,6 +47,11 @@ const CONTROL: &[(i64, &str, &str)] = &[
         "tenant lifecycle: the archived state (§5.3)",
         include_str!("../migrations/control_3.sql"),
     ),
+    (
+        4,
+        "delivery-connector index (§5.3)",
+        include_str!("../migrations/control_4.sql"),
+    ),
 ];
 
 /// The tenant set (§5.6). Applied to each tenant database after `CREATE DATABASE`.
@@ -296,6 +301,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "remove the unused phone identifier kind (M1)",
         include_str!("../migrations/tenant_49.sql"),
     ),
+    (
+        50,
+        "delivery channels, multilingual templates and retry backoff (M1)",
+        include_str!("../migrations/tenant_50.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every
@@ -353,6 +363,23 @@ pub async fn apply_tenant(pool: &PgPool, _short: &str) -> Result<MigrationReport
         } else {
             report.skipped += 1;
         }
+    }
+
+    // Built-in copy is seed data, not a migration statement: the JSON resources are the editable
+    // form. `ON CONFLICT DO NOTHING` keeps a tenant's override and re-seeds a locale an operator
+    // deliberately removed on the next migrate.
+    for row in crate::templates::builtins() {
+        sqlx::query(
+            "INSERT INTO message_templates (purpose, locale, channel, subject, body)
+             VALUES ($1,$2,$3,$4,$5) ON CONFLICT (purpose, locale) DO NOTHING",
+        )
+        .bind(row.purpose)
+        .bind(row.locale)
+        .bind(row.channel)
+        .bind(row.subject)
+        .bind(row.body)
+        .execute(&mut *tx)
+        .await?;
     }
 
     tx.commit().await?;

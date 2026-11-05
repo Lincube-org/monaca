@@ -388,10 +388,10 @@ async function seedConnectors(
     try {
       await raw(
         db,
-        `INSERT INTO tenant.email_connector
-           (singleton, provider, endpoint, from_address, enabled)
-         VALUES (true, 'http', 'http://127.0.0.1:39999', 'bench@example.test', true)
-         ON CONFLICT (singleton) DO UPDATE SET
+        `INSERT INTO tenant.delivery_connector
+           (channel, provider, endpoint, from_address, enabled)
+         VALUES ('email', 'http', 'http://127.0.0.1:39999', 'bench@example.test', true)
+         ON CONFLICT (channel) DO UPDATE SET
            provider = EXCLUDED.provider,
            endpoint = EXCLUDED.endpoint,
            from_address = EXCLUDED.from_address,
@@ -404,7 +404,7 @@ async function seedConnectors(
   }
   await raw(
     control,
-    `INSERT INTO tenant_email_connectors (tenant_id)
+    `INSERT INTO tenant_delivery_connectors (tenant_id)
      SELECT id FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")})
      ON CONFLICT (tenant_id) DO NOTHING`,
   );
@@ -424,14 +424,14 @@ async function clearConnectors(
   for (const row of rows) {
     const db = new Bun.SQL(withDatabase(pg.adminUrl, row.db_name));
     try {
-      await raw(db, "DELETE FROM tenant.email_connector");
+      await raw(db, "DELETE FROM tenant.delivery_connector");
     } finally {
       await db.close();
     }
   }
   await raw(
     control,
-    `DELETE FROM tenant_email_connectors
+    `DELETE FROM tenant_delivery_connectors
      WHERE tenant_id IN (SELECT id FROM tenants WHERE slug IN (${slugs.map(sqlLiteral).join(",")}))`,
   );
 }
@@ -642,7 +642,7 @@ interface DbReport {
 
 const BACKGROUND_SQL = [
   "FROM tenants WHERE state = 'active'",
-  "tenant.email_connector",
+  "tenant.delivery_connector",
   "pg_stat_statements_reset",
 ];
 
@@ -917,7 +917,7 @@ async function poolPhase(
       stats.available && stats.sql !== undefined ? await statements(stats.sql) : [];
     const activeListQueries = all
       .filter((row) => {
-        if (row.query.includes("tenant_email_connectors")) return true;
+        if (row.query.includes("tenant_delivery_connectors")) return true;
         const trimmed = row.query.trimStart();
         return (
           !trimmed.startsWith("UPDATE") &&
@@ -927,10 +927,10 @@ async function poolPhase(
       })
       .reduce((sum, row) => sum + row.calls, 0);
     const connectorQueries = all
-      .filter((row) => row.query.includes("tenant.email_connector"))
+      .filter((row) => row.query.includes("tenant.delivery_connector"))
       .reduce((sum, row) => sum + row.calls, 0);
     const indexQueries = all
-      .filter((row) => row.query.includes("tenant_email_connectors"))
+      .filter((row) => row.query.includes("tenant_delivery_connectors"))
       .reduce((sum, row) => sum + row.calls, 0);
 
     return {

@@ -71,6 +71,10 @@ pub struct Metrics {
     mailer_last_tick_micros: AtomicU64,
     mailer_max_tick_micros: AtomicU64,
     mailer_tenants_last: AtomicU64,
+    delivery_sent: Mutex<HashMap<&'static str, u64>>,
+    delivery_failed: Mutex<HashMap<&'static str, u64>>,
+    delivery_retries: Mutex<HashMap<&'static str, u64>>,
+    template_missing: Mutex<HashMap<(String, String), u64>>,
 }
 
 impl Metrics {
@@ -233,6 +237,78 @@ impl Metrics {
             ));
         }
 
+        out
+    }
+
+    /// Record one accepted delivery, by channel.
+    pub fn record_delivery_sent(&self, channel: &'static str) {
+        *lock(&self.delivery_sent).entry(channel).or_insert(0) += 1;
+    }
+
+    /// Record one refused delivery, by channel.
+    pub fn record_delivery_failed(&self, channel: &'static str) {
+        *lock(&self.delivery_failed).entry(channel).or_insert(0) += 1;
+    }
+
+    /// Record one retry claim (the row's second or later attempt), by channel.
+    pub fn record_delivery_retry(&self, channel: &'static str) {
+        *lock(&self.delivery_retries).entry(channel).or_insert(0) += 1;
+    }
+
+    /// Record one send refused because no template exists for the purpose in the requested locale.
+    pub fn record_template_missing(&self, purpose: &str, locale: &str) {
+        let key = (purpose.to_owned(), locale.to_owned());
+        let mut map = lock(&self.template_missing);
+        if map.len() >= SERIES_CAP && !map.contains_key(&key) {
+            if let Some(first) = map.keys().next().cloned() {
+                map.remove(&first);
+            }
+        }
+        *map.entry(key).or_insert(0) += 1;
+    }
+
+    /// The delivery and template section of `/metrics`.
+    pub fn delivery_stats_text(&self) -> String {
+        let mut out = String::with_capacity(512);
+        for (name, help, map) in [
+            (
+                "monaca_delivery_sent_total",
+                "Messages accepted by a provider, by channel.",
+                &self.delivery_sent,
+            ),
+            (
+                "monaca_delivery_failed_total",
+                "Messages a provider or transport refused, by channel.",
+                &self.delivery_failed,
+            ),
+            (
+                "monaca_delivery_retries_total",
+                "Delivery attempts after the first, by channel.",
+                &self.delivery_retries,
+            ),
+        ] {
+            out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+            for (channel, value) in lock(map).iter().map(|(channel, value)| (*channel, *value)) {
+                out.push_str(&format!(
+                    "{name}{{channel=\"{}\"}} {value}\n",
+                    escape(channel)
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP monaca_template_missing_total Sends refused because no locale in the fallback chain had the template.\n",
+        );
+        out.push_str("# TYPE monaca_template_missing_total counter\n");
+        for ((purpose, locale), value) in lock(&self.template_missing)
+            .iter()
+            .map(|((purpose, locale), value)| ((purpose.clone(), locale.clone()), *value))
+        {
+            out.push_str(&format!(
+                "monaca_template_missing_total{{purpose=\"{}\",locale=\"{}\"}} {value}\n",
+                escape(&purpose),
+                escape(&locale)
+            ));
+        }
         out
     }
 
@@ -433,6 +509,7 @@ pub async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         &state.mailer_store.pool_stats(),
     ));
     body.push_str(&state.metrics.mailer_stats_text());
+    body.push_str(&state.metrics.delivery_stats_text());
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
 

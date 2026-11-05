@@ -1,0 +1,57 @@
+{
+  "sign_up": {
+    "channel": "email",
+    "subject": "Your {{tenant}} verification code",
+    "body": "Enter {{code}} to finish creating your account. The code expires in {{expires_in}} minutes."
+  },
+  "sign_in": {
+    "channel": "email",
+    "subject": "Your {{tenant}} sign-in code",
+    "body": "Enter {{code}} to sign in. The code expires in {{expires_in}} minutes."
+  },
+  "password_reset": {
+    "channel": "email",
+    "subject": "Reset your {{tenant}} password",
+    "body": "Enter {{code}} to choose a new password. The code expires in {{expires_in}} minutes."
+  },
+  "email_change": {
+    "channel": "email",
+    "subject": "Confirm your new {{tenant}} email address",
+    "body": "Enter {{code}} to use this address on your account. The code expires in {{expires_in}} minutes."
+  },
+  "delete_account": {
+    "channel": "email",
+    "subject": "Delete your {{tenant}} account",
+    "body": "Enter {{code}} to delete your account. This cannot be undone. The code expires in {{expires_in}} minutes."
+  },
+  "sign_in_link": {
+    "channel": "email",
+    "subject": "Your {{tenant}} sign-in link",
+    "body": "Open {{url}} to sign in. The link expires in {{expires_in}} minutes."
+  },
+  "email_changed": {
+    "channel": "email",
+    "subject": "Your {{tenant}} email address changed",
+    "body": "The email address on your {{tenant}} account was changed. If this was not you, contact your administrator."
+  },
+  "password_changed": {
+    "channel": "email",
+    "subject": "Your {{tenant}} password changed",
+    "body": "The password on your {{tenant}} account was changed. If this was not you, reset it now."
+  },
+  "account_deleted": {
+    "channel": "email",
+    "subject": "Your {{tenant}} account was deleted",
+    "body": "Your {{tenant}} account was deleted. If this was not you, contact your administrator."
+  },
+  "invitation": {
+    "channel": "email",
+    "subject": "You are invited to {{org}} on {{tenant}}",
+    "body": "An administrator invited you to join {{org}} on {{tenant}}. Sign in with this address to accept the invitation."
+  },
+  "sms_verification": {
+    "channel": "sms",
+    "subject": "{{tenant}} verification code",
+    "body": "Your {{tenant}} code is {{code}}. It expires in {{expires_in}} minutes."
+  }
+}

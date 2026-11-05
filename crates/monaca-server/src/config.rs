@@ -93,6 +93,16 @@ pub struct Config {
     /// (`MONACA_SOCIAL_PROVIDER_BASE_URL`), so acceptance can run a local mock. Ignored in
     /// production, where the provider's documented endpoints always win.
     pub social_provider_base_url: Option<String>,
+    /// A dev/CI-only base that replaces Twilio's documented API host
+    /// (`MONACA_SMS_PROVIDER_BASE_URL`), so acceptance can point a real provider shape at a local
+    /// capture. Ignored in production, where `api.twilio.com` always wins.
+    pub sms_provider_base_url: Option<String>,
+    /// SMS verification-code lifetime (`MONACA_SMS_CODE_TTL_SECS`, 600). Dev/CI may shorten it so
+    /// expiry is testable; production always uses 600.
+    pub sms_code_ttl_secs: i64,
+    /// SMS per-address resend cooldown (`MONACA_SMS_RESEND_SECS`, 60). Dev/CI may shorten it;
+    /// production always uses 60.
+    pub sms_resend_secs: i64,
     /// An optional second listener that serves only `/metrics` (`MONACA_METRICS_ADDR`).
     /// Empty disables it; the main server still answers `/metrics` on its own address.
     pub metrics_addr: Option<String>,
@@ -279,6 +289,25 @@ impl Config {
             social_provider_base_url: matches!(environment.as_str(), "dev" | "ci")
                 .then(|| env("MONACA_SOCIAL_PROVIDER_BASE_URL"))
                 .flatten(),
+            sms_provider_base_url: matches!(environment.as_str(), "dev" | "ci")
+                .then(|| env("MONACA_SMS_PROVIDER_BASE_URL"))
+                .flatten(),
+            sms_code_ttl_secs: if matches!(environment.as_str(), "dev" | "ci") {
+                env("MONACA_SMS_CODE_TTL_SECS")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(600)
+                    .clamp(1, 3600)
+            } else {
+                600
+            },
+            sms_resend_secs: if matches!(environment.as_str(), "dev" | "ci") {
+                env("MONACA_SMS_RESEND_SECS")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(60)
+                    .clamp(1, 3600)
+            } else {
+                60
+            },
             metrics_addr: env("MONACA_METRICS_ADDR"),
             trusted_proxies,
             ip_rate_limit_per_minute: env("MONACA_IP_RATE_LIMIT_PER_MINUTE")
@@ -495,6 +524,9 @@ mod tests {
             dev_kek_supplied: false,
             captcha_siteverify_url: None,
             social_provider_base_url: None,
+            sms_provider_base_url: None,
+            sms_code_ttl_secs: 600,
+            sms_resend_secs: 60,
             metrics_addr: None,
             trusted_proxies: vec![
                 TrustedProxy::parse("127.0.0.1/32").expect("literal CIDR"),

@@ -68,7 +68,7 @@ const TENANT_COLUMNS: &[SealedColumn] = &[
         filter: None,
     },
     SealedColumn {
-        table: "tenant.email_connector",
+        table: "tenant.delivery_connector",
         key: "",
         column: "secret_enc",
         filter: None,

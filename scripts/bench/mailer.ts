@@ -140,7 +140,7 @@ async function main(): Promise<number> {
       control,
       `SELECT t.slug, t.db_name
        FROM tenants t
-       JOIN tenant_email_connectors c ON c.tenant_id = t.id
+       JOIN tenant_delivery_connectors c ON c.tenant_id = t.id
        ORDER BY t.slug`,
     )) as { slug: string; db_name: string }[];
     if (tenants.length !== TENANTS) {
