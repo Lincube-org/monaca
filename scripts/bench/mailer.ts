@@ -227,7 +227,10 @@ async function main(): Promise<number> {
       MONACA_IP_RATE_LIMIT_PER_MINUTE: "0",
       MONACA_LOG_LEVEL: "warn",
       MONACA_METRICS_ADDR: "",
+      // The capacity fixture provisions 400 databases and does not exercise the app-role grants;
+      // the escape hatch is explicit so `serve` does not refuse to start.
       MONACA_APP_DATABASE_URL: "",
+      MONACA_ALLOW_SUPERUSER_TENANT_POOLS: "1",
     });
     delete env.MONACA_KEK;
     delete env.MONACA_KEK_PREVIOUS;

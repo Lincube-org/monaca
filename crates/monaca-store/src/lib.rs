@@ -84,6 +84,15 @@ pub enum StoreError {
     /// A value that must be a SQL identifier is not one.
     #[error("refusing to use `{0}` as a SQL identifier")]
     BadIdentifier(String),
+    /// Tenant pools have neither an app DSN nor the explicit superuser escape hatch.
+    #[error(
+        "MONACA_APP_DATABASE_URL is not set; tenant pools refuse to fall back to the control DSN \
+         unless MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1 is set explicitly"
+    )]
+    TenantPoolsNotConfigured,
+    /// The app login named by `MONACA_APP_DATABASE_URL` cannot be used for tenant pools.
+    #[error("MONACA_APP_DATABASE_URL: {0}")]
+    TenantPoolRole(String),
     /// The database driver reported an error.
     #[error("database error: {0}")]
     Database(String),
@@ -147,11 +156,15 @@ pub struct StoreConfig {
     pub mailer_pool_cache: usize,
     /// Whether org transactions `SET LOCAL ROLE` (`MONACA_ORG_ROLE_ENFORCEMENT`).
     pub org_role_enforcement: bool,
-    /// Optional least-privilege base DSN for tenant pools (`MONACA_APP_DATABASE_URL`). When set,
-    /// the per-tenant database name is substituted into this URL instead of `control_url`, so
-    /// request-path connections use the `monaca_app` login rather than the control superuser.
-    /// Unset keeps the pre-existing behaviour.
+    /// Least-privilege base DSN for tenant pools (`MONACA_APP_DATABASE_URL`). The per-tenant
+    /// database name is substituted into this URL, so request-path connections use the
+    /// `monaca_app` login rather than the control superuser. `serve` refuses to start without it
+    /// unless [`Self::allow_control_db_user`] is set.
     pub app_url: Option<String>,
+    /// The explicit escape hatch (`MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1`): use `control_url` for
+    /// tenant pools when no app DSN is configured. Administrative subcommands set this internally
+    /// because migrations, bootstrap and rewrap need the owner connection.
+    pub allow_control_db_user: bool,
 }
 
 impl Default for StoreConfig {
@@ -168,6 +181,7 @@ impl Default for StoreConfig {
             mailer_pool_cache: 128,
             org_role_enforcement: true,
             app_url: None,
+            allow_control_db_user: false,
         }
     }
 }
@@ -193,7 +207,19 @@ impl StoreConfig {
                 .max(1) as usize,
             org_role_enforcement: env_bool("MONACA_ORG_ROLE_ENFORCEMENT", true),
             app_url: env_string("MONACA_APP_DATABASE_URL"),
+            allow_control_db_user: env_bool("MONACA_ALLOW_SUPERUSER_TENANT_POOLS", false),
         }
+    }
+
+    /// Administrative mode: tenant pools use the control DSN regardless of `app_url`.
+    ///
+    /// `migrate`, `bootstrap`, `audit verify` and `rewap` must be able to read and write schemas
+    /// the app login deliberately cannot. This is an internal switch, not an environment variable;
+    /// `serve` never calls it.
+    pub fn with_control_tenant_pools(mut self) -> Self {
+        self.app_url = None;
+        self.allow_control_db_user = true;
+        self
     }
 }
 
@@ -341,13 +367,13 @@ impl Store {
     /// so a retry is a new attempt rather than a burst of concurrent ones.
     pub async fn tenant_pool(&self, db_name: &str) -> Result<PgPool, StoreError> {
         validate_database_name(db_name)?;
-        self.cached_pool(db_name, || async {
-            let base = self
-                .config
-                .app_url
-                .as_deref()
-                .unwrap_or(&self.config.control_url);
-            let options = PgConnectOptions::from_str(base)
+        let base = match self.config.app_url.as_deref() {
+            Some(app) => app.to_owned(),
+            None if self.config.allow_control_db_user => self.config.control_url.clone(),
+            None => return Err(StoreError::TenantPoolsNotConfigured),
+        };
+        self.cached_pool(db_name, || async move {
+            let options = PgConnectOptions::from_str(&base)
                 .map_err(|err| StoreError::Database(format!("tenant pool URL: {err}")))?
                 .database(db_name);
             let connect_started = Instant::now();
@@ -364,6 +390,70 @@ impl Store {
             connected.map_err(StoreError::from)
         })
         .await
+    }
+
+    /// Prove the configured app login can serve tenant pools, and refuse the two unsafe shapes.
+    ///
+    /// `serve` calls this before it listens. A missing app DSN is already refused by
+    /// [`Self::tenant_pool`]; this adds the checks a bad DSN cannot express: the login must exist,
+    /// must not be a superuser, must not inherit privileges, and must be able to read the tenant
+    /// schema of at least one active tenant. A deployment that skipped the app-role provisioning
+    /// therefore fails at startup rather than serving until the first request.
+    pub async fn verify_tenant_pool_role(&self) -> Result<(), StoreError> {
+        let Some(app_url) = self.config.app_url.as_deref() else {
+            return if self.config.allow_control_db_user {
+                Ok(())
+            } else {
+                Err(StoreError::TenantPoolsNotConfigured)
+            };
+        };
+        let options = PgConnectOptions::from_str(app_url)
+            .map_err(|err| StoreError::TenantPoolRole(format!("the DSN is invalid: {err}")))?;
+        let user = options.get_username();
+        let attrs: Option<(bool, bool)> =
+            sqlx::query_as("SELECT rolsuper, rolinherit FROM pg_roles WHERE rolname = $1")
+                .bind(user)
+                .fetch_optional(&self.admin)
+                .await?;
+        let (superuser, inherit) = attrs.ok_or_else(|| {
+            StoreError::TenantPoolRole(format!(
+                "role `{user}` does not exist; run `monaca-server bootstrap` with \
+                 MONACA_APP_DB_PASSWORD before starting the server"
+            ))
+        })?;
+        if superuser {
+            return Err(StoreError::TenantPoolRole(format!(
+                "role `{user}` is a superuser; MONACA_APP_DATABASE_URL must name a least-privilege \
+                 login, not the control or admin DSN"
+            )));
+        }
+        if inherit {
+            return Err(StoreError::TenantPoolRole(format!(
+                "role `{user}` inherits privileges; it must be NOINHERIT so org grants only apply \
+                 inside `SET LOCAL ROLE`"
+            )));
+        }
+
+        let Some(tenant) = self.tenants().await?.into_iter().find(|tenant| tenant.is_active())
+        else {
+            return Ok(());
+        };
+        let pool = self.tenant_pool(&tenant.db_name).await.map_err(|err| {
+            StoreError::TenantPoolRole(format!(
+                "tenant `{}` cannot be opened by `{user}`: {err}",
+                tenant.slug
+            ))
+        })?;
+        if let Err(err) = sqlx::query("SELECT 1 FROM tenant.accounts LIMIT 0")
+            .execute(&pool)
+            .await
+        {
+            return Err(StoreError::TenantPoolRole(format!(
+                "tenant `{}` has no app-role grants: {err}",
+                tenant.slug
+            )));
+        }
+        Ok(())
     }
 
     /// The cache and single-flight mechanism behind [`Self::tenant_pool`].
@@ -723,6 +813,24 @@ pub(crate) fn validate_schema_name(name: &str) -> Result<(), StoreError> {
     }
 }
 
+/// A login role name that can be interpolated as an identifier (the app login, not an org role).
+pub(crate) fn validate_login_role(name: &str) -> Result<(), StoreError> {
+    let ok = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if ok {
+        Ok(())
+    } else {
+        Err(StoreError::BadIdentifier(name.to_owned()))
+    }
+}
+
 pub(crate) fn validate_role_name(name: &str) -> Result<(), StoreError> {
     let ok = name.len() >= 6
         && name.len() <= 26
@@ -909,6 +1017,19 @@ mod tests {
 
         // The failed entry is gone, so the next request is a fresh attempt.
         assert!(store.tenants.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tenant_pools_refuse_the_control_dsn_without_the_escape_hatch() {
+        let store = test_store(64);
+        assert_eq!(
+            store.tenant_pool("mt_hot").await.err(),
+            Some(StoreError::TenantPoolsNotConfigured)
+        );
+
+        let allowed = StoreConfig::default().with_control_tenant_pools();
+        assert!(allowed.app_url.is_none());
+        assert!(allowed.allow_control_db_user);
     }
 
     #[tokio::test]

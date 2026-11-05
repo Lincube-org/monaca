@@ -21,12 +21,13 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
     let config = Arc::clone(&state.config);
     let control_url = store.config().control_url.as_str();
     let admin_url = store.config().admin_url.as_str();
-
-    // A cluster row carries the (sealed) DSN pair provisioning uses.
     let admin_dsn = seal(state.keys.platform_kek(), admin_url.as_bytes())
         .map_err(|err| anyhow::anyhow!("sealing admin DSN: {err}"))?;
-    let app_dsn = seal(state.keys.platform_kek(), control_url.as_bytes())
-        .map_err(|err| anyhow::anyhow!("sealing control DSN: {err}"))?;
+    let app_dsn = seal(
+        state.keys.platform_kek(),
+        config.app_database_url.as_deref().unwrap_or(control_url).as_bytes(),
+    )
+    .map_err(|err| anyhow::anyhow!("sealing the app DSN: {err}"))?;
     let cluster_id = store.ensure_cluster("local", &admin_dsn, &app_dsn).await?;
 
     for slug in ["system", "demo"] {
@@ -82,6 +83,20 @@ pub async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
         .org_member_add(&mut *tx, account.account_id(), "owner")
         .await?;
     tx.commit().await?;
+
+    // The request path's login is provisioned here, after every tenant and org role exists. In
+    // `prod` the password is a required seed value; outside it the documented dev default applies.
+    if config.app_db_password.is_empty() {
+        tracing::warn!(
+            "MONACA_APP_DB_PASSWORD is empty; tenant pools cannot use the app login. Set it and \
+             rerun bootstrap before starting the server."
+        );
+    } else {
+        store
+            .provision_app_role(&config.app_db_user, &config.app_db_password)
+            .await?;
+        tracing::info!(role = %config.app_db_user, "app role provisioned for every tenant");
+    }
 
     // The two seeded clients. `create_client` refreshes the name and the redirect URIs on every
     // run, but its conflict update never touches `secret_hash`. The hash has to be supplied even

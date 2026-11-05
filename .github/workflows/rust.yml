@@ -369,6 +369,8 @@ jobs:
       MONACA_ADMIN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       MONACA_APP_DB_USER: monaca_app
       MONACA_APP_DB_PASSWORD: monaca_app_ci
+      # The request path uses this login by default; bootstrap provisions it and its grants.
+      MONACA_APP_DATABASE_URL: postgres://monaca_app:monaca_app_ci@127.0.0.1:5432/monaca_control
       MONACA_DEV_KEK: "00000000000000000000000000000000000000000000000000000000000000ff"
       MONACA_INTERNAL_SECRET: ci-internal-secret
       MONACA_BOOTSTRAP_ADMIN_EMAIL: admin@demo.localhost
@@ -445,6 +447,48 @@ jobs:
           MONACA_SERVER_BIN: .monaca/bin/monaca-server
         run: bun scripts/verify-app-role.ts
 
+      # §5.1/§6.4: `serve` refuses the two shapes that would silently undo the boundary — a
+      # superuser DSN, and an app login that bootstrap never provisioned. Both must fail before
+      # the listener binds, and the message must name the variable or the role.
+      - name: Stage 0d — tenant-pool role refusals
+        run: |
+          set -euo pipefail
+          superuser_log=.monaca/reports/app-role-superuser.log
+          missing_log=.monaca/reports/app-role-missing.log
+
+          set +e
+          env MONACA_APP_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/monaca_control" \
+            MONACA_SERVER_ADDR=127.0.0.1:8084 \
+            .monaca/bin/monaca-server serve > "$superuser_log" 2>&1
+          superuser_status=$?
+          env MONACA_APP_DATABASE_URL="postgres://missing_app:wrong@127.0.0.1:5432/monaca_control" \
+            MONACA_SERVER_ADDR=127.0.0.1:8084 \
+            .monaca/bin/monaca-server serve > "$missing_log" 2>&1
+          missing_status=$?
+          set -e
+
+          if [ "$superuser_status" -eq 0 ]; then
+            echo "::error::serve accepted a superuser MONACA_APP_DATABASE_URL"
+            cat "$superuser_log"
+            exit 1
+          fi
+          if ! grep -q "MONACA_APP_DATABASE_URL" "$superuser_log" || ! grep -qi "superuser" "$superuser_log"; then
+            echo "::error::the superuser refusal does not name the variable and the reason"
+            cat "$superuser_log"
+            exit 1
+          fi
+          if [ "$missing_status" -eq 0 ]; then
+            echo "::error::serve accepted an unprovisioned app login"
+            cat "$missing_log"
+            exit 1
+          fi
+          if ! grep -q "MONACA_APP_DATABASE_URL" "$missing_log" || ! grep -q "missing_app" "$missing_log"; then
+            echo "::error::the unprovisioned-role refusal does not name the variable and the role"
+            cat "$missing_log"
+            exit 1
+          fi
+          echo "OK: serve refuses a superuser app DSN and an unprovisioned app login"
+
       # §10.7: remote-deploy.sh refuses to migrate without a dump, so the dump and the restore
       # are exercised here. The runner's pg_dump is not guaranteed to match a v18 server, so the
       # same postgres:18 container that serves the job runs both client commands.
@@ -471,6 +515,32 @@ jobs:
             exit 1
           fi
           echo "restore drill: $tenants tenant row(s) survived the round trip"
+
+      # §10.7: the recurring backup dumps every database into one timestamped directory and
+      # prunes by retention. A failure would exit non-zero and print BACKUP FAILED.
+      - name: Stage 0e — scheduled backup and retention
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter ancestor=postgres:18 --format '{{.ID}}' | head -n 1)"
+          if [ -z "$cid" ]; then
+            echo "::error::the postgres:18 service container was not found"
+            exit 1
+          fi
+          rm -rf .monaca/backups-all
+          bash deploy/backup-all.sh --container "$cid" --db-user postgres \
+            --out-dir .monaca/backups-all --retention-days 14
+          latest="$(find .monaca/backups-all -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -s "$latest/monaca_control.dump"
+          test -s "$latest/mt_demo.dump"
+          test -s "$latest/manifest.txt"
+
+          mkdir -p .monaca/backups-all/20000101T000000Z
+          touch .monaca/backups-all/20000101T000000Z/old.dump
+          touch -d '30 days ago' .monaca/backups-all/20000101T000000Z
+          bash deploy/backup-all.sh --container "$cid" --db-user postgres \
+            --out-dir .monaca/backups-all --retention-days 14
+          test ! -d .monaca/backups-all/20000101T000000Z
+          echo "backup-all: both databases dumped, an old directory was pruned"
 
       - name: Stage 0 — start the server and wait for /healthz
         run: |

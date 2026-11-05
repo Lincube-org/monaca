@@ -73,7 +73,8 @@ case "$target_env" in
       MONACA_INTERNAL_SECRET \
       MONACA_BOOTSTRAP_ADMIN_PASSWORD \
       MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET \
-      MONACA_CONSOLE_CLIENT_SECRET
+      MONACA_CONSOLE_CLIENT_SECRET \
+      MONACA_APP_DB_PASSWORD
     do
       if [ -z "$(env_value "$name")" ]; then
         missing="$missing $name"
@@ -105,7 +106,8 @@ case "$target_env" in
       "MONACA_INTERNAL_SECRET=dev-internal-secret-change-me" \
       "MONACA_BOOTSTRAP_ADMIN_PASSWORD=monaca-dev-password" \
       "MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET=dev-admin-client-secret" \
-      "MONACA_CONSOLE_CLIENT_SECRET=dev-console-client-secret"
+      "MONACA_CONSOLE_CLIENT_SECRET=dev-console-client-secret" \
+      "MONACA_APP_DB_PASSWORD=monaca_app_dev"
     do
       name="${pair%%=*}"
       dev_default="${pair#*=}"

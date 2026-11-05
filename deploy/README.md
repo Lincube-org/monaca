@@ -126,41 +126,62 @@ audit chain still verifies. The default restore keeps the dump's owners and ACLs
 `audit verify` exits non-zero on the first broken row. For a full drill, restore the tenant
 databases too and point `MONACA_AUDIT_*` at one of them.
 
-**RPO: the last successful pre-deploy dump.** There is no WAL archiving and no point-in-time
-recovery. Anything written after that dump is lost in a disaster, and deploys are the only
-scheduled dump in M0 — schedule `backup.sh` yourself if that window is too large. Copy the dumps
-off the deploy host: a backup in the same failure domain as PostgreSQL is not a backup.
+**Scheduled backups.** `deploy/backup-all.sh` is the recurring backup: it dumps `monaca_control`
+plus every `mt_*` database into one timestamped directory, writes a manifest, prunes directories
+older than `--retention-days` (or `MONACA_BACKUP_RETENTION_DAYS`, default 14), and exits non-zero
+with a `BACKUP FAILED: …` line on any failure. `MONACA_BACKUP_ALERT_COMMAND` is an optional
+executable that receives the failure line as its only argument, so a cron job can page. Example
+hourly schedule on the deploy host:
 
-**RTO: one `pg_restore` per database plus `migrate` plus a server start.** It is dominated by
-database size and has not been measured for this stack; run the drill against a production-sized
-copy before relying on a number. Dumps are sequential per database, so control and tenants can be
-seconds apart.
+    # /etc/cron.d/monaca-backup (run as the compose user)
+    17 * * * * root cd /opt/monaca && \
+      MONACA_BACKUP_RETENTION_DAYS=14 \
+      MONACA_BACKUP_ALERT_COMMAND=/usr/local/bin/monaca-alert \
+      bash deploy/backup-all.sh --compose-file deploy/compose.dev.yml \
+        --out-dir /opt/monaca/backups >> /var/log/monaca-backup.log 2>&1
 
-## Least-privilege tenant role (opt-in)
+A systemd timer works the same way; the command is one shot and exits non-zero, so a failed unit
+is visible to the usual `systemctl --failed`/journal alerting. Copy the directory off the deploy
+host: a backup in the same failure domain as PostgreSQL is not a backup.
 
-By default tenant pools reuse `MONACA_CONTROL_DATABASE_URL` (a privileged login). To run
-request-path queries as `monaca_app` instead:
+**RPO: the schedule interval, not zero.** There is no WAL archiving and no point-in-time
+recovery. With the hourly schedule above, a disaster loses up to one hour plus the dump duration;
+without a scheduler, the recovery point is the last deploy's pre-migrate dump, so the gap between
+backups is unbounded. `MONACA_SKIP_BACKUP=1` removes even that point for the deploy it covers.
 
-1. Set `MONACA_APP_DATABASE_URL` to a DSN for that login (the per-tenant database name is
-   substituted into it), and keep `MONACA_APP_DB_USER` / `MONACA_APP_DB_PASSWORD` in sync.
-2. Provision the role and its grants once per tenant, from a checkout on the host or from CI:
+**RTO: one `pg_restore` per database plus `migrate` plus a server start.** The one-command
+acceptance restored a near-empty control and tenant database in 1.9 s on the CI fixture; that is
+not a production number and no SLO is promised. It is dominated by database size, and the
+per-database dumps are sequential, so control and tenants can be a few seconds apart. Run the
+drill against a production-sized copy before relying on a figure.
 
-       MONACA_CONTROL_DATABASE_URL=… MONACA_ADMIN_DATABASE_URL=… \
-       MONACA_APP_DB_PASSWORD=… MONACA_APP_DB_TENANT=demo \
-       MONACA_SERVER_BIN=.monaca/bin/monaca-server \
-         bun scripts/verify-app-role.ts
+## Least-privilege tenant role (the default)
 
-   `MONACA_APP_DB_TENANT` defaults to `demo`. The script is idempotent: it creates/updates the
-   login, grants `tenant` schema CRUD, grants every org role for `SET ROLE`, revokes
-   `CONNECT … FROM PUBLIC` on that tenant database, and proves that DDL, a direct org-schema read,
-   another tenant's data and an unprovisioned database are all denied while a real server using
-   the app pool still creates and reads an account.
-3. Restart the server. Repeat step 2 for every active tenant while this login is enabled; a tenant
-   whose database has not been granted cannot serve request-path traffic with the app pool.
+The request path uses `monaca_app`, not the control owner. `bootstrap` creates or updates the
+login as `LOGIN NOINHERIT` with `MONACA_APP_DB_PASSWORD`, revokes `CONNECT … FROM PUBLIC` on every
+tenant database, grants it `CONNECT`, `USAGE` and CRUD on the `tenant` schema, and grants it every
+org role so `SET LOCAL ROLE` works. `compose.dev.yml` points the server at
+`MONACA_APP_DATABASE_URL` and leaves the one-shot `migrate`/`bootstrap` services on the owner DSN.
 
-This is **off by default**: without `MONACA_APP_DATABASE_URL`, no existing deployment changes. The
-first enablement on an existing database also revokes `CONNECT` from `PUBLIC` on the tenant
-databases; other roles that relied on PUBLIC and are not superusers will need an explicit grant.
+`serve` checks the login before it binds the listener. It fails when:
+
+* `MONACA_APP_DATABASE_URL` is unset and `MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1` was not written
+  explicitly (there is no silent fallback to `MONACA_CONTROL_DATABASE_URL`);
+* the login does not exist (bootstrap never provisioned it);
+* the login is a superuser, or inherits privileges instead of `NOINHERIT`;
+* the login cannot open an active tenant database and read `tenant.accounts`.
+
+The CI e2e job runs both refusals (superuser DSN, unprovisioned login) and requires the error to
+name the variable and the role. `scripts/verify-app-role.ts` remains the per-tenant proof: it
+provisions the role, shows DDL and direct org-schema reads are denied, shows another tenant and
+an unprovisioned database are unreachable, and starts a real server through the app pool to create
+and read an account. `MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1` is the explicit escape hatch for
+capacity benchmarks and throw-away environments; it is not a production default.
+
+Existing deployments that predate this default need a `bootstrap` run (it is idempotent) to
+create the role and grants, then a restart. The first provisionment also revokes `CONNECT` from
+`PUBLIC` on those tenant databases; other roles that relied on PUBLIC and are not superusers need
+an explicit grant.
 
 ## Metrics
 

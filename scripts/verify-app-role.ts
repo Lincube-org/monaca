@@ -1,12 +1,12 @@
 // Provisions the least-privilege tenant login and proves it can do the request-path work while
 // still being unable to run DDL or read an org schema directly (docs/contracts/m0.md §5.1, §6.4).
 //
-// It is deliberately opt-in: MONACA_APP_DATABASE_URL is unset by default, so no existing
-// deployment changes. Running this script sets up the role for one tenant, grants it the tenant
-// schema and the org roles it must SET ROLE into, revokes PUBLIC CONNECT from that tenant
-// database, proves another tenant's data is unreadable, starts a second server with the app URL
-// and exercises a real write/read through it. It exits non-zero on the first failed proof. Run it
-// once per tenant slug while the login is enabled; MONACA_APP_DB_TENANT defaults to `demo`.
+// The app login is the request-path default; this script is the per-tenant proof and an
+// idempotent re-provisioning path. It sets up the role for one tenant, grants it the tenant schema
+// and the org roles it must SET ROLE into, revokes PUBLIC CONNECT from that tenant database,
+// proves another tenant's data is unreadable, starts a server with the app URL and exercises a
+// real write/read through it. It exits non-zero on the first failed proof. Run it once per tenant
+// slug; MONACA_APP_DB_TENANT defaults to `demo`.
 //
 //   MONACA_CONTROL_DATABASE_URL=… MONACA_ADMIN_DATABASE_URL=… \
 //   MONACA_APP_DB_PASSWORD=… MONACA_SERVER_BIN=.monaca/bin/monaca-server \

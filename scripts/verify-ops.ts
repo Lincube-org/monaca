@@ -222,6 +222,8 @@ function serverEnv(args: Args, kek: string, previous?: string): Record<string, s
   env.MONACA_DEV_KEK = kek;
   env.MONACA_LOG_LEVEL = "warn";
   env.MONACA_IP_RATE_LIMIT_PER_MINUTE = "0";
+  // CI carries the app DSN; a local run without one uses the explicit escape hatch.
+  if (!env.MONACA_APP_DATABASE_URL) env.MONACA_ALLOW_SUPERUSER_TENANT_POOLS = "1";
   delete env.MONACA_KEK;
   if (previous === undefined) delete env.MONACA_KEK_PREVIOUS;
   else env.MONACA_KEK_PREVIOUS = previous;

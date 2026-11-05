@@ -24,6 +24,8 @@ const DEV_ADMIN_PASSWORD: &str = "monaca-dev-password";
 const DEV_ADMIN_CLIENT_SECRET: &str = "dev-admin-client-secret";
 /// The dev/ci default for `MONACA_CONSOLE_CLIENT_SECRET`.
 const DEV_CONSOLE_CLIENT_SECRET: &str = "dev-console-client-secret";
+/// The dev/ci default for `MONACA_APP_DB_PASSWORD`; `MONACA_ENV=prod` refuses it.
+const DEV_APP_DB_PASSWORD: &str = "monaca_app_dev";
 
 /// The server's configuration.
 #[derive(Clone)]
@@ -62,6 +64,13 @@ pub struct Config {
     pub bootstrap_admin_email: String,
     /// The seeded tenant-admin password (a dev default outside `prod`).
     pub bootstrap_admin_password: String,
+    /// The least-privilege login tenant pools connect as (`MONACA_APP_DB_USER`, `monaca_app`).
+    pub app_db_user: String,
+    /// Its password (`MONACA_APP_DB_PASSWORD`); `bootstrap` creates or updates the role with it.
+    pub app_db_password: String,
+    /// The least-privilege tenant-pool DSN (`MONACA_APP_DATABASE_URL`), when configured. `serve`
+    /// refuses to start without it unless `MONACA_ALLOW_SUPERUSER_TENANT_POOLS=1` is set.
+    pub app_database_url: Option<String>,
     /// Whether `MONACA_ENV=prod`.
     pub production: bool,
     /// The key-encryption key, 64 hex characters. In `prod` it comes from `MONACA_KEK` and must be
@@ -257,6 +266,13 @@ impl Config {
                 DEV_ADMIN_PASSWORD,
                 production,
             ),
+            app_db_user: env("MONACA_APP_DB_USER").unwrap_or_else(|| "monaca_app".to_owned()),
+            app_db_password: seeded(
+                "MONACA_APP_DB_PASSWORD",
+                DEV_APP_DB_PASSWORD,
+                production,
+            ),
+            app_database_url: env("MONACA_APP_DATABASE_URL"),
             production,
             kek_hex,
             previous_kek_hex: env("MONACA_KEK_PREVIOUS"),
@@ -394,6 +410,13 @@ impl Config {
             DEV_CONSOLE_CLIENT_SECRET,
             "seeded monaca-console secret",
         );
+        require_seed(
+            &mut problems,
+            "MONACA_APP_DB_PASSWORD",
+            &self.app_db_password,
+            DEV_APP_DB_PASSWORD,
+            "least-privilege app role password",
+        );
 
         reject("bootstrap", problems)
     }
@@ -467,6 +490,9 @@ mod tests {
             admin_client_secret: DEV_ADMIN_CLIENT_SECRET.into(),
             bootstrap_admin_email: "admin@demo.localhost".into(),
             bootstrap_admin_password: DEV_ADMIN_PASSWORD.into(),
+            app_db_user: "monaca_app".into(),
+            app_db_password: DEV_APP_DB_PASSWORD.into(),
+            app_database_url: None,
             production: false,
             kek_hex: "11".repeat(32),
             previous_kek_hex: None,
@@ -495,6 +521,7 @@ mod tests {
         config.bootstrap_admin_password = "explicit-admin-password".into();
         config.admin_client_secret = "explicit-admin-secret".into();
         config.console_client_secret = "explicit-console-secret".into();
+        config.app_db_password = "explicit-app-password".into();
     }
 
     #[test]
@@ -548,6 +575,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("MONACA_CONSOLE_CLIENT_SECRET"), "{text}");
+        assert!(text.contains("MONACA_APP_DB_PASSWORD"), "{text}");
     }
 
     #[test]
@@ -558,6 +586,7 @@ mod tests {
         config.bootstrap_admin_password = String::new();
         config.admin_client_secret = String::new();
         config.console_client_secret = String::new();
+        config.app_db_password = String::new();
 
         assert!(config.validate().is_ok());
     }
@@ -583,6 +612,12 @@ mod tests {
         config.bootstrap_admin_password = DEV_ADMIN_PASSWORD.into();
         let err = config.validate_bootstrap().expect_err("must fail");
         assert!(err.to_string().contains("dev default"));
+
+        let mut config = prod_config();
+        seed_all(&mut config);
+        config.app_db_password = DEV_APP_DB_PASSWORD.into();
+        let err = config.validate_bootstrap().expect_err("must fail");
+        assert!(err.to_string().contains("MONACA_APP_DB_PASSWORD"));
     }
 
     #[test]

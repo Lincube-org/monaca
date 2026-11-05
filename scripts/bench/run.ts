@@ -305,8 +305,10 @@ function serverEnv(pg: BenchPg, port: number, appRole: boolean): Record<string, 
     MONACA_IP_RATE_LIMIT_PER_MINUTE: "0",
     MONACA_LOG_LEVEL: "warn",
     MONACA_METRICS_ADDR: "",
-    // Never inherit a developer's app DSN into the control pass.
+    // Never inherit a developer's app DSN into the control pass. The control pass is a capacity
+    // measurement of the owner connection; the explicit escape hatch is what lets `serve` use it.
     MONACA_APP_DATABASE_URL: "",
+    MONACA_ALLOW_SUPERUSER_TENANT_POOLS: appRole ? "" : "1",
   };
   if (appRole) {
     env.MONACA_APP_DATABASE_URL = withCredentials(controlUrl, APP_USER, APP_PASSWORD);

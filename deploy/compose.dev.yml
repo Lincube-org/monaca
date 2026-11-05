@@ -81,6 +81,9 @@ services:
       MONACA_ENV: ${MONACA_ENV:-dev}
       MONACA_CONTROL_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/monaca_control
       MONACA_ADMIN_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      # Administrative commands always use the owner connection, even when .env carries the app
+      # DSN; an empty value makes that explicit for anyone reading the compose file.
+      MONACA_APP_DATABASE_URL: ""
     command: ["migrate"]
     networks: [monaca]
 
@@ -118,6 +121,11 @@ services:
       MONACA_METRICS_ADDR: 0.0.0.0:9090
       MONACA_CONTROL_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/monaca_control
       MONACA_ADMIN_DATABASE_URL: postgres://monaca:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      # The request path uses the least-privilege login by default. bootstrap creates it and
+      # grants every tenant; serve refuses to start if it is missing or unsafe.
+      MONACA_APP_DB_USER: monaca_app
+      MONACA_APP_DB_PASSWORD: ${MONACA_APP_DB_PASSWORD:?set MONACA_APP_DB_PASSWORD in deploy/.env}
+      MONACA_APP_DATABASE_URL: postgres://monaca_app:${MONACA_APP_DB_PASSWORD}@postgres:5432/monaca_control
       MONACA_LOG_FORMAT: json
     # Not published (§2.1). MONACA_SERVER_URL=http://server:8081 in .env is the only way to
     # reach it, and that value never ends up in a token or a browser request.

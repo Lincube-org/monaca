@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::repo::unique_conflict;
-use crate::{Store, StoreError, q, quote_ident};
+use crate::{Store, StoreError, q, quote_ident, validate_login_role};
 
 /// A tenant as stored in the control plane.
 #[derive(Debug, Clone, FromRow)]
@@ -42,6 +42,7 @@ impl TenantRow {
     pub fn is_active(&self) -> bool {
         self.state == "active"
     }
+
 }
 
 /// An organization as stored in its tenant's `tenant.organizations`.
@@ -145,6 +146,75 @@ impl Store {
         // Step 5: active.
         self.activate_tenant(slug).await?;
         self.tenant_by_slug(slug).await
+    }
+
+    /// Create or update the least-privilege login and grant it the request-path surface.
+    ///
+    /// `bootstrap` calls this for every tenant after the org roles exist. The login is `LOGIN
+    /// NOINHERIT`; its org-role memberships therefore only take effect inside the request path's
+    /// `SET LOCAL ROLE`. `PUBLIC` loses `CONNECT` on each tenant database, so a role that was not
+    /// provisioned cannot open one even if it guesses the name.
+    pub async fn provision_app_role(&self, user: &str, password: &str) -> Result<(), StoreError> {
+        validate_login_role(user)?;
+        if password.is_empty() {
+            return Err(StoreError::TenantPoolRole(
+                "MONACA_APP_DB_PASSWORD is empty".to_owned(),
+            ));
+        }
+        let role = quote_ident(user);
+        let password = password.replace('\'', "''");
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
+                .bind(user)
+                .fetch_one(self.admin())
+                .await?;
+        let statement = if exists {
+            format!("ALTER ROLE {role} LOGIN NOINHERIT PASSWORD '{password}'")
+        } else {
+            format!("CREATE ROLE {role} LOGIN NOINHERIT PASSWORD '{password}'")
+        };
+        sqlx::query(q(statement)).execute(self.admin()).await?;
+
+        for tenant in self.tenants().await? {
+            let database = quote_ident(&tenant.db_name);
+            sqlx::query(q(format!(
+                "REVOKE CONNECT ON DATABASE {database} FROM PUBLIC"
+            )))
+            .execute(self.admin())
+            .await?;
+            sqlx::query(q(format!(
+                "GRANT CONNECT ON DATABASE {database} TO {role}"
+            )))
+            .execute(self.admin())
+            .await?;
+
+            let pool = self.tenant_pool(&tenant.db_name).await?;
+            for statement in [
+                format!("GRANT USAGE ON SCHEMA tenant TO {role}"),
+                format!(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA tenant TO {role}"
+                ),
+                format!(
+                    "ALTER DEFAULT PRIVILEGES IN SCHEMA tenant \
+                     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}"
+                ),
+            ] {
+                sqlx::query(q(statement)).execute(&pool).await?;
+            }
+
+            let org_roles: Vec<(String,)> = sqlx::query_as(
+                "SELECT rolname FROM pg_roles WHERE rolname ~ '^t[0-9a-z]+_o[0-9a-z]+$'",
+            )
+            .fetch_all(&pool)
+            .await?;
+            for (org_role,) in org_roles {
+                let org_role = quote_ident(&org_role);
+                sqlx::query(q(format!("GRANT {org_role} TO {role}")))
+                    .execute(&pool)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Provision an organization in one transaction — §5.5.

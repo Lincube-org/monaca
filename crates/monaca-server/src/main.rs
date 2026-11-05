@@ -76,19 +76,44 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build the configuration, store and shared state.
-async fn build_state() -> anyhow::Result<Arc<AppState>> {
+///
+/// `admin_tenant_pools` is the internal switch for `migrate`, `bootstrap`, `audit verify` and
+/// `rewap`: they need the owner connection even when `MONACA_APP_DATABASE_URL` is configured.
+/// `verify_app_role` is `serve`'s startup proof that the configured login is not a superuser, is
+/// `NOINHERIT`, and can read a tenant schema; it fails before the listener is bound.
+async fn build_state(
+    admin_tenant_pools: bool,
+    verify_app_role: bool,
+) -> anyhow::Result<Arc<AppState>> {
     let config = Config::from_env();
     config.validate()?;
-    let store = Store::connect(StoreConfig::from_env())
+    let store_config = StoreConfig::from_env();
+    let store_config = if admin_tenant_pools {
+        store_config.with_control_tenant_pools()
+    } else {
+        store_config
+    };
+    let store = Store::connect(store_config)
         .await
         .context("could not connect to PostgreSQL; run `monaca-server migrate` first")?;
+    if verify_app_role {
+        store
+            .verify_tenant_pool_role()
+            .await
+            .context("tenant pool role check failed")?;
+    }
     AppState::new(store, config).map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+/// State for the offline administrative subcommands.
+pub(crate) async fn admin_state() -> anyhow::Result<Arc<AppState>> {
+    build_state(true, false).await
 }
 
 /// Start the HTTP server on the configured address and serve until Ctrl-C.
 async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
     let addr = resolve_addr(args.addr.as_deref())?;
-    let state = build_state().await?;
+    let state = build_state(false, true).await?;
     mailer::spawn(Arc::clone(&state));
     let app = routes::router(Arc::clone(&state));
 
@@ -131,7 +156,7 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
 async fn migrate() -> anyhow::Result<()> {
     let config = Config::from_env();
     config.validate()?;
-    let store = Store::connect(StoreConfig::from_env())
+    let store = Store::connect(StoreConfig::from_env().with_control_tenant_pools())
         .await
         .context("could not connect to PostgreSQL")?;
     bootstrap::migrate(&store).await
@@ -145,7 +170,7 @@ async fn migrate() -> anyhow::Result<()> {
 async fn bootstrap() -> anyhow::Result<()> {
     let config = Config::from_env();
     config.validate_bootstrap()?;
-    let store = Store::connect(StoreConfig::from_env())
+    let store = Store::connect(StoreConfig::from_env().with_control_tenant_pools())
         .await
         .context("could not connect to PostgreSQL")?;
     bootstrap::migrate(&store).await?;
@@ -155,7 +180,7 @@ async fn bootstrap() -> anyhow::Result<()> {
 
 /// `monaca-server audit verify` — recompute one org's chain.
 async fn audit_verify() -> anyhow::Result<()> {
-    let store = Store::connect(StoreConfig::from_env()).await?;
+    let store = Store::connect(StoreConfig::from_env().with_control_tenant_pools()).await?;
     let tenant_slug = std::env::var("MONACA_AUDIT_TENANT").unwrap_or_else(|_| "demo".into());
     let org_slug = std::env::var("MONACA_AUDIT_ORG").unwrap_or_else(|_| "acme".into());
 

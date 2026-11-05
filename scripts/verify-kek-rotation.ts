@@ -80,6 +80,9 @@ function serverEnv(kek: string, previous?: string): Record<string, string> {
   env.MONACA_LOG_LEVEL = "warn";
   if (captchaSiteverifyUrl !== "") env.MONACA_CAPTCHA_SITEVERIFY_URL = captchaSiteverifyUrl;
   if (socialProviderBaseUrl !== "") env.MONACA_SOCIAL_PROVIDER_BASE_URL = socialProviderBaseUrl;
+  // CI carries the app DSN; a local drill without one uses the explicit escape hatch rather than
+  // silently falling back.
+  if (!env.MONACA_APP_DATABASE_URL) env.MONACA_ALLOW_SUPERUSER_TENANT_POOLS = "1";
   delete env.MONACA_KEK;
   if (previous === undefined) delete env.MONACA_KEK_PREVIOUS;
   else env.MONACA_KEK_PREVIOUS = previous;

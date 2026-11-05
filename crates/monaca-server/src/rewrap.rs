@@ -114,7 +114,7 @@ impl Counts {
 
 /// Run the command.
 pub async fn run(args: RewrapArgs) -> anyhow::Result<()> {
-    let state = crate::build_state().await?;
+    let state = crate::admin_state().await?;
     let deks = Arc::clone(&state.keys);
     let tenants = select_tenants(&state.store, args.tenant.as_deref()).await?;
 
