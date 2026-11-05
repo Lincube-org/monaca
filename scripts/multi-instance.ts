@@ -393,6 +393,9 @@ async function main(): Promise<number> {
     }),
   });
   if (reapplied.status !== 200) throw new Error(`rate-limit re-apply answered ${reapplied.status}`);
+  // The configuration is cached per process for 5 s; wait it out before priming so every
+  // instance actually reloads the new row instead of reusing its pre-write cache entry.
+  await Bun.sleep(5_500);
   await Promise.all(
     servers.map((server) =>
       request(`${server.base}/v1/accounts?limit=1`, { headers: managementHeaders(token) }),
@@ -432,6 +435,7 @@ async function main(): Promise<number> {
     }),
   });
   if (raised.status !== 200) throw new Error(`management limit raise answered ${raised.status}`);
+  await Bun.sleep(5_500);
   await Promise.all(
     servers.map((server) =>
       request(`${server.base}/v1/accounts?limit=1`, { headers: managementHeaders(token) }),
