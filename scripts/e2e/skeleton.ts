@@ -7818,10 +7818,12 @@ async function smtpDeliveryFlow(base: string, adminToken: string): Promise<StepR
     ]);
 
     const deadline = performance.now() + 25_000;
-    while (capture.messages.length === 0 && performance.now() < deadline) {
+    const find = () =>
+      capture.messages.find((entry) => entry.to.some((to) => to.includes(email)));
+    while (find() === undefined && performance.now() < deadline) {
       await Bun.sleep(250);
     }
-    const message = capture.messages.find((entry) => entry.to.some((to) => to.includes(email)));
+    const message = find();
     const raw = message?.raw ?? "";
     const code = raw.match(/\b\d{6}\b/)?.[0];
     checks.push([
