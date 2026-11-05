@@ -195,6 +195,8 @@ export async function runServerCommand(
 
 export interface ServerHandle {
   readonly base: string;
+  /** The OS process id, so a caller can prove separate processes rather than one process with N ports. */
+  readonly pid: number;
   stop(): Promise<void>;
 }
 
@@ -233,6 +235,7 @@ export async function startServer(
 
   return {
     base,
+    pid: proc.pid,
     async stop(): Promise<void> {
       proc.kill();
       await proc.exited;

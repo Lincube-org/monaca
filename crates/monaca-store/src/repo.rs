@@ -67,6 +67,27 @@ pub struct AccountLivenessRow {
     pub token_revoked: bool,
 }
 
+/// The tenant's usage and quota, from one snapshot (§6.2).
+///
+/// `accounts_used` is the incremental counter, not a `count(*)`; `active_today` and `logins_today`
+/// come from the per-UTC-day activity table, whose primary key bounds the read by today's active
+/// accounts rather than the tenant's history.
+#[derive(Debug, Clone, FromRow)]
+pub struct UsageSummaryRow {
+    /// Accounts currently existing in this tenant.
+    pub accounts_used: i64,
+    /// The account cap; `None` is unlimited.
+    pub max_accounts: Option<i64>,
+    /// Distinct accounts that signed in on the UTC day.
+    pub active_today: i64,
+    /// Sign-ins recorded on the UTC day.
+    pub logins_today: i64,
+    /// The UTC day the activity counters cover, as `YYYY-MM-DD`.
+    pub today: String,
+    /// When the quota last changed.
+    pub updated_at: OffsetDateTime,
+}
+
 /// The tenant's hosted sign-in switches (§6.1 sign-in experience).
 #[derive(Debug, Clone, FromRow)]
 pub struct SignInExperienceRow {
@@ -974,6 +995,23 @@ pub(crate) fn unique_conflict(err: sqlx::Error, entity: &'static str) -> StoreEr
     StoreError::Database(err.to_string())
 }
 
+/// Read the usage counters inside the caller's transaction, so the quota fields, today's activity
+/// and the timestamp are one snapshot.
+async fn usage_snapshot(conn: &mut PgConnection) -> Result<UsageSummaryRow, StoreError> {
+    Ok(sqlx::query_as::<_, UsageSummaryRow>(
+        "SELECT u.accounts_used, u.max_accounts, u.updated_at,
+                to_char((now() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS today,
+                (SELECT count(*) FROM tenant.usage_daily d
+                 WHERE d.day = (now() AT TIME ZONE 'UTC')::date) AS active_today,
+                (SELECT coalesce(sum(d.logins), 0)::bigint FROM tenant.usage_daily d
+                 WHERE d.day = (now() AT TIME ZONE 'UTC')::date) AS logins_today
+         FROM tenant.usage_counters u
+         WHERE u.singleton",
+    )
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
 /// One configured rate-limit layer (§6.2).
 #[derive(Debug, Clone, FromRow)]
 pub struct RateLimitRow {
@@ -1010,6 +1048,21 @@ impl Store {
     ) -> Result<AccountRow, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         let mut tx = pool.begin().await?;
+
+        // The quota check and the increment are one row-level update, so concurrent creations on
+        // different instances serialize on the counter instead of each counting a stale snapshot.
+        let allowed: Option<(i64,)> = sqlx::query_as(
+            "UPDATE tenant.usage_counters
+             SET accounts_used = accounts_used + 1, updated_at = now()
+             WHERE singleton AND (max_accounts IS NULL OR accounts_used < max_accounts)
+             RETURNING accounts_used",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if allowed.is_none() {
+            tx.rollback().await?;
+            return Err(StoreError::QuotaExceeded);
+        }
 
         let row = sqlx::query_as::<_, AccountRow>(
             "INSERT INTO tenant.accounts
@@ -1061,6 +1114,36 @@ impl Store {
             .await?;
         }
 
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// The usage counters and quota for one snapshot.
+    pub async fn usage_summary(&self, tenant: &TenantRow) -> Result<UsageSummaryRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        let row = usage_snapshot(&mut *tx).await?;
+        tx.rollback().await?;
+        Ok(row)
+    }
+
+    /// Replace the account quota (`None` clears it) and return the new snapshot.
+    pub async fn set_account_quota(
+        &self,
+        tenant: &TenantRow,
+        max_accounts: Option<i64>,
+    ) -> Result<UsageSummaryRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE tenant.usage_counters
+             SET max_accounts = $1, updated_at = now()
+             WHERE singleton",
+        )
+        .bind(max_accounts)
+        .execute(&mut *tx)
+        .await?;
+        let row = usage_snapshot(&mut *tx).await?;
         tx.commit().await?;
         Ok(row)
     }
@@ -2914,11 +2997,22 @@ impl Store {
             tx.commit().await?;
         }
 
-        sqlx::query("DELETE FROM tenant.accounts WHERE id = $1")
+        let mut tx = pool.begin().await?;
+        let deleted = sqlx::query("DELETE FROM tenant.accounts WHERE id = $1")
             .bind(account_id.uuid())
-            .execute(&pool)
+            .execute(&mut *tx)
             .await?;
-        Ok(true)
+        if deleted.rows_affected() > 0 {
+            sqlx::query(
+                "UPDATE tenant.usage_counters
+                 SET accounts_used = GREATEST(accounts_used - 1, 0), updated_at = now()
+                 WHERE singleton",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(deleted.rows_affected() > 0)
     }
 
     /// Every role the tenant defined, by name.
@@ -4556,6 +4650,7 @@ impl Store {
         user_agent: Option<&str>,
     ) -> Result<(), StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
         sqlx::query(
             "INSERT INTO tenant.sessions
                (id, account_id, client_id, expires_at, last_seen_at, user_agent)
@@ -4566,8 +4661,20 @@ impl Store {
         .bind(client_row_id)
         .bind(expires_at)
         .bind(user_agent)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
+        // The per-day activity row is the incremental source for "daily active accounts" and
+        // "logins": one upsert per sign-in, and the day's read is bounded by today's rows.
+        sqlx::query(
+            "INSERT INTO tenant.usage_daily (day, account_id, logins)
+             VALUES ((now() AT TIME ZONE 'UTC')::date, $1, 1)
+             ON CONFLICT (day, account_id) DO UPDATE
+               SET logins = tenant.usage_daily.logins + 1",
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 

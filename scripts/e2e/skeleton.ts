@@ -746,6 +746,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "invalid_grant and the very next introspection is active:false; after an account disable the same " +
       "three calls fail immediately, with no sleep between the write and the probe",
   },
+  {
+    step: "75",
+    title: "tenant usage and quota",
+    assertion:
+      "GET /v1/usage reports the account counter, the UTC day and its active accounts and logins; " +
+      "creating two accounts moves the total by two, one account's two sign-ins add one active account " +
+      "and two logins; PATCH /v1/usage {max_accounts: current total} makes remaining 0 and the next " +
+      "creation 403 MONACA_QUOTA_EXCEEDED; deleting one account decrements the total and frees one slot; " +
+      "clearing the quota makes remaining null, and an empty or negative patch is 400",
+  },
 ];
 
 interface StepResult {
@@ -5984,6 +5994,205 @@ async function revocationImmediateFlow(
     detail: ok
       ? `${checks.length} checks: kick 204 → next userinfo 401 → next renewal invalid → next introspection inactive → disable → same three immediately`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
+/**
+ * Step 75 — tenant usage and quota (§6.2).
+ *
+ * The counts must move with the real account rows and real sign-ins, and the cap must reject the
+ * next creation rather than warn. The two halves are read from one snapshot: `users.total` is the
+ * incremental counter that the creation and deletion transactions maintain.
+ */
+async function usageQuotaFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const prefix = `usage-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "75",
+    title: "tenant usage and quota",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  interface Usage {
+    users?: { total?: unknown; quota?: unknown; remaining?: unknown; enforcement?: unknown };
+    daily?: { date?: unknown; active_accounts?: unknown; logins?: unknown; timezone?: unknown };
+  }
+  const usage = async (): Promise<Usage> =>
+    ((await call(`${base}/v1/usage`, { headers })).body as Usage | undefined) ?? {};
+  const setQuota = (value: unknown): Promise<HttpResult> =>
+    call(`${base}/v1/usage`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ max_accounts: value }),
+    });
+  const listOurs = async (): Promise<unknown[]> =>
+    ((await call(`${base}/v1/accounts?query=${encodeURIComponent(prefix)}&limit=200`, { headers }).then(
+      (result) => result.body,
+    )) as { items?: unknown[] } | undefined)?.items ?? [];
+
+  const addAccount = async (tag: string): Promise<{ id: string; email: string; password: string } | undefined> => {
+    const email = `${prefix}-${tag}@demo.localhost`;
+    const password = "Usage-Quota-Pass-96";
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: `Usage ${tag}`, password }),
+    });
+    const id = (created.body as { id?: unknown })?.id;
+    if (created.status !== 201 || typeof id !== "string") {
+      detail = `POST /v1/accounts(${tag}) → ${created.status} ${text(created.body)}`;
+      return undefined;
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: id, role: "member" }),
+    });
+    return { id, email, password };
+  };
+
+  try {
+    // A previous run may have left a cap; clear it so the baseline is unlimited.
+    const cleared = await setQuota(null);
+    const before = (cleared.body as Usage | undefined) ?? {};
+    checks.push([
+      "clearing the quota returns an unlimited snapshot",
+      cleared.status === 200 &&
+        before.users?.quota === null &&
+        before.users?.remaining === null &&
+        before.users?.enforcement === "reject",
+    ]);
+    const baseTotal = Number(before.users?.total);
+
+    const a = await addAccount("a");
+    const b = await addAccount("b");
+    if (a === undefined || b === undefined) return fail("");
+    const afterCreate = await usage();
+    checks.push([
+      "two creations move the counter by exactly two",
+      Number(afterCreate.users?.total) === baseTotal + 2,
+    ]);
+    checks.push([
+      "the account list shows the same two real rows",
+      (await listOurs()).length === 2,
+    ]);
+
+    const signInA1 = await consoleSignIn(base, a.email, a.password, consoleSecret, "usage-a1");
+    if (signInA1.session === undefined) return fail(signInA1.error ?? "the first sign-in failed");
+    const afterFirst = await usage();
+    checks.push([
+      "the first sign-in adds one active account and one login",
+      Number(afterFirst.daily?.active_accounts) === Number(before.daily?.active_accounts) + 1 &&
+        Number(afterFirst.daily?.logins) === Number(before.daily?.logins) + 1,
+    ]);
+    const signInA2 = await consoleSignIn(base, a.email, a.password, consoleSecret, "usage-a2");
+    if (signInA2.session === undefined) return fail(signInA2.error ?? "the second sign-in failed");
+    const afterSignIn = await usage();
+    checks.push([
+      "a repeated sign-in adds a login but no new active account",
+      Number(afterSignIn.daily?.active_accounts) === Number(before.daily?.active_accounts) + 1 &&
+        Number(afterSignIn.daily?.logins) === Number(before.daily?.logins) + 2,
+    ]);
+    checks.push([
+      "the daily date is the current UTC day",
+      afterSignIn.daily?.date === new Date().toISOString().slice(0, 10) &&
+        afterSignIn.daily?.timezone === "UTC",
+    ]);
+
+    // The cap is the count that already exists, so the next creation is refused.
+    const capped = await setQuota(Number(afterCreate.users?.total));
+    checks.push([
+      "setting the cap at the current total leaves no room",
+      capped.status === 200 &&
+        (capped.body as Usage).users?.remaining === 0 &&
+        (capped.body as Usage).users?.quota === Number(afterCreate.users?.total),
+    ]);
+    const overQuota = await addAccount("c-over");
+    if (overQuota === undefined) {
+      // `addAccount` sets a generic detail; the expected refusal is the assertion itself.
+      const refused = await call(`${base}/v1/accounts`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          email: `${prefix}-over@demo.localhost`,
+          display_name: "Over",
+          password: "Usage-Quota-Pass-96",
+        }),
+      });
+      checks.push([
+        "the creation past the cap is 403 MONACA_QUOTA_EXCEEDED",
+        refused.status === 403 &&
+          (refused.body as { monaca_error_code?: unknown })?.monaca_error_code ===
+            "MONACA_QUOTA_EXCEEDED",
+      ]);
+    } else {
+      return fail("a creation past the cap unexpectedly succeeded");
+    }
+
+    const deleted = await call(
+      `${base}/v1/accounts/${b.id}?confirm=${encodeURIComponent(b.email)}`,
+      { method: "DELETE", headers },
+    );
+    const afterDelete = await usage();
+    checks.push([
+      "deleting one account decrements the counter and frees a slot",
+      deleted.status === 200 &&
+        Number(afterDelete.users?.total) === baseTotal + 1 &&
+        Number(afterDelete.users?.remaining) === 1,
+    ]);
+    checks.push(["the account list shows the remaining row", (await listOurs()).length === 1]);
+
+    const c = await addAccount("c");
+    const afterRefill = await usage();
+    checks.push([
+      "the freed slot accepts one more creation",
+      c !== undefined && Number(afterRefill.users?.total) === baseTotal + 2,
+    ]);
+    checks.push(["the account list shows two rows again", (await listOurs()).length === 2]);
+
+    const unlimited = await setQuota(null);
+    checks.push([
+      "clearing the cap restores an unlimited remaining",
+      unlimited.status === 200 &&
+        (unlimited.body as Usage).users?.quota === null &&
+        (unlimited.body as Usage).users?.remaining === null,
+    ]);
+
+    const empty = await call(`${base}/v1/usage`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({}),
+    });
+    checks.push(["an empty usage patch is 400", empty.status === 400]);
+    const negative = await setQuota(-1);
+    checks.push(["a negative quota is 400", negative.status === 400]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "75",
+    title: "tenant usage and quota",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: clear → +2 creations/list → +1 active/+2 logins → cap 0 room → 403 → delete frees a slot → refill → unlimited → 400s`
+      : `${checks
+          .filter(([, passed]) => !passed)
+          .map(([name]) => name)
+          .join(", ") || detail}`,
   };
 }
 
@@ -16402,6 +16611,7 @@ async function main(): Promise<number> {
   push(await sessionKickFlow(base, adminToken, parsed.consoleSecret));
   push(await auditQueryFlow(base, adminToken, parsed.consoleSecret));
   push(await revocationImmediateFlow(base, adminToken, parsed.consoleSecret));
+  push(await usageQuotaFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

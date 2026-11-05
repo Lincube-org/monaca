@@ -97,6 +97,7 @@ pub const M0_ACTIONS: &[&str] = &[
     "webhook.updated",
     "webhook.deleted",
     "webhook.secret_rotated",
+    "usage.quota_changed",
 ];
 
 /// The `subject.type` values §8.1 allows.
@@ -229,7 +230,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 70);
+        assert_eq!(M0_ACTIONS.len(), 71);
         for action in [
             "account.created",
             "account.updated",

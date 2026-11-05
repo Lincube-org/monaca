@@ -3345,6 +3345,24 @@
         "summary": "One SSO connector"
       }
     },
+    "/v1/usage": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant usage and quota"
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Tenant usage and quota"
+      }
+    },
     "/v1/webhooks": {
       "get": {
         "responses": {

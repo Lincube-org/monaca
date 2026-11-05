@@ -1057,6 +1057,89 @@ renders them; a narrower `/v1`-only query would be possible if `userinfo` ever s
 the row. Bench numbers come from the embedded PostgreSQL fixture, not a production-sized audit
 table.
 
+## Batch M — real multi-instance acceptance and tenant usage
+
+### Three processes, one database, a real dispatcher
+
+`scripts/multi-instance.ts` provisions a dedicated tenant with `tenant create`, then starts three
+separate `monaca-server serve` OS processes on ports 8083/8084/8085 (the test prints their pids),
+all given the same control/admin databases and the same `MONACA_PUBLIC_BASE_URL`; only the ports,
+processes and per-process connection pools are distinct. Every assertion goes through a round-robin
+dispatcher that alternates requests across the three bases; the concurrency cases fire
+`Promise.all` bursts, not a serial loop. The stage runs in CI between the walk-through and the KEK
+drill and takes about two minutes.
+
+Measured on the local debug build:
+
+* **a — revocation.** A disable on one instance made the next `userinfo` on the other two answer
+  `401/401` with no sleep; a renewal on the last one was `400 invalid_grant`. A session kick
+  answered `204` and the next `userinfo` on all three instances was `401/401/401`; the next renewal
+  was `400`.
+* **b — rate limit.** The configured token limit was 10; the immediate burst right after
+  `PATCH /v1/rate-limits` passed **28/30**, because the configuration is cached per process for
+  5 seconds and only the writing instance invalidates its copy. After the write reset the shared
+  counters and one request per instance loaded the new configuration, the same 30-request burst
+  passed **10** and answered `429` for the other 20, each with `Retry-After`. This proves the
+  counter is one shared row, not N per-instance counters; the finding is the documented
+  configuration-cache window, not a counter bug.
+* **c — audit sequence.** 300 concurrent account creations (30 at a time, round-robin) all
+  answered `201`; the tenant chain added exactly 300 rows with 300 distinct sequence numbers,
+  range 7..306, no gap and no duplicate.
+* **d — cold pool.** A cold burst of `3 × 4 × 2 = 24` management requests on freshly started
+  instances sampled `pg_stat_activity` by per-instance `application_name`: peaks were
+  `{"mnode-pool-0":4,"mnode-pool-1":4,"mnode-pool-2":4}`, total 12, exactly the bound
+  `N × pool_size`; no instance exceeded 4.
+* **e — bench.** Same management and userinfo scenarios, 400 measured requests at concurrency 16,
+  warm-up 20, single process vs three:
+
+| scenario | single p95 / p99 | three p95 / p99 | single rps | three rps |
+|---|---|---|---|---|
+| management | 466.8 / 589.8 ms | 141.7 / 219.9 ms | 104.1 | 200.1 |
+| userinfo | 100.6 / 115.0 ms | 110.2 / 134.6 ms | 234.2 | 262.7 |
+
+The multi-instance management case is faster because three pools serve three workers; `userinfo`
+p95/p99 is 9.6%/17% **worse** while throughput is 12% higher on this machine. The raw numbers are
+reported rather than smoothed away. These are local debug-build figures; CI prints the same table
+for the release binary.
+
+### Usage and the account quota
+
+`tenant_53` adds `usage_counters` (one row: `accounts_used`, `max_accounts`, `updated_at`) and
+`usage_daily` (`(day, account_id) → logins`). Every account creation increments the counter in the
+same transaction as the insert, and every delete decrements it; the migration backfills the counter
+once. `GET /v1/usage` reads both in one transaction:
+
+```json
+{"users":{"total":251,"quota":null,"remaining":null,"enforcement":"reject"},
+ "daily":{"date":"2026-11-05","active_accounts":43,"logins":77,"timezone":"UTC"},
+ "updated_at":"…"}
+```
+
+`daily.active_accounts` is the number of rows for the current UTC day and `daily.logins` is their
+sum; both are bounded by the day's primary-key range, not by the tenant's history. The multi-instance
+stage compared the endpoint with direct SQL on the same tenant: `api=4 db=4` for the account
+counter and `api active/logins=3/3 db=3/3` for the day.
+
+**Quota semantics: reject.** A creation past `max_accounts` is `403 MONACA_QUOTA_EXCEEDED`, not a
+warning. A warning cannot stop the tenant database from growing, and the enforcement path is the
+same store method for the admin route, self-service sign-up and social/SSO JIT, so one rule covers
+every entrance. The counter update is one row-level `UPDATE … WHERE accounts_used < max_accounts
+RETURNING`, which serializes concurrent creations across instances; the default is `null`
+(unlimited), and lowering the cap below the current total only blocks new creations.
+
+### Verification
+
+Step 75 was added to the walk-through (77 steps now, with the same two gateway-only skips), and the
+multi-instance stage runs as a separate CI step. The OpenAPI document is 118 paths / 165 operations;
+`schema.gen.ts` and the event schemas (including `usage.quota_changed`) are regenerated. CI numbers
+are reported with the batch summary.
+
+Known limits: the multi-instance test uses one host and an in-process round-robin dispatcher, not a
+separate load balancer or separate machines. The 5-second rate-limit **configuration** cache is a
+real propagation window and was measured (28/30 immediate), but it is not a revocation window: the
+counters and revocation checks are shared rows read per request. Bench figures come from the local
+debug build; the CI release numbers are in the run log.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

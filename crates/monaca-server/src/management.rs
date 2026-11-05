@@ -16,7 +16,7 @@ use monaca_crypto::{hash_password, seal};
 use monaca_oidc::{is_absolute_http_url, valid_scope};
 use monaca_store::{
     AccountRow, AgentKeyRow, AgentRow, AuditFilter, BrandingRow, GrantRow, RateLimitRow, RoleRow,
-    SessionRow, SignInExperienceRow, SignInGuardrailsPatch, TenantRow,
+    SessionRow, SignInExperienceRow, SignInGuardrailsPatch, TenantRow, UsageSummaryRow,
 };
 use monaca_types::{
     AccountId, AgentId, AgentKeyId, EventId, GrantId, PasskeyId, RoleId, SessionId, TenantId,
@@ -97,6 +97,60 @@ pub struct TenantAuditQuery {
     pub from: Option<String>,
     /// Exclusive upper time bound, RFC 3339.
     pub to: Option<String>,
+}
+
+/// The account-count half of `GET /v1/usage` (§6.2).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct UsageUsersView {
+    /// Existing accounts, from the incremental counter.
+    pub total: i64,
+    /// The configured cap; `null` is unlimited.
+    pub quota: Option<i64>,
+    /// `quota - total`; `null` when unlimited.
+    pub remaining: Option<i64>,
+    /// Always `reject`: a creation past the cap is refused, not merely warned.
+    pub enforcement: &'static str,
+}
+
+/// The UTC-day half of `GET /v1/usage`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct UsageDailyView {
+    /// The UTC date the counters cover.
+    pub date: String,
+    /// Distinct accounts that signed in that day.
+    pub active_accounts: i64,
+    /// Sign-ins recorded that day.
+    pub logins: i64,
+    /// `UTC`; the day boundary is not tenant-configurable.
+    pub timezone: &'static str,
+}
+
+/// `GET /v1/usage` — the tenant's usage and quota from one snapshot.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct UsageView {
+    /// Accounts and their cap.
+    pub users: UsageUsersView,
+    /// Today's activity.
+    pub daily: UsageDailyView,
+    /// When the quota last changed.
+    pub updated_at: String,
+}
+
+/// The body of `PATCH /v1/usage`; `{"max_accounts": null}` clears the cap.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateUsageBody {
+    /// Absent means "nothing to update"; `null` clears, a number sets the cap.
+    #[serde(default, deserialize_with = "deserialize_optional_cap")]
+    pub max_accounts: Option<Option<i64>>,
+}
+
+/// Distinguish an absent `max_accounts` (`None`) from an explicit `null` (`Some(None)`) — plain
+/// `Option<Option<i64>>` collapses both to `None`, which made clearing the cap a 400.
+fn deserialize_optional_cap<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<i64>::deserialize(deserializer)?))
 }
 
 /// `POST /v1/accounts` body.
@@ -2813,6 +2867,104 @@ fn audit_page_json(
         "total": total,
         "head": { "seq": head_seq, "hash": monaca_audit::hash_hex(head_hash) },
     })
+}
+
+/// `GET /v1/usage` — the tenant's real counts and quota, from one snapshot (§6.2).
+#[utoipa::path(
+    get,
+    path = "/v1/usage",
+    tag = "management",
+    summary = "Read tenant usage and quota",
+    responses(
+        (status = 200, description = "The account counter, today's activity and the quota.", body = UsageView)
+    )
+)]
+pub async fn get_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<UsageView>, ApiError> {
+    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let summary = state.store.usage_summary(&tenant).await?;
+    Ok(Json(usage_view(summary)))
+}
+
+/// `PATCH /v1/usage` — set or clear the account cap (§6.2).
+#[utoipa::path(
+    patch,
+    path = "/v1/usage",
+    tag = "management",
+    summary = "Set the tenant account quota",
+    request_body = UpdateUsageBody,
+    responses(
+        (status = 200, description = "The updated usage snapshot.", body = UsageView),
+        (status = 400, description = "No field, a non-integer cap or one outside 0–10,000,000.")
+    )
+)]
+pub async fn update_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateUsageBody>,
+) -> Result<Json<UsageView>, ApiError> {
+    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let Some(value) = body.max_accounts else {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "nothing to update; send `max_accounts` (a number or null)",
+        ));
+    };
+    let max_accounts = match value {
+        None => None,
+        Some(raw) => {
+            if !(0..=10_000_000).contains(&raw) {
+                return Err(ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    "`max_accounts` must be between 0 and 10,000,000",
+                ));
+            }
+            Some(raw)
+        }
+    };
+    let summary = state.store.set_account_quota(&tenant, max_accounts).await?;
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "usage.quota_changed".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: Some(tenant.tenant_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "max_accounts": max_accounts }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append usage.quota_changed audit event");
+    }
+    Ok(Json(usage_view(summary)))
+}
+
+fn usage_view(summary: UsageSummaryRow) -> UsageView {
+    let remaining = summary
+        .max_accounts
+        .map(|quota| (quota - summary.accounts_used).max(0));
+    UsageView {
+        users: UsageUsersView {
+            total: summary.accounts_used,
+            quota: summary.max_accounts,
+            remaining,
+            enforcement: "reject",
+        },
+        daily: UsageDailyView {
+            date: summary.today,
+            active_accounts: summary.active_today,
+            logins: summary.logins_today,
+            timezone: "UTC",
+        },
+        updated_at: ts(summary.updated_at),
+    }
 }
 
 /// A filter value, trimmed; empty is absent and an over-long value is refused.

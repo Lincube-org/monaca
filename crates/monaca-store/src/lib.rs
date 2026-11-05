@@ -42,8 +42,8 @@ pub use repo::{
     GrantRow, LoginFailureRow, MessageTemplateRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow,
     ParRow, PasskeyRow, RateLimitRow, RefreshRow, RoleRow, SessionRow, SignInExperienceRow,
     SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow, SocialConnectorRow, SocialIdentityRow,
-    SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow, VerificationRow,
-    WebhookDeliveryRow, WebhookRow,
+    SocialStateRow, SsoConnectorRow, SsoStateRow, TrustedDeviceRow, UsageSummaryRow,
+    VerificationRow, WebhookDeliveryRow, WebhookRow,
 };
 pub use runtime_state::InteractionRow;
 
@@ -83,6 +83,9 @@ pub enum StoreError {
         /// The entity kind, e.g. `username`.
         entity: &'static str,
     },
+    /// The tenant's account quota is exhausted; the creation was refused.
+    #[error("the tenant's account quota is exhausted")]
+    QuotaExceeded,
     /// A value that must be a SQL identifier is not one.
     #[error("refusing to use `{0}` as a SQL identifier")]
     BadIdentifier(String),

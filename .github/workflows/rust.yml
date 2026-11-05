@@ -590,6 +590,14 @@ jobs:
             --admin-secret "$MONACA_BOOTSTRAP_ADMIN_CLIENT_SECRET" \
             --console-secret "$MONACA_CONSOLE_CLIENT_SECRET"
 
+      # §12 multi-instance: three separate `monaca-server serve` processes on distinct ports,
+      # sharing one PostgreSQL, driven by a round-robin dispatcher in the test process. The
+      # stage provisions its own tenant so it does not depend on the walk-through's state.
+      - name: Stage 1c — multi-instance acceptance
+        env:
+          MONACA_SERVER_BIN: .monaca/bin/monaca-server
+        run: bun scripts/multi-instance.ts --instances 3 --pool-size 4
+
       # §10.7: data created under the current KEK, a restart with the new key as current and the
       # old one as previous, `rewrap`, then a restart with only the new key. The drill proves the
       # signing key, a TOTP seed and a connector secret all survived the old key's removal.

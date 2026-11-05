@@ -157,6 +157,13 @@ pub mod kinds {
         "MFA already enabled",
         409,
     );
+    /// The tenant's account quota is exhausted; creation is refused rather than warned.
+    pub const QUOTA_EXCEEDED: ProblemKind = ProblemKind::new(
+        "quota_exceeded",
+        "MONACA_QUOTA_EXCEEDED",
+        "Tenant quota exceeded",
+        403,
+    );
     /// A username is already claimed by another account.
     pub const USERNAME_TAKEN: ProblemKind = ProblemKind::new(
         "username_taken",
@@ -425,6 +432,10 @@ impl From<monaca_store::StoreError> for ApiError {
                 };
                 ApiError::problem(kind, format!("{entity} is already taken"))
             }
+            monaca_store::StoreError::QuotaExceeded => ApiError::problem(
+                kinds::QUOTA_EXCEEDED,
+                "the tenant's account quota is exhausted",
+            ),
             _ => ApiError::internal(err),
         }
     }
@@ -532,6 +543,7 @@ mod tests {
             kinds::ACCOUNT_EXISTS,
             kinds::WEAK_PASSWORD,
             kinds::CONFIRMATION_REQUIRED,
+            kinds::QUOTA_EXCEEDED,
             kinds::INVALID_VERIFICATION_CODE,
             kinds::TOO_MANY_ATTEMPTS,
             kinds::CAPTCHA_FAILED,

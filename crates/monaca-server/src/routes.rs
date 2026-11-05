@@ -401,6 +401,7 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "Disconnect a social provider",
     ),
     ("/v1/accounts", &["get", "post"], "List and create accounts"),
+    ("/v1/usage", &["get", "patch"], "Tenant usage and quota"),
     (
         "/v1/accounts/{id}",
         &["get", "patch", "delete"],
@@ -899,6 +900,10 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/accounts",
             get(crate::management::list_accounts).post(crate::management::create_account),
+        )
+        .route(
+            "/v1/usage",
+            get(crate::management::get_usage).patch(crate::management::update_usage),
         )
         .route(
             "/v1/accounts/{id}",
