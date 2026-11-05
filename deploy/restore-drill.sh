@@ -5,6 +5,10 @@
 # This is the first half of the restore drill: restore, then run `migrate` and `audit verify`
 # against the result. deploy/README.md has the copy-paste second half.
 #
+# By default the dump's owners and ACLs are restored too, which is what an in-place disaster
+# recovery needs: the org roles must own their schemas or `SET LOCAL ROLE` loses access. Pass
+# `--portable` only when restoring into a cluster where those roles do not exist.
+#
 # Passing the same connection options as backup.sh:
 #
 #   --dump <file> --target-db <name> --container <id|name>
@@ -21,7 +25,9 @@ usage() {
 usage: restore-drill.sh --dump <file> --target-db <name>
                         (--container <id|name> | --compose-file <file> [--service <name>]
                          | --dsn <target-dsn> --admin-dsn <maintenance-dsn>)
-                        [--db-user <user>] [--admin-db <name>] [--recreate]
+                        [--db-user <user>] [--admin-db <name>] [--recreate] [--portable]
+
+  --portable  restore without owners and ACLs (the dump must have been taken with --portable)
 EOF
 }
 
@@ -35,6 +41,7 @@ admin_db="postgres"
 dsn=""
 admin_dsn=""
 recreate=0
+portable=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +55,7 @@ while [ $# -gt 0 ]; do
     --dsn) dsn="${2:-}"; shift 2 ;;
     --admin-dsn) admin_dsn="${2:-}"; shift 2 ;;
     --recreate) recreate=1; shift ;;
+    --portable) portable=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "restore-drill.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -145,12 +153,17 @@ if [ -n "$exists" ]; then
 fi
 admin_psql -c "CREATE DATABASE \"$target_db\"" >/dev/null
 
+restore_flags=()
+if [ "$portable" -eq 1 ]; then
+  restore_flags=(--no-owner --no-privileges)
+fi
+
 echo "restore-drill.sh: pg_restore $dump -> $target_db"
 if [ -n "$dsn" ]; then
-  pg_restore --no-owner --no-privileges --dbname "$dsn" "$dump"
+  pg_restore "${restore_flags[@]}" --dbname "$dsn" "$dump"
 else
   docker exec -i "$container" \
-    pg_restore -U "$db_user" -d "$target_db" --no-owner --no-privileges < "$dump"
+    pg_restore -U "$db_user" -d "$target_db" "${restore_flags[@]}" < "$dump"
 fi
 
 tables="$(target_psql -tAc \

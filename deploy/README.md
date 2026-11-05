@@ -78,7 +78,11 @@ and only then remove `MONACA_DEV_KEK`.
 `remote-deploy.sh` dumps every Monaca database between `pull` and `migrate`. A failed dump aborts
 the deploy before the schema changes. Dumps are written to `backups/<UTC stamp>/` (override with
 `MONACA_BACKUP_DIR`) and are owner-only. The pg_dump client runs inside the `postgres` container,
-so the host does not need PostgreSQL installed.
+so the host does not need PostgreSQL installed. A dump keeps ownership and ACLs by default: an
+in-place restore must leave the org roles owning their schemas, or `SET LOCAL ROLE` in the request
+path loses access. `--portable` strips both for a restore into a different cluster whose roles do
+not exist; restore it with `restore-drill.sh --portable` and expect to provision the roles there
+first.
 
     # what the deploy does, by hand (files are in /opt/monaca on the host)
     bash backup.sh --compose-file compose.dev.yml \
@@ -90,8 +94,9 @@ only, and it is not the default.
 A dump is one database. A complete backup is `monaca_control` plus every `mt_*` tenant database;
 `remote-deploy.sh` enumerates them from `pg_database`, and a manual backup should do the same.
 
-**Restore drill.** Restore into a new database, then prove the schema replays and the audit chain
-still verifies:
+**Restore drill.** Restore into a fresh database object, then prove the schema replays and the
+audit chain still verifies. The default restore keeps the dump's owners and ACLs; pass
+`--portable` only for a dump taken with `backup.sh --portable` on another cluster:
 
     bash restore-drill.sh --compose-file compose.dev.yml \
       --dump backups/<stamp>/monaca_control.dump --target-db monaca_control_drill --recreate

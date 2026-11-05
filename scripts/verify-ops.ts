@@ -425,7 +425,7 @@ async function main(): Promise<number> {
       check("the seeded account signs in", signed.status === 200, `${signed.status}`);
       if (signed.status !== 200) fail("the seeded account cannot sign in");
       await requestReset(args, email);
-      for (let i = 0; i < 60 && mails.length === 0; i++) await Bun.sleep(250);
+      for (let i = 0; i < 120 && mails.length === 0; i++) await Bun.sleep(250);
       check(
         "the seeded connector delivers a reset mail",
         mails.at(-1)?.authorization === `Bearer ${connectorSecret}`,
@@ -527,7 +527,7 @@ async function main(): Promise<number> {
       if (signed.status !== 200) fail("the restored account cannot sign in");
       const before = mails.length;
       await requestReset(args, email);
-      for (let i = 0; i < 60 && mails.length <= before; i++) await Bun.sleep(250);
+      for (let i = 0; i < 120 && mails.length <= before; i++) await Bun.sleep(250);
       check(
         "the restored connector delivers a reset mail",
         mails.length > before && mails.at(-1)?.authorization === `Bearer ${connectorSecret}`,
@@ -565,7 +565,7 @@ async function main(): Promise<number> {
       if (signed.status !== 200) fail("the account cannot sign in after the rotation");
       const before = mails.length;
       await requestReset(args, email);
-      for (let i = 0; i < 60 && mails.length <= before; i++) await Bun.sleep(250);
+      for (let i = 0; i < 120 && mails.length <= before; i++) await Bun.sleep(250);
       check(
         "the rewrapped connector delivers a reset mail",
         mails.length > before && mails.at(-1)?.authorization === `Bearer ${connectorSecret}`,

@@ -8,9 +8,11 @@
 #   --container <id|name>                      docker exec into a running container
 #   --compose-file <file> [--service postgres] docker exec into the compose service's container
 #
-# --out is always required. The dump is `pg_dump --format=custom --no-owner --no-privileges`, so
-# `pg_restore` can read it back without the source's roles or ownership. The script exits non-zero
-# when pg_dump fails, when the dump is empty, or when the requested client tools are absent.
+# --out is always required. The dump is `pg_dump --format=custom`, including ownership and ACLs:
+# an in-place disaster restore needs the org roles to own their schemas, or `SET LOCAL ROLE` in the
+# request path loses access. `--portable` strips owners and privileges for a restore into a
+# different cluster whose roles do not exist. The script exits non-zero when pg_dump fails, when
+# the dump is empty, or when the requested client tools are absent.
 #
 # Example, a host with the PostgreSQL client:
 #
@@ -24,7 +26,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: backup.sh --out <file> (--dsn <url> | --container <id|name> | --compose-file <file>)
-                 [--service <name>] [--db <name>] [--db-user <user>]
+                 [--service <name>] [--db <name>] [--db-user <user>] [--portable]
 
   --out           destination dump file (required)
   --dsn           host pg_dump connection string
@@ -33,6 +35,7 @@ usage: backup.sh --out <file> (--dsn <url> | --container <id|name> | --compose-f
   --service       compose service name (default: postgres)
   --db            database to dump (default: monaca_control)
   --db-user       role for the container dump (default: monaca)
+  --portable      strip owners and ACLs for a restore into a different cluster
 EOF
 }
 
@@ -43,6 +46,7 @@ compose_file=""
 service="postgres"
 db="monaca_control"
 db_user="monaca"
+portable=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -53,10 +57,16 @@ while [ $# -gt 0 ]; do
     --service) service="${2:-}"; shift 2 ;;
     --db) db="${2:-}"; shift 2 ;;
     --db-user) db_user="${2:-}"; shift 2 ;;
+    --portable) portable=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "backup.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+dump_flags=(--format=custom)
+if [ "$portable" -eq 1 ]; then
+  dump_flags+=(--no-owner --no-privileges)
+fi
 
 if [ -z "$out" ]; then
   echo "backup.sh: --out is required." >&2
@@ -89,7 +99,7 @@ if [ -n "$dsn" ]; then
     exit 1
   fi
   echo "backup.sh: pg_dump $db -> $out"
-  if ! pg_dump --format=custom --no-owner --no-privileges --file "$out" "$dsn"; then
+  if ! pg_dump "${dump_flags[@]}" --file "$out" "$dsn"; then
     echo "backup.sh: pg_dump failed; removing the incomplete dump." >&2
     rm -f "$out"
     exit 1
@@ -121,7 +131,7 @@ else
 
   echo "backup.sh: docker exec $container: pg_dump $db -> $out"
   if ! docker exec -i "$container" \
-    pg_dump -U "$db_user" -d "$db" --format=custom --no-owner --no-privileges > "$out"
+    pg_dump -U "$db_user" -d "$db" "${dump_flags[@]}" > "$out"
   then
     echo "backup.sh: pg_dump failed inside '$container'; removing the incomplete dump." >&2
     rm -f "$out"
