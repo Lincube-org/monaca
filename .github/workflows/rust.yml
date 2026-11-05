@@ -453,6 +453,7 @@ jobs:
       - name: Stage 0d — tenant-pool role refusals
         run: |
           set -euo pipefail
+          mkdir -p .monaca/reports
           superuser_log=.monaca/reports/app-role-superuser.log
           missing_log=.monaca/reports/app-role-missing.log
 
