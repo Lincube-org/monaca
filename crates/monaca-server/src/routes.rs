@@ -342,6 +342,11 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "SAML single logout service",
     ),
     (
+        "/t/{tenant}/sso/{connector}/logout",
+        &["get"],
+        "Start a SAML single logout",
+    ),
+    (
         "/t/{tenant}/account",
         &["get", "patch"],
         "Signed-in account",
@@ -893,6 +898,10 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
         .route(
             "/t/{tenant}/sso/{connector}/slo",
             get(crate::saml::saml_slo_redirect).post(crate::saml::saml_slo_post),
+        )
+        .route(
+            "/t/{tenant}/sso/{connector}/logout",
+            get(crate::saml::saml_logout),
         )
 }
 

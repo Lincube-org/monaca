@@ -17726,12 +17726,13 @@ async function domainFlow(base: string, adminToken: string, adminSecret: string)
 }
 
 /**
- * Step 80 — SAML LogoutRequest intake.
+ * Step 80 — SAML Single Logout.
  *
  * A real signed LogoutRequest needs the test IdP key, so the positive path lives in the Rust
  * suite (`saml::tests::a_signed_logout_request_is_received_and_answered_with_success`). This
  * step pins what the HTTP surface owns: truthful metadata (both front-channel bindings, no SOAP,
- * no signing certificate), the signature requirement on both bindings and DTD refusal.
+ * no signing certificate), the signature requirement on both bindings, DTD refusal, local
+ * revocation on SP-initiated logout and the audit trail.
  */
 async function sloFlow(base: string): Promise<StepResult> {
   const t = performance.now();
@@ -17878,6 +17879,71 @@ async function sloFlow(base: string): Promise<StepResult> {
         ((receivedAudit.body as { items?: unknown[] }).items ?? []).length === 0,
     ]);
 
+    // --- SP-initiated logout ends a password session and writes the audit trail ----------------
+    const verifier = `slo-${runId}-${"v".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const authorize = await call(
+      `${base}/t/${slug}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: "e2e-login",
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `st-${runId}`,
+        nonce: `n-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(authorize.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (authorize.status !== 302 || interaction === null) {
+      throw new Error(`authorize → ${authorize.status} ${text(authorize.body)}`);
+    }
+    const signIn = await call(
+      `${base}/t/${slug}/interaction/${encodeURIComponent(interaction)}/sign-in`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identifier: adminEmail, password: adminPassword }),
+      },
+    );
+    const session = /monaca_session=([0-9a-f-]{36})/.exec(signIn.headers.get("set-cookie") ?? "")?.[1];
+    if (signIn.status !== 200 || session === undefined) {
+      throw new Error(`sign-in → ${signIn.status} ${text(signIn.body)}`);
+    }
+    const cookie = `monaca_session=${session}`;
+
+    const logout = await call(`${base}/t/${slug}/sso/okta/logout`, {
+      redirect: "manual",
+      headers: { cookie },
+    });
+    checks.push([
+      "SP-initiated logout ends the local session and returns to the hosted page",
+      logout.status === 302 &&
+        (logout.headers.get("location") ?? "").includes(`/sign-in?tenant=${slug}`) &&
+        (logout.headers.get("set-cookie") ?? "").includes("monaca_session=;"),
+    ]);
+    const afterLogout = await call(`${base}/t/${slug}/account`, { headers: { cookie } });
+    checks.push([
+      "the revoked session cookie no longer opens the account",
+      afterLogout.status === 401,
+    ]);
+
+    const initiatedAudit = await call(`${base}/v1/audit?action=sso_logout.initiated`, { headers });
+    const initiated = ((initiatedAudit.body as { items?: Array<{ payload?: Record<string, unknown> }> })
+      .items ?? []).filter((item) => item.payload?.connector_id === "okta");
+    checks.push([
+      "the SP-initiated logout is on the tenant audit chain",
+      initiatedAudit.status === 200 &&
+        initiated.length === 1 &&
+        initiated[0]?.payload?.idp_request === false &&
+        initiated[0]?.payload?.sessions_revoked === 1,
+    ]);
+
     const removed = await call(`${base}/v1/saml-connectors/okta`, { method: "DELETE", headers });
     checks.push(["the connector is removed", removed.status === 204]);
   } catch (error) {
@@ -17888,11 +17954,11 @@ async function sloFlow(base: string): Promise<StepResult> {
   const ok = checks.length > 0 && checks.every(([, passed]) => passed);
   return {
     step: "80",
-    title: "SAML logout request intake",
+    title: "SAML single logout",
     status: ok ? "pass" : "fail",
     ms: Math.round(performance.now() - t),
     detail: ok
-      ? `${checks.length} checks: metadata → unsigned POST/Redirect → DTD → no audit`
+      ? `${checks.length} checks: metadata → unsigned POST/Redirect → DTD → local revocation → audit`
       : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
   };
 }

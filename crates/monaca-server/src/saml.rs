@@ -32,20 +32,22 @@ use std::time::{Duration as StdDuration, SystemTime};
 use axum::Json;
 use axum::extract::rejection::FormRejection;
 use axum::extract::{Form, Path, Query, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use data_encoding::BASE64;
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_oidc::SamlLogin;
-use monaca_store::{AccountRow, SamlConnectorRow, TenantRow};
+use monaca_store::{AccountRow, SamlBindingRow, SamlConnectorRow, TenantRow};
 use monaca_types::{AccountId, EventId, TypedId};
+use risaml::config::NameIdFormat;
 use risaml::constants::{Binding, CertUse};
 use risaml::{
     AcsEndpoint, AuthnRequest, AuthnRequestSigningPolicy, BrowserInput, ClockSkew, EntityId,
-    FormField, IdpDescriptor, LogoutRequest, LogoutResponse, MetadataTrustPolicy, NameId, Outbound,
-    PendingAuthnRequest, PendingSnapshot, RelayStateParam, ReplayCache, ReplayKey, ReplayPolicy,
-    Saml, SamlInstant, SamlValidationContext, SessionIndex, SloEndpoint, Sp, SpConfig,
-    SpValidationPolicy, SsoResponse, SsoSession, StartSso, XmlPolicy,
+    FormField, IdpDescriptor, LogoutRequest, LogoutResponse, LogoutSigning, LogoutSubject,
+    MetadataTrustPolicy, NameId, Outbound, PendingAuthnRequest, PendingSnapshot, RelayStateParam,
+    ReplayCache, ReplayKey, ReplayPolicy, Saml, SamlInstant, SamlValidationContext, SessionIndex,
+    SloEndpoint, Sp, SpConfig, SpValidationPolicy, SsoResponse, SsoSession, StartSlo, StartSso,
+    XmlPolicy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -524,6 +526,163 @@ async fn consume_logout_request(
         )
     })?;
     logout_response(&sp, &idp, request, received.relay_state(), binding)
+}
+
+/// `GET /t/{tenant}/sso/{connector}/logout` — SP-initiated logout.
+///
+/// The local session ends first and then, when it carries a binding for this connector, an
+/// unsigned LogoutRequest is sent to the IdP. The local outcome never depends on the IdP: a
+/// refused or undeliverable IdP logout leaves the session ended (§6.1 SAML SLO).
+pub async fn saml_logout(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_slug, connector_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
+    if !tenant.is_active() {
+        return Err(ApiError::not_found("tenant"));
+    }
+    let Some(connector) = state.store.saml_connector(&tenant, &connector_id).await? else {
+        return Err(ApiError::not_found("SAML connector"));
+    };
+    if !connector.enabled {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this SAML connector is disabled",
+        ));
+    }
+
+    let session_row = match crate::session::session_id(&headers) {
+        Some(id) => state.store.session_by_id(&tenant, id).await?,
+        None => None,
+    };
+    let live = session_row
+        .as_ref()
+        .filter(|row| row.is_active(state.now()));
+    let account_id = live.map(|row| row.account_id);
+    let mut action: Option<Outbound<LogoutRequest>> = None;
+    let mut revoked = false;
+    if let Some(row) = live {
+        if let Some(binding) = state
+            .store
+            .saml_session_binding(&tenant, row.id, &connector_id)
+            .await?
+        {
+            match start_logout(&state, &tenant, &connector, &binding) {
+                Ok(outbound) => action = Some(outbound),
+                // Undeliverable is a consequence the contract names, not a failed logout: the
+                // local session below is what the user asked to end.
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        connector = %connector_id,
+                        "the IdP declares no usable SLO endpoint; local logout only"
+                    );
+                }
+            }
+        }
+        state
+            .store
+            .revoke_session_refresh_tokens(&tenant, row.id)
+            .await?;
+        revoked = state.store.revoke_session(&tenant, row.id).await?;
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "sso_logout.initiated".into(),
+        actor_chain: vec![match account_id {
+            Some(account) => AuditActor::account(AccountId::from_uuid(account)),
+            None => AuditActor::tenant(tenant.tenant_id()),
+        }],
+        subject: match session_row.as_ref() {
+            Some(row) => AuditSubject {
+                subject_type: AuditActorType::Session,
+                id: Some(monaca_types::SessionId::from_uuid(row.id).to_typed_string()),
+            },
+            None => AuditSubject {
+                subject_type: AuditActorType::Tenant,
+                id: None,
+            },
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "connector_id": connector_id,
+            "protocol": "saml",
+            "idp_request": action.is_some(),
+            "sessions_revoked": usize::from(revoked),
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append sso_logout.initiated audit event");
+    }
+
+    let mut response = match action.as_ref() {
+        Some(outbound) => match outbound.raw_context().binding {
+            Binding::Redirect => {
+                crate::social::found(outbound.redirect_url().map_err(ApiError::internal)?)
+            }
+            _ => Html(outbound.raw_context().post_form()).into_response(),
+        },
+        // No binding or no usable IdP endpoint: the browser returns to the hosted sign-in page.
+        None => crate::social::found(&format!(
+            "{}/sign-in?tenant={}",
+            state.config.auth_ui_url.trim_end_matches('/'),
+            tenant.slug
+        )),
+    };
+    let secure = crate::session::secure_origin(&state.config);
+    if let Ok(value) = HeaderValue::from_str(&crate::session::clear_cookie(secure)) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    Ok(response)
+}
+
+/// Start an unsigned SP-initiated LogoutRequest, preferring HTTP-Redirect.
+fn start_logout(
+    state: &AppState,
+    tenant: &TenantRow,
+    connector: &SamlConnectorRow,
+    binding: &SamlBindingRow,
+) -> Result<Outbound<LogoutRequest>, ApiError> {
+    let sp = saml_sp(state, tenant, &connector.connector_id)?;
+    let idp = saml_idp(connector)?;
+    let name_id = NameId::new(
+        binding.name_id.clone(),
+        binding
+            .name_id_format
+            .as_deref()
+            .map(|format| NameIdFormat::Custom(format.to_owned())),
+    );
+    let session_indexes = binding
+        .session_indexes
+        .iter()
+        .map(|index| SessionIndex::try_new(index.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ApiError::internal)?;
+    let subject = LogoutSubject::new(name_id, session_indexes);
+    sp.start_slo(
+        &idp,
+        subject.clone(),
+        StartSlo::redirect().signing(LogoutSigning::DoNotSignForCompatibility),
+    )
+    .or_else(|_| {
+        sp.start_slo(
+            &idp,
+            subject,
+            StartSlo::post().signing(LogoutSigning::DoNotSignForCompatibility),
+        )
+    })
+    .map(|started| started.outbound)
+    .map_err(|err| {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("the LogoutRequest could not be created: {err}"),
+        )
+    })
 }
 
 /// The sessions a LogoutRequest identifies, never "every session of the connector".

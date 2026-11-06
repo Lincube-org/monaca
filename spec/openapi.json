@@ -2214,6 +2214,16 @@
         "summary": "SSO provider callback"
       }
     },
+    "/t/{tenant}/sso/{connector}/logout": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "Start a SAML single logout"
+      }
+    },
     "/t/{tenant}/sso/{connector}/metadata": {
       "get": {
         "responses": {
