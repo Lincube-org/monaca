@@ -25,14 +25,15 @@
 //! bound to an interaction and a client redirect, neither of which an unsolicited POST can name;
 //! accepting one would be a second, looser path into the same completion code.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime};
 
 use axum::Json;
 use axum::extract::rejection::FormRejection;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use data_encoding::BASE64;
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_oidc::SamlLogin;
@@ -41,10 +42,10 @@ use monaca_types::{AccountId, EventId, TypedId};
 use risaml::constants::{Binding, CertUse};
 use risaml::{
     AcsEndpoint, AuthnRequest, AuthnRequestSigningPolicy, BrowserInput, ClockSkew, EntityId,
-    FormField, IdpDescriptor, MetadataTrustPolicy, PendingAuthnRequest, PendingSnapshot,
-    RelayStateParam, ReplayCache, ReplayKey, ReplayPolicy, Saml, SamlInstant,
-    SamlValidationContext, Sp, SpConfig, SpValidationPolicy, SsoResponse, SsoSession, StartSso,
-    XmlPolicy,
+    FormField, IdpDescriptor, LogoutRequest, LogoutResponse, MetadataTrustPolicy, NameId, Outbound,
+    PendingAuthnRequest, PendingSnapshot, RelayStateParam, ReplayCache, ReplayKey, ReplayPolicy,
+    Saml, SamlInstant, SamlValidationContext, SessionIndex, SloEndpoint, Sp, SpConfig,
+    SpValidationPolicy, SsoResponse, SsoSession, StartSso, XmlPolicy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -65,6 +66,9 @@ const SAML_CLOCK_SKEW_MS: i64 = 120_000;
 
 /// The largest assertion message this ACS accepts after base64 decoding.
 const MAX_SAML_XML_BYTES: usize = 1024 * 1024;
+
+/// How long a LogoutRequest without `NotOnOrAfter` stays on the one-time replay list.
+const SAML_LOGOUT_REPLAY_TTL_SECS: i64 = 300;
 
 /// The assertion attribute used when the administrator names none.
 const DEFAULT_EMAIL_ATTRIBUTE: &str = "email";
@@ -295,6 +299,502 @@ pub async fn sp_metadata(
         sp.metadata_xml().to_owned(),
     )
         .into_response())
+}
+
+/// The query of a LogoutRequest delivered over HTTP-Redirect.
+#[derive(Debug, Deserialize)]
+pub struct SloQuery {
+    /// The raw `<LogoutRequest>`, DEFLATE-compressed and base64-encoded by the binding.
+    #[serde(rename = "SAMLRequest")]
+    pub saml_request: String,
+    /// Opaque state the IdP asks this SP to echo on the response.
+    #[serde(rename = "RelayState")]
+    pub relay_state: Option<String>,
+}
+
+/// The form body of a LogoutRequest delivered over HTTP-POST.
+#[derive(Debug, Deserialize)]
+pub struct SloForm {
+    /// The base64-encoded `<LogoutRequest>`.
+    #[serde(rename = "SAMLRequest")]
+    pub saml_request: String,
+    /// Opaque state the IdP asks this SP to echo on the response.
+    #[serde(rename = "RelayState")]
+    pub relay_state: Option<String>,
+}
+
+/// One inbound LogoutRequest, already decoded far enough to be scanned.
+struct SloInput {
+    /// The binding the IdP used; the response prefers the same binding.
+    binding: Binding,
+    /// The base64 value exactly as received, replayed into `risaml`.
+    saml_request: String,
+    /// The received RelayState, when present.
+    relay_state: Option<String>,
+    /// The raw query string for the HTTP-Redirect binding.
+    raw_query: Option<String>,
+    /// The decoded XML the structural pre-scan reads.
+    xml: String,
+}
+
+/// `GET /t/{tenant}/sso/{connector}/slo` — receive an IdP logout over HTTP-Redirect.
+pub async fn saml_slo_redirect(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_slug, connector_id)): Path<(String, String)>,
+    Query(query): Query<SloQuery>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, ApiError> {
+    let xml = decode_redirect_request(&query.saml_request)?;
+    consume_logout_request(
+        state,
+        tenant_slug,
+        connector_id,
+        SloInput {
+            binding: Binding::Redirect,
+            saml_request: query.saml_request,
+            relay_state: query.relay_state,
+            raw_query: Some(raw.unwrap_or_default()),
+            xml,
+        },
+    )
+    .await
+}
+
+/// `POST /t/{tenant}/sso/{connector}/slo` — receive an IdP logout over HTTP-POST.
+pub async fn saml_slo_post(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_slug, connector_id)): Path<(String, String)>,
+    form: Result<Form<SloForm>, FormRejection>,
+) -> Result<Response, ApiError> {
+    let Form(form) = form.map_err(|_| {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the LogoutRequest must be an application/x-www-form-urlencoded form",
+        )
+    })?;
+    let xml = decode_saml_request(&form.saml_request)?;
+    consume_logout_request(
+        state,
+        tenant_slug,
+        connector_id,
+        SloInput {
+            binding: Binding::Post,
+            saml_request: form.saml_request,
+            relay_state: form.relay_state,
+            raw_query: None,
+            xml,
+        },
+    )
+    .await
+}
+
+/// The shared receive path for both front-channel bindings.
+async fn consume_logout_request(
+    state: Arc<AppState>,
+    tenant_slug: String,
+    connector_id: String,
+    input: SloInput,
+) -> Result<Response, ApiError> {
+    let tenant = state.tenant(&tenant_slug).await?;
+    if !tenant.is_active() {
+        return Err(ApiError::not_found("tenant"));
+    }
+    let Some(connector) = state.store.saml_connector(&tenant, &connector_id).await? else {
+        return Err(ApiError::not_found("SAML connector"));
+    };
+    if !connector.enabled {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this SAML connector is disabled",
+        ));
+    }
+
+    // The structural pre-scan runs before any parser inside `risaml` sees the bytes: a DTD, an
+    // entity reference, a nested LogoutRequest or a signature below the root can only be an
+    // attempt to redirect the verifier away from the element the business fields are read from.
+    scan_logout_request(&input.xml)
+        .map_err(|detail| ApiError::problem(kinds::INVALID_REQUEST, detail))?;
+
+    let sp = saml_sp(&state, &tenant, &connector_id)?;
+    let idp = saml_idp(&connector)?;
+    let mut replay = CallerOwnedReplay;
+    let validation = SamlValidationContext::new(
+        system_time(state.now())?,
+        ReplayPolicy::RequireCache(&mut replay),
+    )
+    .with_clock_skew(ClockSkew::from_millis(
+        -SAML_CLOCK_SKEW_MS,
+        SAML_CLOCK_SKEW_MS,
+    ));
+
+    let mut fields = vec![FormField::new("SAMLRequest", input.saml_request.as_str())];
+    if let Some(relay_state) = input.relay_state.as_deref() {
+        fields.push(FormField::new("RelayState", relay_state));
+    }
+    let browser_input = match input.binding {
+        Binding::Redirect => {
+            BrowserInput::<LogoutRequest>::redirect(input.raw_query.as_deref().unwrap_or_default())
+        }
+        _ => BrowserInput::<LogoutRequest>::post(fields),
+    };
+    let received = sp
+        .receive_slo(&idp, browser_input, validation)
+        .map_err(saml_rejected)?;
+    let request = received.message();
+
+    // `risaml` enforces `NotOnOrAfter`; the lower half is ours: a request whose IssueInstant is
+    // stale is refused with the same narrow two-minute skew the assertion window uses.
+    let issued_at = parse_instant(request.issue_instant().as_str())?;
+    if !logout_issue_instant_acceptable(issued_at, state.now()) {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the LogoutRequest IssueInstant is outside the accepted clock window",
+        ));
+    }
+
+    let now = state.now();
+    let replay_until = match request.not_on_or_after() {
+        Some(instant) => parse_instant(instant.as_str())?,
+        None => now + time::Duration::seconds(SAML_LOGOUT_REPLAY_TTL_SECS),
+    };
+    if replay_until <= now {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this LogoutRequest is already expired",
+        ));
+    }
+    if !state
+        .store
+        .consume_saml_logout_once(&tenant, &connector_id, request.id().as_str(), replay_until)
+        .await?
+    {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "this LogoutRequest was already received",
+        ));
+    }
+
+    // Only a request that names a session may end one. A request that names none matches nothing
+    // and still answers success below: the endpoint must not become a SessionIndex probe.
+    let targets = live_logout_targets(
+        &state,
+        &tenant,
+        &connector_id,
+        request.name_id().map(NameId::value),
+        request.session_indexes(),
+    )
+    .await?;
+    let mut revoked = 0usize;
+    for session_id in &targets {
+        if revoke_logout_session(&state, &tenant, &connector_id, *session_id).await? {
+            revoked += 1;
+        }
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "sso_logout.received".into(),
+        actor_chain: vec![AuditActor::tenant(tenant.tenant_id())],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: None,
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "connector_id": connector_id,
+            "protocol": "saml",
+            "sessions_revoked": revoked,
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append sso_logout.received audit event");
+    }
+
+    // The response is Success whether or not a session matched. That is the contract, not a
+    // courtesy: a difference would let the IdP (or anyone holding a signed request) probe which
+    // SessionIndex values exist here.
+    let binding = slo_response_binding(&idp, input.binding).ok_or_else(|| {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "the IdP metadata declares no SingleLogoutService this SP can answer; \
+             update the connector metadata",
+        )
+    })?;
+    logout_response(&sp, &idp, request, received.relay_state(), binding)
+}
+
+/// The sessions a LogoutRequest identifies, never "every session of the connector".
+async fn live_logout_targets(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    connector_id: &str,
+    name_id: Option<&str>,
+    session_indexes: &[SessionIndex],
+) -> Result<Vec<Uuid>, ApiError> {
+    if !logout_can_match(name_id, session_indexes) {
+        return Ok(Vec::new());
+    }
+    let mut targets = BTreeSet::new();
+    if session_indexes.is_empty() {
+        targets.extend(
+            state
+                .store
+                .live_saml_bound_sessions(tenant, connector_id, name_id, None)
+                .await?,
+        );
+    } else {
+        for session_index in session_indexes {
+            targets.extend(
+                state
+                    .store
+                    .live_saml_bound_sessions(
+                        tenant,
+                        connector_id,
+                        name_id,
+                        Some(session_index.as_str()),
+                    )
+                    .await?,
+            );
+        }
+    }
+    Ok(targets.into_iter().collect())
+}
+
+/// A request that names neither identifier must match nothing; it is never "all sessions".
+fn logout_can_match(name_id: Option<&str>, session_indexes: &[SessionIndex]) -> bool {
+    name_id.is_some() || !session_indexes.is_empty()
+}
+
+/// The `IssueInstant` window: the same two minutes the assertion bounds use.
+fn logout_issue_instant_acceptable(issued_at: OffsetDateTime, now: OffsetDateTime) -> bool {
+    let skew = time::Duration::milliseconds(SAML_CLOCK_SKEW_MS);
+    issued_at >= now - skew && issued_at <= now + skew
+}
+
+/// Revoke one matched session through the existing session/refresh-token path.
+async fn revoke_logout_session(
+    state: &Arc<AppState>,
+    tenant: &TenantRow,
+    connector_id: &str,
+    session_id: Uuid,
+) -> Result<bool, ApiError> {
+    let Some(row) = state.store.session_by_id(tenant, session_id).await? else {
+        return Ok(false);
+    };
+    state
+        .store
+        .revoke_session_refresh_tokens(tenant, session_id)
+        .await?;
+    if !state.store.revoke_session(tenant, session_id).await? {
+        return Ok(false);
+    }
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "session.logout".into(),
+        actor_chain: vec![AuditActor::account(AccountId::from_uuid(row.account_id))],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Session,
+            id: Some(monaca_types::SessionId::from_uuid(session_id).to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "reason": "saml_slo", "connector_id": connector_id }),
+    };
+    if let Err(err) = state.audit_tenant(tenant, &event).await {
+        tracing::warn!(%err, "could not append session.logout audit event");
+    }
+    Ok(true)
+}
+
+/// Choose the binding for the LogoutResponse: the IdP's own binding first, then either it
+/// declares. `None` means the metadata cannot receive a response at all.
+fn slo_response_binding(idp: &IdpDescriptor, inbound: Binding) -> Option<Binding> {
+    if idp.metadata().get_single_logout_service(inbound).is_some() {
+        Some(inbound)
+    } else if idp
+        .metadata()
+        .get_single_logout_service(Binding::Post)
+        .is_some()
+    {
+        Some(Binding::Post)
+    } else if idp
+        .metadata()
+        .get_single_logout_service(Binding::Redirect)
+        .is_some()
+    {
+        Some(Binding::Redirect)
+    } else {
+        None
+    }
+}
+
+/// Build the unsigned LogoutResponse.
+///
+/// `risaml::respond_slo` always signs, and this SP has no signing key (§6.1). The library's
+/// renderer is used directly with `want_signed=false`; the SP metadata declares no
+/// `KeyDescriptor`, so an unsigned answer is the only truthful one.
+fn logout_response(
+    sp: &Saml<Sp>,
+    idp: &IdpDescriptor,
+    request: &LogoutRequest,
+    relay_state: &RelayStateParam,
+    binding: Binding,
+) -> Result<Response, ApiError> {
+    let context = logout_response_context(sp, idp, request, relay_state, binding)?;
+    let outbound = Outbound::<LogoutResponse>::try_from(context).map_err(ApiError::internal)?;
+    if binding == Binding::Redirect {
+        Ok(crate::social::found(
+            outbound.redirect_url().map_err(ApiError::internal)?,
+        ))
+    } else {
+        Ok(Html(outbound.raw_context().post_form()).into_response())
+    }
+}
+
+/// The rendered LogoutResponse, before it is turned into a browser action.
+fn logout_response_context(
+    sp: &Saml<Sp>,
+    idp: &IdpDescriptor,
+    request: &LogoutRequest,
+    relay_state: &RelayStateParam,
+    binding: Binding,
+) -> Result<risaml::entity::BindingContext, ApiError> {
+    let raw = sp.raw_service_provider();
+    risaml::logout::create_logout_response(
+        &raw.setting,
+        &raw.metadata,
+        idp.metadata(),
+        binding,
+        Some(request.id().as_str()),
+        relay_state.as_deref(),
+        false,
+    )
+    .map_err(|err| {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!("the LogoutResponse could not be built: {err}"),
+        )
+    })
+}
+
+/// Decode an HTTP-Redirect `SAMLRequest` far enough for the structural pre-scan.
+fn decode_redirect_request(value: &str) -> Result<String, ApiError> {
+    let compressed = risaml::binding::base64_decode_with_limit(value, MAX_SAML_XML_BYTES)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "SAMLRequest is not base64"))?;
+    let bytes = risaml::binding::deflate_raw_decode_with_limit(&compressed, MAX_SAML_XML_BYTES)
+        .map_err(|_| {
+            ApiError::problem(
+                kinds::INVALID_REQUEST,
+                "SAMLRequest is not raw-DEFLATE data",
+            )
+        })?;
+    String::from_utf8(bytes).map_err(|_| {
+        ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "SAMLRequest does not decode to an XML document",
+        )
+    })
+}
+
+/// Reject the constructs that make a LogoutRequest ambiguous.
+///
+/// The signed node must be the consumed node: exactly one `LogoutRequest` root, no nested
+/// `LogoutRequest`, and no `Signature` below the root (an enveloped signature over the root is
+/// the only one the profile allows). DTDs and entity references are refused for the same reason
+/// as in [`scan_xml`].
+fn scan_logout_request(xml: &str) -> Result<(), String> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().check_end_names = true;
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut root: Option<String> = None;
+    let mut roots = 0usize;
+    let mut nested_requests = 0usize;
+    let mut nested_signatures = 0usize;
+    let mut encrypted_ids = 0usize;
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(element)) => {
+                let local = element.name().local_name().as_ref().to_vec();
+                let depth = stack.len();
+                if depth == 0 {
+                    roots += 1;
+                    root = Some(String::from_utf8_lossy(&local).into_owned());
+                } else {
+                    if local == b"LogoutRequest" {
+                        nested_requests += 1;
+                    }
+                    if local == b"Signature" && depth > 1 {
+                        nested_signatures += 1;
+                    }
+                    if local == b"EncryptedID" {
+                        encrypted_ids += 1;
+                    }
+                }
+                stack.push(local);
+            }
+            Ok(quick_xml::events::Event::Empty(element)) => {
+                let local = element.name().local_name().as_ref().to_vec();
+                let depth = stack.len();
+                if depth == 0 {
+                    roots += 1;
+                    root = Some(String::from_utf8_lossy(&local).into_owned());
+                } else {
+                    if local == b"LogoutRequest" {
+                        nested_requests += 1;
+                    }
+                    if local == b"Signature" && depth > 1 {
+                        nested_signatures += 1;
+                    }
+                    if local == b"EncryptedID" {
+                        encrypted_ids += 1;
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(quick_xml::events::Event::DocType(_)) => {
+                return Err("DTDs are not accepted in SAML messages".into());
+            }
+            Ok(quick_xml::events::Event::GeneralRef(reference)) => {
+                let name = reference
+                    .decode()
+                    .map_err(|err| err.to_string())?
+                    .into_owned();
+                if !name.starts_with('#')
+                    && !matches!(name.as_str(), "amp" | "lt" | "gt" | "quot" | "apos")
+                {
+                    return Err(format!(
+                        "the SAML message references an undeclared entity `{name}`"
+                    ));
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(_) => {}
+            Err(err) => return Err(format!("the SAML XML is malformed: {err}")),
+        }
+    }
+    if roots != 1 {
+        return Err("the message must have exactly one root element".into());
+    }
+    if root.as_deref() != Some("LogoutRequest") {
+        return Err("the message is not a LogoutRequest".into());
+    }
+    if nested_requests > 0 {
+        return Err("a LogoutRequest must not contain another LogoutRequest".into());
+    }
+    if nested_signatures > 0 {
+        return Err("a signature below the LogoutRequest cannot sign the consumed element".into());
+    }
+    if encrypted_ids > 0 {
+        return Err("encrypted NameIDs are not supported by this SP".into());
+    }
+    Ok(())
 }
 
 /// The form the identity provider POSTs to the ACS.
@@ -654,15 +1154,20 @@ fn saml_sp(state: &AppState, tenant: &TenantRow, connector_id: &str) -> Result<S
     sp_facade(
         &sp_metadata_url(state, &tenant.slug, connector_id),
         &acs_url(state, &tenant.slug, connector_id),
+        &slo_url(state, &tenant.slug, connector_id),
     )
 }
 
 /// The SP configuration itself, separate from `AppState` so the policy is unit-testable.
-fn sp_facade(sp_metadata_url: &str, acs_url: &str) -> Result<Saml<Sp>, ApiError> {
+fn sp_facade(sp_metadata_url: &str, acs_url: &str, slo_url: &str) -> Result<Saml<Sp>, ApiError> {
     let mut policy = SpValidationPolicy::strict();
     policy.authn_requests = AuthnRequestSigningPolicy::DoNotSignForCompatibility;
     let config = SpConfig::builder(EntityId::try_new(sp_metadata_url).map_err(ApiError::internal)?)
         .acs_endpoint(AcsEndpoint::post(acs_url).map_err(ApiError::internal)?)
+        // Both front-channel bindings are accepted and advertised; the SOAP back-channel is
+        // deliberately absent, so metadata never promises it (§6.1 SAML SLO).
+        .slo_endpoint(SloEndpoint::redirect(slo_url).map_err(ApiError::internal)?)
+        .slo_endpoint(SloEndpoint::post(slo_url).map_err(ApiError::internal)?)
         .validation(policy)
         .xml(XmlPolicy {
             // Skew is applied additively to each bound: widening the lower bound means a negative
@@ -738,7 +1243,7 @@ fn parse_instant(value: &str) -> Result<OffsetDateTime, ApiError> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|err| {
         ApiError::problem(
             kinds::INVALID_REQUEST,
-            format!("the assertion carries an unusable time value: {err}"),
+            format!("the SAML message carries an unusable time value: {err}"),
         )
     })
 }
@@ -853,27 +1358,37 @@ async fn apply_role_attribute(
     Ok(())
 }
 
-/// Decode the POSTed `SAMLResponse` and cap its size before any parser sees it.
-fn decode_saml_response(value: &str) -> Result<String, ApiError> {
+/// Decode a POSTed SAML message and cap its size before any parser sees it.
+fn decode_saml_message(value: &str, field: &str) -> Result<String, ApiError> {
     let compact: String = value
         .chars()
         .filter(|character| !character.is_ascii_whitespace())
         .collect();
     let bytes = BASE64
         .decode(compact.as_bytes())
-        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "SAMLResponse is not base64"))?;
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, format!("{field} is not base64")))?;
     if bytes.len() > MAX_SAML_XML_BYTES {
         return Err(ApiError::problem(
             kinds::INVALID_REQUEST,
-            "SAMLResponse is larger than this ACS accepts",
+            format!("{field} is larger than this SP accepts"),
         ));
     }
     String::from_utf8(bytes).map_err(|_| {
         ApiError::problem(
             kinds::INVALID_REQUEST,
-            "SAMLResponse does not decode to an XML document",
+            format!("{field} does not decode to an XML document"),
         )
     })
+}
+
+/// Decode the POSTed `SAMLResponse`.
+fn decode_saml_response(value: &str) -> Result<String, ApiError> {
+    decode_saml_message(value, "SAMLResponse")
+}
+
+/// Decode the POSTed `SAMLRequest`.
+fn decode_saml_request(value: &str) -> Result<String, ApiError> {
+    decode_saml_message(value, "SAMLRequest")
 }
 
 /// What the pre-scan needs from a SAML message.
@@ -984,7 +1499,7 @@ fn scan_xml(xml: &str) -> Result<XmlScan, String> {
 fn saml_rejected(err: risaml::SamlError) -> ApiError {
     ApiError::problem(
         kinds::INVALID_REQUEST,
-        format!("the SAML response was rejected: {err}"),
+        format!("the SAML message was rejected: {err}"),
     )
 }
 
@@ -1019,6 +1534,14 @@ fn sp_metadata_url(state: &AppState, tenant_slug: &str, connector_id: &str) -> S
     )
 }
 
+/// Where the IdP sends a LogoutRequest.
+fn slo_url(state: &AppState, tenant_slug: &str, connector_id: &str) -> String {
+    format!(
+        "{}/t/{tenant_slug}/sso/{connector_id}/slo",
+        state.config.public_base_url.trim_end_matches('/')
+    )
+}
+
 /// The connector's management shape — metadata XML stays out of list responses.
 fn saml_connector_json(state: &AppState, tenant: &TenantRow, row: &SamlConnectorRow) -> Value {
     json!({
@@ -1030,6 +1553,7 @@ fn saml_connector_json(state: &AppState, tenant: &TenantRow, row: &SamlConnector
         "role_attribute": row.role_attribute,
         "enabled": row.enabled,
         "acs_url": acs_url(state, &tenant.slug, &row.connector_id),
+        "slo_url": slo_url(state, &tenant.slug, &row.connector_id),
         "sp_metadata_url": sp_metadata_url(state, &tenant.slug, &row.connector_id),
         "created_at": row.created_at.format(&Rfc3339).unwrap_or_default(),
     })
@@ -1092,7 +1616,7 @@ yBmB6zxGbMUOJqnBXVciUg==
 
     fn idp_metadata() -> String {
         format!(
-            r#"<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com/metadata"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>{IDP_CERT_B64}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></KeyDescriptor><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.com/sso"/></IDPSSODescriptor></EntityDescriptor>"#
+            r#"<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com/metadata"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>{IDP_CERT_B64}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></KeyDescriptor><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.com/sso"/><SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example.com/slo"/><SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://idp.example.com/slo"/></IDPSSODescriptor></EntityDescriptor>"#
         )
     }
 
@@ -1144,6 +1668,7 @@ yBmB6zxGbMUOJqnBXVciUg==
         let sp = sp_facade(
             "https://sp.example.com/t/acme/sso/okta/metadata",
             "https://sp.example.com/t/acme/sso/okta/acs",
+            "https://sp.example.com/t/acme/sso/okta/slo",
         )
         .expect("the SP configuration");
         let sp_descriptor = SpDescriptor::from_metadata_xml_for(
@@ -1257,5 +1782,272 @@ yBmB6zxGbMUOJqnBXVciUg==
                 .any(|audience| audience.as_str() == sp_descriptor.entity_id().as_str())
         );
         assert!(!session.assertion_id().as_str().is_empty());
+    }
+
+    const SP_METADATA: &str = "https://sp.example.com/t/acme/sso/okta/metadata";
+    const SP_ACS: &str = "https://sp.example.com/t/acme/sso/okta/acs";
+    const SP_SLO: &str = "https://sp.example.com/t/acme/sso/okta/slo";
+
+    fn test_sp() -> Saml<Sp> {
+        sp_facade(SP_METADATA, SP_ACS, SP_SLO).expect("the SP configuration")
+    }
+
+    fn test_idp_descriptor() -> IdpDescriptor {
+        IdpDescriptor::from_metadata_xml_for(
+            EntityId::try_new("https://idp.example.com/metadata").expect("entity id"),
+            &idp_metadata(),
+            MetadataTrustPolicy::UnsignedForCompatibility,
+        )
+        .expect("the IdP metadata")
+    }
+
+    fn test_sp_descriptor(sp: &Saml<Sp>) -> risaml::SpDescriptor {
+        risaml::SpDescriptor::from_metadata_xml_for(
+            EntityId::try_new(SP_METADATA).expect("entity id"),
+            sp.metadata_xml(),
+            MetadataTrustPolicy::UnsignedForCompatibility,
+        )
+        .expect("the SP metadata the IdP reads")
+    }
+
+    fn test_idp_facade() -> Saml<risaml::Idp> {
+        use risaml::config::{
+            CertificatePem, Credentials, IdpConfig, IdpValidationPolicy, PrivateKeyPem,
+        };
+
+        Saml::idp(
+            IdpConfig::builder(EntityId::try_new("https://idp.example.com/metadata").expect("id"))
+                .sso_endpoint(
+                    risaml::SsoEndpoint::redirect("https://idp.example.com/sso").expect("sso"),
+                )
+                .slo_endpoint(
+                    risaml::SloEndpoint::redirect("https://idp.example.com/slo").expect("slo"),
+                )
+                .credentials(Credentials {
+                    signing_key: Some(PrivateKeyPem::new(IDP_KEY_PEM)),
+                    signing_certificate: Some(CertificatePem::new(certificate_pem())),
+                    ..Credentials::default()
+                })
+                .validation(IdpValidationPolicy::compatibility())
+                .build()
+                .expect("the IdP configuration"),
+        )
+        .expect("the IdP facade")
+    }
+
+    fn slo_validation() -> SamlValidationContext<'static> {
+        SamlValidationContext::new(SystemTime::now(), ReplayPolicy::DisabledForCompatibility)
+            .with_clock_skew(ClockSkew::from_millis(
+                -SAML_CLOCK_SKEW_MS,
+                SAML_CLOCK_SKEW_MS,
+            ))
+    }
+
+    #[test]
+    fn a_plain_logout_request_passes_the_scan() {
+        let xml = r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_l1" Version="2.0" IssueInstant="2026-11-06T00:00:00Z"><saml:Issuer xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">https://idp.example.com/metadata</saml:Issuer><saml:NameID xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">user@corp.example</saml:NameID><samlp:SessionIndex>_s1</samlp:SessionIndex></samlp:LogoutRequest>"#;
+        assert!(scan_logout_request(xml).is_ok());
+    }
+
+    #[test]
+    fn a_logout_doctype_is_rejected() {
+        let xml = r#"<!DOCTYPE LogoutRequest [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_l1">&xxe;</samlp:LogoutRequest>"#;
+        assert!(scan_logout_request(xml).is_err());
+    }
+
+    #[test]
+    fn a_nested_logout_request_is_rejected() {
+        let xml = r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_l1"><samlp:Extensions><samlp:LogoutRequest ID="_l2"/></samlp:Extensions></samlp:LogoutRequest>"#;
+        assert!(scan_logout_request(xml).is_err());
+    }
+
+    #[test]
+    fn a_signature_below_the_root_is_rejected() {
+        let xml = r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="_l1"><samlp:Extensions><ds:Signature/></samlp:Extensions></samlp:LogoutRequest>"#;
+        assert!(scan_logout_request(xml).is_err());
+    }
+
+    #[test]
+    fn a_message_that_is_not_a_logout_request_is_rejected() {
+        assert!(scan_logout_request(RESPONSE).is_err());
+    }
+
+    #[test]
+    fn a_logout_request_that_names_nothing_matches_no_session() {
+        let index = SessionIndex::try_new("_s1").expect("index");
+        assert!(
+            !logout_can_match(None, &[]),
+            "naming neither NameID nor SessionIndex must never mean every session"
+        );
+        assert!(logout_can_match(Some("user@corp.example"), &[]));
+        assert!(logout_can_match(None, &[index]));
+    }
+
+    #[test]
+    fn the_logout_issue_instant_window_is_two_minutes() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("ts");
+        assert!(logout_issue_instant_acceptable(now, now));
+        assert!(logout_issue_instant_acceptable(
+            now - time::Duration::minutes(2),
+            now
+        ));
+        assert!(!logout_issue_instant_acceptable(
+            now - time::Duration::minutes(2) - time::Duration::seconds(1),
+            now
+        ));
+        assert!(logout_issue_instant_acceptable(
+            now + time::Duration::minutes(2),
+            now
+        ));
+        assert!(!logout_issue_instant_acceptable(
+            now + time::Duration::minutes(2) + time::Duration::seconds(1),
+            now
+        ));
+    }
+
+    /// A signed request from a compliant IdP is accepted, and the answer is a Success
+    /// LogoutResponse correlated to the request — unsigned, because this SP has no key.
+    #[test]
+    fn a_signed_logout_request_is_received_and_answered_with_success() {
+        use risaml::{LogoutSigning, StartSlo};
+
+        let sp = test_sp();
+        let idp = test_idp_descriptor();
+        let sp_descriptor = test_sp_descriptor(&sp);
+        let idp_facade = test_idp_facade();
+        let subject = risaml::LogoutSubject::with_session_index(
+            NameId::new("user@corp.example", None),
+            SessionIndex::try_new("_s1").expect("index"),
+        );
+        let started = idp_facade
+            .start_slo(
+                &sp_descriptor,
+                subject,
+                StartSlo::redirect().signing(LogoutSigning::Sign),
+            )
+            .expect("the signed LogoutRequest");
+        let url = started
+            .outbound
+            .redirect_url()
+            .expect("redirect")
+            .to_owned();
+        let query = url
+            .split_once('?')
+            .map(|(_, query)| query.to_owned())
+            .expect("a query string");
+
+        let received = sp
+            .receive_slo(
+                &idp,
+                BrowserInput::<LogoutRequest>::redirect(query),
+                slo_validation(),
+            )
+            .expect("the SP accepts the signed LogoutRequest");
+        assert_eq!(
+            received.message().name_id().map(NameId::value),
+            Some("user@corp.example")
+        );
+        assert_eq!(
+            received
+                .message()
+                .session_indexes()
+                .iter()
+                .map(SessionIndex::as_str)
+                .collect::<Vec<_>>(),
+            vec!["_s1"]
+        );
+
+        let context = logout_response_context(
+            &sp,
+            &idp,
+            received.message(),
+            received.relay_state(),
+            Binding::Post,
+        )
+        .expect("the LogoutResponse renders");
+        let xml = String::from_utf8(
+            BASE64
+                .decode(context.context.as_bytes())
+                .expect("base64-encoded XML"),
+        )
+        .expect("utf-8 XML");
+        assert!(xml.contains("urn:oasis:names:tc:SAML:2.0:status:Success"));
+        assert!(xml.contains(&format!(
+            "InResponseTo=\"{}\"",
+            received.message().id().as_str()
+        )));
+
+        // The Redirect answer is what the HTTP handler returns when the IdP declares it.
+        let redirect_context = logout_response_context(
+            &sp,
+            &idp,
+            received.message(),
+            received.relay_state(),
+            Binding::Redirect,
+        )
+        .expect("the Redirect LogoutResponse renders");
+        assert!(
+            Outbound::<LogoutResponse>::try_from(redirect_context)
+                .expect("the Redirect action")
+                .redirect_url()
+                .expect("a redirect URL")
+                .contains("SAMLResponse=")
+        );
+    }
+
+    /// A request whose bytes no longer match the detached signature must be refused.
+    #[test]
+    fn a_tampered_logout_request_signature_is_refused() {
+        use risaml::{LogoutSigning, StartSlo};
+
+        let sp = test_sp();
+        let idp = test_idp_descriptor();
+        let sp_descriptor = test_sp_descriptor(&sp);
+        let idp_facade = test_idp_facade();
+        let subject = risaml::LogoutSubject::with_session_index(
+            NameId::new("user@corp.example", None),
+            SessionIndex::try_new("_s1").expect("index"),
+        );
+        let started = idp_facade
+            .start_slo(
+                &sp_descriptor,
+                subject,
+                StartSlo::post().signing(LogoutSigning::Sign),
+            )
+            .expect("the signed LogoutRequest");
+        let fields = started
+            .outbound
+            .post_form()
+            .expect("the POST form")
+            .fields()
+            .to_vec();
+        let original = fields
+            .iter()
+            .find(|field| field.name() == "SAMLRequest")
+            .expect("the SAMLRequest field")
+            .value()
+            .to_owned();
+        let mut tampered = original.clone();
+        let index = tampered.len() / 2;
+        let replacement = if &tampered[index..index + 1] == "A" {
+            "B"
+        } else {
+            "A"
+        };
+        tampered.replace_range(index..index + 1, replacement);
+        assert_ne!(tampered, original);
+
+        assert!(
+            sp.receive_slo(
+                &idp,
+                BrowserInput::<LogoutRequest>::post(vec![FormField::new(
+                    "SAMLRequest",
+                    tampered.as_str(),
+                )]),
+                slo_validation(),
+            )
+            .is_err(),
+            "a signature that no longer covers the bytes must be refused"
+        );
     }
 }

@@ -337,6 +337,11 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "SAML SP metadata",
     ),
     (
+        "/t/{tenant}/sso/{connector}/slo",
+        &["get", "post"],
+        "SAML single logout service",
+    ),
+    (
         "/t/{tenant}/account",
         &["get", "patch"],
         "Signed-in account",
@@ -884,6 +889,10 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
         .route(
             "/t/{tenant}/sso/{connector}/metadata",
             get(crate::saml::sp_metadata),
+        )
+        .route(
+            "/t/{tenant}/sso/{connector}/slo",
+            get(crate::saml::saml_slo_redirect).post(crate::saml::saml_slo_post),
         )
 }
 

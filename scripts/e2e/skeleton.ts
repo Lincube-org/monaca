@@ -15,6 +15,7 @@
 //   5  the audit page shows account → grant → agent → token(jti) → tool and the chain verifies
 import { createHmac } from "node:crypto";
 import { existsSync } from "node:fs";
+import { deflateRawSync } from "node:zlib";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describeNetError } from "../lib/net.ts";
@@ -33,6 +34,9 @@ const TENANT = "demo";
 const ADMIN_CLIENT_ID = "monaca-admin";
 /** The local sign-in the browser flow uses (contract §2.2 bootstrap). */
 const BOOTSTRAP_ADMIN = { email: "admin@demo.localhost", password: "monaca-dev-password" };
+/** A throw-away X.509 certificate for the test IdPs; nothing is ever verified against it. */
+const TEST_IDP_CERT =
+  "MIIC6TCCAdOgAwIBAgIBATALBgkqhkiG9w0BAQswODELMAkGA1UEBhMCQ04xDzANBgNVBAoMBk1vbmFjYTEYMBYGA1UEAwwPTW9uYWNhIFRlc3QgSWRQMCIYDzIwMjYxMTA2MDk1MTEwWhgPMjA0NjExMDEwOTUxMTBaMDgxCzAJBgNVBAYTAkNOMQ8wDQYDVQQKDAZNb25hY2ExGDAWBgNVBAMMD01vbmFjYSBUZXN0IElkUDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMHTWirLVrxweZFfdnSb1Fq1ECY586Nn3sNq/V030lMyEjF4nopoKhjNNm0ueaANJRKxunOHYa2hiNrprDtHGYBx/mV3BEwjk2SwNJIZ+7OwWZz7frNTenPcECgE3p0QnnE/pTtw+VDBTT2blDnAh4E5bxbJGllc/ltWfi84VC+jLd3DQ19vlgar+FVbTMcxJibmEUpq5Wwn50moulH25HNFIhjXm22smvlgvq/BPm/SI5mBDWMIDG6DAfXO2+1xjOu+dhpc1sfT0+vKL2+1ESt03mmkWGwFep9JUacBDqNj0ujroXH1Rm/+qZHDt2c+ctEFhUN9pIlaY6PKxEiwohsCAwEAATALBgkqhkiG9w0BAQsDggEBAGzL0pvJNEgAjIfg5XGlC4ZXDrpzWjkvKb5MylJ/FkfLg/mM3NBFjAYkslOxXnA3OjFxDYabtRgV1hguuHZZBmBlylnGTh2R/k0Jj5CJ/xqdH7Z1CECvOCNk8mYUe4Z/nRIdEi1In4pD2QgHMFDWBU8i65VbcWZPLfxS8WkaUohmiGHlLYnwJybwQuGB90bfWLT8OqHNLysEpmuv6Gp8wQ3AQEm4Ams3fx4ib5MihhDi9OXPU+jsxOkf96QIA9r8uVA38FNIRKIDAEYQyaNVCPp4IWKk5I8/TbRUoeTyvgHhntisXL4FZi2Dy6nUq1QqZExCUaIGdf1S7jep+C12NWU=";
 
 /** One entry per contract §12 row. `step` matches the contract's numbering. */
 const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
@@ -17721,6 +17725,178 @@ async function domainFlow(base: string, adminToken: string, adminSecret: string)
   };
 }
 
+/**
+ * Step 80 — SAML LogoutRequest intake.
+ *
+ * A real signed LogoutRequest needs the test IdP key, so the positive path lives in the Rust
+ * suite (`saml::tests::a_signed_logout_request_is_received_and_answered_with_success`). This
+ * step pins what the HTTP surface owns: truthful metadata (both front-channel bindings, no SOAP,
+ * no signing certificate), the signature requirement on both bindings and DTD refusal.
+ */
+async function sloFlow(base: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `slo-${runId}`;
+  const adminEmail = `admin@${slug}.localhost`;
+  const adminPassword = `Slo-${runId}-9xQ`;
+  const adminSecret = `slo-admin-${runId}`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const idpEntity = `https://idp-${runId}.example.com/metadata`;
+  const bin =
+    process.env.MONACA_SERVER_BIN ??
+    (process.platform === "win32"
+      ? ".monaca/bin/monaca-server.exe"
+      : ".monaca/bin/monaca-server");
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const cli = async (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const proc = Bun.spawn([bin, ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr };
+  };
+
+  const problemDetail = (body: unknown): string =>
+    String((body as { detail?: unknown })?.detail ?? "");
+  const issueInstant = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  const logoutRequest = (id: string): string =>
+    `<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="${id}" Version="2.0" IssueInstant="${issueInstant}"><saml:Issuer xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">${idpEntity}</saml:Issuer><saml:NameID xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">${adminEmail}</saml:NameID><samlp:SessionIndex>_s1</samlp:SessionIndex></samlp:LogoutRequest>`;
+  const metadata = `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${idpEntity}"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>${TEST_IDP_CERT}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></KeyDescriptor><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp-${runId}.example.com/sso"/><SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp-${runId}.example.com/slo"/><SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://idp-${runId}.example.com/slo"/></IDPSSODescriptor></EntityDescriptor>`;
+
+  try {
+    const created = await cli([
+      "tenant",
+      "create",
+      "--slug",
+      slug,
+      "--admin-email",
+      adminEmail,
+      "--admin-password",
+      adminPassword,
+      "--admin-client-secret",
+      adminSecret,
+      "--login-client-id",
+      "e2e-login",
+      "--login-redirect-uri",
+      redirectUri,
+    ]);
+    checks.push(["a SLO test tenant is provisioned", created.code === 0]);
+    if (created.code !== 0) throw new Error(created.stderr || created.stdout);
+
+    const minted = await call(`${base}/t/${slug}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${btoa(`monaca-admin:${adminSecret}`)}`,
+      },
+      body: "grant_type=client_credentials&scope=monaca:admin",
+    });
+    const token = (minted.body as { access_token?: string })?.access_token ?? "";
+    if (minted.status !== 200 || token === "") throw new Error("no management token");
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+
+    const connector = await call(`${base}/v1/saml-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connector_id: "okta",
+        display_name: "Okta",
+        metadata_xml: metadata,
+        email_domains: [`slo-${runId}.localhost`],
+      }),
+    });
+    const connectorBody = connector.body as { slo_url?: string };
+    checks.push([
+      "a SAML connector is created with its SLO URL",
+      connector.status === 201 &&
+        typeof connectorBody.slo_url === "string" &&
+        connectorBody.slo_url.endsWith(`/t/${slug}/sso/okta/slo`),
+    ]);
+
+    const spMetadata = await call(`${base}/t/${slug}/sso/okta/metadata`);
+    const xml = String(spMetadata.body);
+    checks.push([
+      "SP metadata advertises exactly the two front-channel SLO bindings",
+      spMetadata.status === 200 &&
+        (spMetadata.headers.get("content-type") ?? "").includes("samlmetadata") &&
+        xml.split("SingleLogoutService").length - 1 === 2 &&
+        xml.includes(`/t/${slug}/sso/okta/slo`) &&
+        !xml.includes("SOAP"),
+    ]);
+    checks.push([
+      "SP metadata publishes no signing certificate this deployment does not have",
+      !xml.includes("KeyDescriptor"),
+    ]);
+
+    const slo = (field: Record<string, string>): Promise<HttpResult> =>
+      call(`${base}/t/${slug}/sso/okta/slo`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(field).toString(),
+      });
+
+    const unsignedPost = await slo({
+      SAMLRequest: btoa(logoutRequest("_l-unsigned")),
+    });
+    checks.push([
+      "an unsigned LogoutRequest is refused on HTTP-POST",
+      unsignedPost.status === 400 && problemDetail(unsignedPost.body) !== "",
+    ]);
+
+    const compressed = deflateRawSync(Buffer.from(logoutRequest("_l-redirect"))).toString("base64");
+    const unsignedRedirect = await call(
+      `${base}/t/${slug}/sso/okta/slo?${new URLSearchParams({ SAMLRequest: compressed })}`,
+    );
+    checks.push([
+      "an unsigned LogoutRequest is refused on HTTP-Redirect",
+      unsignedRedirect.status === 400 && problemDetail(unsignedRedirect.body) !== "",
+    ]);
+
+    const doctype = await slo({
+      SAMLRequest: btoa(
+        `<!DOCTYPE LogoutRequest [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>${logoutRequest("_l-dtd").replace("</samlp:LogoutRequest>", "&xxe;</samlp:LogoutRequest>")}`,
+      ),
+    });
+    checks.push([
+      "a LogoutRequest carrying a DTD is refused before any parser sees it",
+      doctype.status === 400 && problemDetail(doctype.body).includes("DTDs"),
+    ]);
+
+    const receivedAudit = await call(`${base}/v1/audit?action=sso_logout.received`, { headers });
+    checks.push([
+      "a refused LogoutRequest writes no received event",
+      receivedAudit.status === 200 &&
+        ((receivedAudit.body as { items?: unknown[] }).items ?? []).length === 0,
+    ]);
+
+    const removed = await call(`${base}/v1/saml-connectors/okta`, { method: "DELETE", headers });
+    checks.push(["the connector is removed", removed.status === 204]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "80",
+    title: "SAML logout request intake",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: metadata → unsigned POST/Redirect → DTD → no audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -17957,6 +18133,7 @@ async function main(): Promise<number> {
   push(await tenantLifecycleAndMeFlow(base, adminToken, parsed.consoleSecret));
   push(await samlFlow(base));
   push(await domainFlow(base, adminToken, parsed.adminSecret));
+  push(await sloFlow(base));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

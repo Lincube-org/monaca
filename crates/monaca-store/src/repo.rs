@@ -3215,6 +3215,72 @@ impl Store {
         .await?)
     }
 
+    /// The live sessions an IdP LogoutRequest identifies.
+    ///
+    /// The caller must pass at least one identifier. `None` for both would match every live
+    /// session bound to the connector, which is exactly the "kill everything" behaviour the SLO
+    /// contract refuses; the query still expresses it faithfully so the guard lives at one place
+    /// in the caller. An empty result is a normal answer: the request matched no session.
+    pub async fn live_saml_bound_sessions(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        name_id: Option<&str>,
+        session_index: Option<&str>,
+    ) -> Result<Vec<Uuid>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT b.session_id
+             FROM tenant.saml_session_bindings b
+             JOIN tenant.sessions s ON s.id = b.session_id
+             WHERE b.connector_id = $1
+               AND ($2::text IS NULL OR b.name_id = $2)
+               AND ($3::text IS NULL OR $3::text = ANY(b.session_indexes))
+               AND s.revoked_at IS NULL AND s.expires_at > now()",
+        )
+        .bind(connector_id)
+        .bind(name_id)
+        .bind(session_index)
+        .fetch_all(&pool)
+        .await?;
+        Ok(rows.into_iter().map(|row| row.0).collect())
+    }
+
+    /// Claim a LogoutRequest ID exactly once for a connector.
+    ///
+    /// The same `consumed_at IS NULL AND expires_at > now()` conditional `UPDATE` the assertion
+    /// replay uses; two concurrent deliveries race on it, so exactly one proceeds.
+    pub async fn consume_saml_logout_once(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        request_id: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO tenant.saml_logout_requests (request_id, connector_id, expires_at)
+             VALUES ($1,$2,$3) ON CONFLICT (request_id) DO NOTHING",
+        )
+        .bind(request_id)
+        .bind(connector_id)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+        let claimed = sqlx::query(
+            "UPDATE tenant.saml_logout_requests SET consumed_at = now()
+             WHERE request_id = $1 AND connector_id = $2
+               AND consumed_at IS NULL AND expires_at > now()",
+        )
+        .bind(request_id)
+        .bind(connector_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(claimed.rows_affected() == 1)
+    }
+
     /// Mint a single-use SSO `state` bound to an interaction; returns the uuid to send.
     pub async fn insert_sso_state(
         &self,

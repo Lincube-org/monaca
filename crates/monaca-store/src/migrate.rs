@@ -341,6 +341,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "SAML session bindings for IdP-initiated logout (M1)",
         include_str!("../migrations/tenant_56.sql"),
     ),
+    (
+        57,
+        "SAML LogoutRequest replay (M1)",
+        include_str!("../migrations/tenant_57.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

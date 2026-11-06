@@ -2224,6 +2224,24 @@
         "summary": "SAML SP metadata"
       }
     },
+    "/t/{tenant}/sso/{connector}/slo": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SAML single logout service"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SAML single logout service"
+      }
+    },
     "/t/{tenant}/verification/sms": {
       "post": {
         "responses": {
