@@ -411,6 +411,7 @@ fn build_interaction(
         consent_required,
         consent_prompted: request.forces_consent(),
         expires_at: state.now() + Duration::seconds(state.config.interaction_ttl.as_secs() as i64),
+        saml: None,
     }
 }
 
@@ -959,6 +960,29 @@ async fn complete_sign_in(
         session_ttl_secs,
     )
     .await?;
+
+    // A verified SAML assertion's NameID and SessionIndex must outlive the sign-in: they are the
+    // only keys an IdP LogoutRequest can name. A store failure fails the sign-in on purpose — a
+    // local session that its own IdP can never end would survive an IdP logout silently.
+    if let Some(saml) = interaction.saml.as_ref()
+        && !state
+            .store
+            .bind_saml_session(
+                &tenant,
+                session_id,
+                &saml.connector_id,
+                &saml.name_id,
+                saml.name_id_format.as_deref(),
+                &saml.session_indexes,
+            )
+            .await?
+    {
+        tracing::warn!(
+            connector = %saml.connector_id,
+            "the SAML connector was deleted before the session was established; \
+             the session is not logout-addressable"
+        );
+    }
 
     // A third-party client (or `prompt=consent`) pauses here: the page must ask the user to
     // approve the scopes before a code is minted. Sign-in is recorded but not consumed, so the

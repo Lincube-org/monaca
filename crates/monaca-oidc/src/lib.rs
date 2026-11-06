@@ -26,7 +26,7 @@ pub use dpop::{
     DpopError, DpopProof, PROOF_WINDOW_SECS, access_token_hash, check_binding,
     verify as verify_proof,
 };
-pub use interaction::{Interaction, InteractionError};
+pub use interaction::{Interaction, InteractionError, SamlLogin};
 pub use token::{
     AccessTokenClaims, AssertionError, ClientAssertion, GrantType, IdTokenClaims, TokenErrorCode,
     TokenForm, TokenRequest, UserInfoClaims, at_hash, validate_assertion_claims,

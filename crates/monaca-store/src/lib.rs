@@ -42,10 +42,11 @@ pub use repo::{
     AccountLivenessRow, AccountRow, AgentKeyRow, AgentRow, ApiResourceRow, AuditFilter, AuditRow,
     AuthCodeRow, AuthorizedAppRow, BrandingRow, ClientRow, ConsentRow, DeliveryConnectorRow,
     GrantRow, LoginFailureRow, MessageTemplateRow, OrgInvitationRow, OrgRoleRow, OutboxMailRow,
-    ParRow, PasskeyRow, RateLimitRow, RefreshRow, RoleRow, SamlConnectorRow, SamlStateRow,
-    SessionRow, SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow, SigningKeyRow,
-    SocialConnectorRow, SocialIdentityRow, SocialStateRow, SsoConnectorRow, SsoStateRow,
-    TrustedDeviceRow, UsageSummaryRow, VerificationRow, WebhookDeliveryRow, WebhookRow,
+    ParRow, PasskeyRow, RateLimitRow, RefreshRow, RoleRow, SamlBindingRow, SamlConnectorRow,
+    SamlStateRow, SessionRow, SignInExperienceRow, SignInGuardrailsPatch, SignInPhraseRow,
+    SigningKeyRow, SocialConnectorRow, SocialIdentityRow, SocialStateRow, SsoConnectorRow,
+    SsoStateRow, TrustedDeviceRow, UsageSummaryRow, VerificationRow, WebhookDeliveryRow,
+    WebhookRow,
 };
 pub use runtime_state::InteractionRow;
 

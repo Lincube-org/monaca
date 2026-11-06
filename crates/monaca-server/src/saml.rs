@@ -35,6 +35,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use data_encoding::BASE64;
 use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
+use monaca_oidc::SamlLogin;
 use monaca_store::{AccountRow, SamlConnectorRow, TenantRow};
 use monaca_types::{AccountId, EventId, TypedId};
 use risaml::constants::{Binding, CertUse};
@@ -482,6 +483,18 @@ pub async fn saml_acs(
     }
     apply_role_attribute(&state, &tenant, &connector, &session, &account).await?;
 
+    // The logout credentials travel with the interaction, not just with this call: a second
+    // factor or a consent screen pauses the flow and resumes it from storage, and the session
+    // those steps create must still be addressable by the IdP that authenticated it.
+    let interaction = state
+        .attach_interaction_saml(
+            &tenant,
+            &pending.interaction_id,
+            &saml_login(&connector, &session),
+        )
+        .await
+        .map_err(ApiError::Interaction)?;
+
     crate::protocol::finish_sign_in_browser(
         state,
         tenant,
@@ -491,6 +504,27 @@ pub async fn saml_acs(
         account,
     )
     .await
+}
+
+/// What the verified assertion binds to the session this flow will create.
+fn saml_login(connector: &SamlConnectorRow, session: &SsoSession) -> SamlLogin {
+    SamlLogin {
+        connector_id: connector.connector_id.clone(),
+        name_id: session.name_id().value().to_owned(),
+        name_id_format: session
+            .name_id()
+            .format()
+            .map(|format| format.as_uri().to_owned()),
+        session_indexes: session
+            .authn_sessions()
+            .iter()
+            .filter_map(|statement| {
+                statement
+                    .session_index()
+                    .map(|index| index.as_str().to_owned())
+            })
+            .collect(),
+    }
 }
 
 /// Start an SP-initiated SAML round-trip. The caller has already checked the tenant, the SSO

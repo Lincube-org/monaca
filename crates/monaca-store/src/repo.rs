@@ -434,6 +434,21 @@ pub struct SamlStateRow {
     pub expires_at: OffsetDateTime,
 }
 
+/// The IdP identity a local session signed in with (§6.1 SAML SLO).
+#[derive(Debug, Clone, FromRow)]
+pub struct SamlBindingRow {
+    /// The session the verified assertion created.
+    pub session_id: Uuid,
+    /// The connector the assertion came from.
+    pub connector_id: String,
+    /// The asserted NameID value.
+    pub name_id: String,
+    /// The NameID Format URI, when the assertion carried one.
+    pub name_id_format: Option<String>,
+    /// Every `SessionIndex` the assertion carried; empty when the IdP supplied none.
+    pub session_indexes: Vec<String>,
+}
+
 /// A tenant webhook subscription in `tenant.webhooks` (§6.2).
 #[derive(Debug, Clone, FromRow)]
 pub struct WebhookRow {
@@ -3140,6 +3155,64 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(claimed.rows_affected() == 1)
+    }
+
+    /// Bind a local session to the IdP identity a verified assertion carried (§6.1 SAML SLO).
+    ///
+    /// One row per (session, connector): a second SAML sign-in into the same browser session
+    /// replaces the earlier identity, so an old LogoutRequest can never target the new session.
+    /// A connector deleted while the flow was paused is a no-op (the insert selects nothing)
+    /// rather than an error: the sign-in itself did not fail, and no SLO target remains.
+    pub async fn bind_saml_session(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+        connector_id: &str,
+        name_id: &str,
+        name_id_format: Option<&str>,
+        session_indexes: &[String],
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "INSERT INTO tenant.saml_session_bindings
+               (session_id, connector_id, name_id, name_id_format, session_indexes)
+             SELECT $1,$2,$3,$4,$5
+             WHERE EXISTS (
+               SELECT 1 FROM tenant.saml_connectors WHERE connector_id = $2
+             )
+             ON CONFLICT (session_id, connector_id) DO UPDATE
+               SET name_id = EXCLUDED.name_id,
+                   name_id_format = EXCLUDED.name_id_format,
+                   session_indexes = EXCLUDED.session_indexes,
+                   created_at = now()",
+        )
+        .bind(session_id)
+        .bind(connector_id)
+        .bind(name_id)
+        .bind(name_id_format)
+        .bind(session_indexes)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// The IdP identity bound to one session, for one connector.
+    pub async fn saml_session_binding(
+        &self,
+        tenant: &TenantRow,
+        session_id: Uuid,
+        connector_id: &str,
+    ) -> Result<Option<SamlBindingRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SamlBindingRow>(
+            "SELECT session_id, connector_id, name_id, name_id_format, session_indexes
+             FROM tenant.saml_session_bindings
+             WHERE session_id = $1 AND connector_id = $2",
+        )
+        .bind(session_id)
+        .bind(connector_id)
+        .fetch_optional(&pool)
+        .await?)
     }
 
     /// Mint a single-use SSO `state` bound to an interaction; returns the uuid to send.

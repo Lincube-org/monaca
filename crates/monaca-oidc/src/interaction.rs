@@ -49,6 +49,28 @@ pub struct Interaction {
     pub consent_prompted: bool,
     /// When the interaction stops being usable.
     pub expires_at: OffsetDateTime,
+    /// The IdP identity a verified SAML assertion carried, waiting for the session this flow
+    /// creates. Absent on every other path; `#[serde(default)]` keeps interactions written
+    /// before this field existed readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml: Option<SamlLogin>,
+}
+
+/// What a verified SAML assertion says about the IdP session it authenticates.
+///
+/// These three values are what an inbound `LogoutRequest` can name. `session_indexes` is empty
+/// when the IdP supplied no `SessionIndex`; the SLO contract defines that state rather than
+/// guessing a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SamlLogin {
+    /// The connector the assertion came from.
+    pub connector_id: String,
+    /// The asserted NameID value.
+    pub name_id: String,
+    /// The NameID Format URI, when the assertion carried one.
+    pub name_id_format: Option<String>,
+    /// Every `AuthnStatement/SessionIndex` the assertion carried.
+    pub session_indexes: Vec<String>,
 }
 
 impl Interaction {
@@ -138,6 +160,7 @@ mod tests {
             consent_required: false,
             consent_prompted: false,
             expires_at: OffsetDateTime::from_unix_timestamp(1_767_225_600).expect("ts"),
+            saml: None,
         }
     }
 
@@ -162,6 +185,30 @@ mod tests {
         assert!(value.get("state").is_none());
         assert!(value.get("nonce").is_none());
         assert!(value.get("dpop_jkt").is_none());
+        assert!(value.get("saml").is_none());
+    }
+
+    #[test]
+    fn an_interaction_written_before_the_saml_field_still_parses() {
+        let mut value = serde_json::to_value(interaction()).expect("payload");
+        value.as_object_mut().expect("object").remove("saml");
+        let decoded: Interaction = serde_json::from_value(value).expect("backward compatible");
+        assert!(decoded.saml.is_none());
+    }
+
+    #[test]
+    fn the_saml_binding_round_trips() {
+        let mut value = interaction();
+        value.saml = Some(SamlLogin {
+            connector_id: "okta".into(),
+            name_id: "user@corp.example".into(),
+            name_id_format: Some("urn:oasis:names:tc:SAML:2.0:nameid-format:persistent".into()),
+            session_indexes: vec!["_s1".into(), "_s2".into()],
+        });
+        let decoded: Interaction =
+            serde_json::from_value(serde_json::to_value(&value).expect("payload"))
+                .expect("the field round-trips");
+        assert_eq!(decoded.saml, value.saml);
     }
 
     #[test]

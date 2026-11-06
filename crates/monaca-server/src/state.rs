@@ -504,6 +504,27 @@ impl AppState {
         interaction_payload(&row)
     }
 
+    /// Attach the SAML identity a verified assertion carried to the interaction it completes.
+    pub async fn attach_interaction_saml(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+        saml: &monaca_oidc::SamlLogin,
+    ) -> Result<InteractionRequest, monaca_oidc::InteractionError> {
+        let value = serde_json::to_value(saml).map_err(|err| {
+            tracing::error!(%err, "the SAML identity is not serializable");
+            monaca_oidc::InteractionError::NotFound
+        })?;
+        let row = self
+            .require_interaction_update(
+                self.store.interaction_attach_saml(tenant, id, &value).await,
+                tenant,
+                id,
+            )
+            .await?;
+        interaction_payload(&row)
+    }
+
     /// Redeem an interaction that has signed in, returning the account awaiting consent and the
     /// session it authenticated.
     pub async fn take_signed_in_interaction(

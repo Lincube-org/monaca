@@ -118,6 +118,30 @@ impl Store {
         .await?)
     }
 
+    /// Attach the SAML identity a verified assertion carried to a still-live interaction.
+    ///
+    /// The payload is merged, not rewritten: the interaction's other fields stay as written. A
+    /// consumed or expired row matches nothing, so a late assertion cannot retrofit credentials
+    /// onto a flow that already finished.
+    pub async fn interaction_attach_saml(
+        &self,
+        tenant: &TenantRow,
+        id: &str,
+        saml: &Value,
+    ) -> Result<Option<InteractionRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, InteractionRow>(q(format!(
+            "UPDATE tenant.interactions
+             SET payload = payload || jsonb_build_object('saml', $2::jsonb)
+             WHERE id = $1 AND consumed = false AND expires_at > now()
+             RETURNING {INTERACTION_COLUMNS}"
+        )))
+        .bind(id)
+        .bind(saml)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
     /// Consume a signed-in interaction, returning it with the account and session.
     pub async fn interaction_take_signed_in(
         &self,
