@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::copy::normalise_language;
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts};
+use crate::management::{authorize_admin, authorize_admin_read, ts};
 use crate::state::AppState;
 
 /// The fallback every chain ends with.
@@ -273,7 +273,7 @@ pub async fn list_email_templates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let mut items = Vec::new();
     for name in LEGACY_PURPOSES {
         let spec = purpose(name).ok_or_else(|| ApiError::internal("unknown legacy purpose"))?;
@@ -396,7 +396,7 @@ pub async fn list_message_templates(
     headers: HeaderMap,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let builtin = state.store.builtin_message_templates(&tenant).await?;
     let overrides = state.store.message_template_overrides(&tenant).await?;
 

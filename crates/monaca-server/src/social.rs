@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::account::signed_in_account;
 use crate::error::{ApiError, kinds};
-use crate::management::authorize_admin;
+use crate::management::{authorize_admin, authorize_admin_read};
 use crate::schemas::{ConnectorList, ConnectorView};
 use crate::session;
 use crate::state::AppState;
@@ -279,7 +279,7 @@ pub async fn list_connectors(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<ConnectorList>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.social_connectors(&tenant).await?;
     let items: Vec<ConnectorView> = rows.iter().map(connector_json).collect();
     Ok(Json(ConnectorList { items, next: None }))

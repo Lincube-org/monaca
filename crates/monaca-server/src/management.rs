@@ -218,10 +218,51 @@ pub struct CreateGrantBody {
     pub expires_at: Option<String>,
 }
 
-/// Resolve and verify the caller's bearer token.
-pub async fn authorize_admin(
+/// How much of the management surface a caller may use (§6.2).
+///
+/// Ordered, so `access < required` is the refusal test. A tenant administrator and the seeded
+/// automation client are `Full`. A tenant role can grant `management:read`, `management:write`,
+/// or `monaca:admin` (full) without the account being a tenant administrator, which is how a
+/// tenant delegates read-only or operator access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ManagementAccess {
+    /// No management capability.
+    None = 0,
+    /// `GET`/`HEAD` on `/v1`.
+    Read = 1,
+    /// Ordinary mutations, and every read.
+    Write = 2,
+    /// Role administration, and every read/write.
+    Full = 3,
+}
+
+impl ManagementAccess {
+    /// Map the level `account_liveness` computed from the account's current roles.
+    fn from_level(level: i32) -> Self {
+        match level {
+            3 => Self::Full,
+            2 => Self::Write,
+            1 => Self::Read,
+            _ => Self::None,
+        }
+    }
+
+    /// The permission a caller at this tier must hold.
+    fn permission(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Read => "management:read",
+            Self::Write => "management:write",
+            Self::Full => "monaca:admin",
+        }
+    }
+}
+
+/// Resolve and verify the caller's bearer token, then require a management tier.
+async fn authorize_management(
     state: &Arc<AppState>,
     headers: &HeaderMap,
+    required: ManagementAccess,
 ) -> Result<(TenantRow, AdminPrincipal), ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
@@ -285,44 +326,62 @@ pub async fn authorize_admin(
     // session that minted it is still live. A disable or a session kick must stop the old token
     // from reaching `/v1`, not merely prevent the next sign-in. The three answers come from one
     // primary-key row, so the request does not pay for separate account and session lookups.
-    let account = match AccountId::parse(&sub) {
-        Ok(account_id) => {
-            let session_id = claims
-                .get("sid")
-                .and_then(Value::as_str)
-                .and_then(|raw| Uuid::parse_str(raw).ok());
-            let live = state
-                .store
-                .account_liveness(&tenant, account_id, session_id, jti)
-                .await?
-                .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the account is gone"))?;
-            if live.token_revoked {
-                state.metrics.record_revoked("management");
-                return Err(ApiError::problem(
-                    kinds::UNAUTHORIZED,
-                    "the token was revoked",
-                ));
-            }
-            if live.state != "active" {
-                return Err(ApiError::problem(
-                    kinds::UNAUTHORIZED,
-                    "the account is disabled",
-                ));
-            }
-            if !live.session_live {
-                return Err(ApiError::problem(
-                    kinds::UNAUTHORIZED,
-                    "the session was revoked",
-                ));
-            }
-            Some((account_id, live.is_tenant_admin))
+    if let Ok(account_id) = AccountId::parse(&sub) {
+        let session_id = claims
+            .get("sid")
+            .and_then(Value::as_str)
+            .and_then(|raw| Uuid::parse_str(raw).ok());
+        let live = state
+            .store
+            .account_liveness(&tenant, account_id, session_id, jti)
+            .await?
+            .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the account is gone"))?;
+        if live.token_revoked {
+            state.metrics.record_revoked("management");
+            return Err(ApiError::problem(
+                kinds::UNAUTHORIZED,
+                "the token was revoked",
+            ));
         }
-        Err(_) => None,
-    };
+        if live.state != "active" {
+            return Err(ApiError::problem(
+                kinds::UNAUTHORIZED,
+                "the account is disabled",
+            ));
+        }
+        if !live.session_live {
+            return Err(ApiError::problem(
+                kinds::UNAUTHORIZED,
+                "the session was revoked",
+            ));
+        }
+        // Roles are read per request, so assigning or removing one changes the next call rather
+        // than waiting for a new token. A token scope is not the authority for a user token.
+        let access = ManagementAccess::from_level(live.management_level);
+        if access < required {
+            return Err(ApiError::problem(
+                kinds::INSUFFICIENT_SCOPE,
+                format!(
+                    "the account's roles do not grant `{}`",
+                    required.permission()
+                ),
+            ));
+        }
+        state
+            .enforce_rate_limit(&tenant, "management", None)
+            .await?;
+        return Ok((
+            tenant,
+            AdminPrincipal {
+                subject: sub,
+                account_id: Some(account_id),
+                actor_uuid: account_id.uuid(),
+            },
+        ));
+    }
 
     // Automation tokens have no account row; their `jti` is the only revocation state.
-    if account.is_none()
-        && let Some(jti) = jti
+    if let Some(jti) = jti
         && state.store.access_token_revoked(&tenant, jti).await?
     {
         state.metrics.record_revoked("management");
@@ -350,30 +409,8 @@ pub async fn authorize_admin(
         ));
     }
 
-    // A user token must belong to an account that is still a tenant admin; `monaca:admin` is only
-    // issued to one, but a demotion has to take effect before the token expires.
-    if let Some((account_id, is_tenant_admin)) = account {
-        if !is_tenant_admin {
-            return Err(ApiError::problem(
-                kinds::INSUFFICIENT_SCOPE,
-                "the account is not a tenant admin",
-            ));
-        }
-        state
-            .enforce_rate_limit(&tenant, "management", None)
-            .await?;
-        return Ok((
-            tenant,
-            AdminPrincipal {
-                subject: sub,
-                account_id: Some(account_id),
-                actor_uuid: account_id.uuid(),
-            },
-        ));
-    }
-
-    // The automation client (§6.2). Its scope was checked above and `monaca:admin` is only
-    // registered on that seeded client, so the client id is the actor.
+    // The automation client (§6.2). `monaca:admin` is only registered on that seeded client, so
+    // the client id is the actor and the tier is full.
     let client_id = monaca_types::ClientId::parse(&sub).map_err(|_| {
         ApiError::problem(kinds::UNAUTHORIZED, "the token subject is not a principal")
     })?;
@@ -393,6 +430,31 @@ pub async fn authorize_admin(
             actor_uuid: client.id,
         },
     ))
+}
+
+/// Require write access: ordinary management mutations (`POST`, `PATCH`, `DELETE`).
+pub async fn authorize_admin(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(TenantRow, AdminPrincipal), ApiError> {
+    authorize_management(state, headers, ManagementAccess::Write).await
+}
+
+/// Require read access: `GET` on the management API.
+pub async fn authorize_admin_read(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(TenantRow, AdminPrincipal), ApiError> {
+    authorize_management(state, headers, ManagementAccess::Read).await
+}
+
+/// Require full access: role administration, which would otherwise let a write-tier caller
+/// escalate itself by minting a role with `monaca:admin`.
+pub async fn authorize_admin_full(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(TenantRow, AdminPrincipal), ApiError> {
+    authorize_management(state, headers, ManagementAccess::Full).await
 }
 
 /// The query string of `GET /v1/accounts`.
@@ -418,7 +480,7 @@ pub async fn list_accounts(
     headers: HeaderMap,
     Query(query): Query<AccountsQuery>,
 ) -> Result<Json<AccountList>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let needle = query
         .query
@@ -518,7 +580,7 @@ pub async fn get_account(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<AccountDetailView>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let id = AccountId::parse(&id)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))?;
     let account = state
@@ -1038,7 +1100,7 @@ pub async fn get_sign_in_experience(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let experience = state.store.sign_in_experience(&tenant).await?;
     let branding = state.store.branding(&tenant).await?;
     Ok(Json(sign_in_experience_json(&experience, &branding)))
@@ -1712,6 +1774,17 @@ pub struct CreateRoleBody {
     pub permissions: Vec<String>,
 }
 
+/// The body of `PATCH /v1/roles/{role}`; an absent field is left alone.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateRoleBody {
+    /// A new unique name.
+    pub name: Option<String>,
+    /// A new free-form description.
+    pub description: Option<String>,
+    /// The replacement permission set; an empty array clears every permission.
+    pub permissions: Option<Vec<String>>,
+}
+
 /// `POST /v1/roles` — define a role.
 #[utoipa::path(
     post,
@@ -1729,7 +1802,7 @@ pub async fn create_role(
     headers: HeaderMap,
     Json(body): Json<CreateRoleBody>,
 ) -> Result<Response, ApiError> {
-    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let (tenant, admin) = authorize_admin_full(&state, &headers).await?;
     let name = body.name.trim();
     if name.is_empty() || name.len() > 80 {
         return Err(ApiError::problem(
@@ -1777,6 +1850,117 @@ pub async fn create_role(
     Ok((StatusCode::CREATED, Json(role_json(&role))).into_response())
 }
 
+/// `PATCH /v1/roles/{role}` — change a role's name, description or permissions.
+#[utoipa::path(
+    patch,
+    path = "/v1/roles/{role}",
+    tag = "management",
+    summary = "Update a tenant role",
+    request_body = UpdateRoleBody,
+    responses(
+        (status = 200, description = "The updated role.", body = RoleView),
+        (status = 400, description = "No field, an invalid name or a permission outside the scope grammar."),
+        (status = 404, description = "No such role.")
+    )
+)]
+pub async fn update_role(
+    State(state): State<Arc<AppState>>,
+    Path(role): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateRoleBody>,
+) -> Result<Json<RoleView>, ApiError> {
+    let (tenant, admin) = authorize_admin_full(&state, &headers).await?;
+    let role_id = RoleId::parse(&role)
+        .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a role id"))?;
+    let Some(before) = state.store.role_by_id(&tenant, role_id.uuid()).await? else {
+        return Err(ApiError::not_found("role"));
+    };
+    if body.name.is_none() && body.description.is_none() && body.permissions.is_none() {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "nothing to update; send `name`, `description` or `permissions`",
+        ));
+    }
+    let name = match body.name {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.len() > 80 {
+                return Err(ApiError::problem(
+                    kinds::INVALID_REQUEST,
+                    "name must be 1-80 characters",
+                ));
+            }
+            Some(trimmed.to_owned())
+        }
+        None => None,
+    };
+    let description = body.description.as_deref().map(str::trim);
+    let permissions = match body.permissions {
+        Some(raw) => {
+            let mut cleaned: Vec<String> = Vec::new();
+            for permission in &raw {
+                let permission = permission.trim();
+                if !valid_scope(permission) {
+                    return Err(ApiError::problem(
+                        kinds::INVALID_REQUEST,
+                        "permissions must match the scope grammar",
+                    ));
+                }
+                if !cleaned.iter().any(|existing| existing == permission) {
+                    cleaned.push(permission.to_owned());
+                }
+            }
+            Some(cleaned)
+        }
+        None => None,
+    };
+    let Some(role) = state
+        .store
+        .update_role(
+            &tenant,
+            role_id.uuid(),
+            name.as_deref(),
+            description,
+            permissions.as_deref(),
+        )
+        .await?
+    else {
+        return Err(ApiError::not_found("role"));
+    };
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "role.updated".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: None,
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "id": role_id.to_typed_string(),
+            "from": {
+                "name": &before.name,
+                "description": &before.description,
+                "permissions": &before.permissions,
+            },
+            "to": {
+                "name": &role.name,
+                "description": &role.description,
+                "permissions": &role.permissions,
+            },
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append role.updated audit event");
+    }
+
+    Ok(Json(role_json(&role)))
+}
+
 /// `GET /v1/roles` — every role the tenant defined.
 #[utoipa::path(
     get,
@@ -1789,7 +1973,7 @@ pub async fn list_roles(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<RoleList>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.roles(&tenant).await?;
     let items: Vec<RoleView> = rows.iter().map(role_json).collect();
     Ok(Json(RoleList { items, next: None }))
@@ -1801,7 +1985,7 @@ pub async fn delete_role(
     Path(role): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let (tenant, admin) = authorize_admin(&state, &headers).await?;
+    let (tenant, admin) = authorize_admin_full(&state, &headers).await?;
     let role_id = RoleId::parse(&role)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a role id"))?;
     let Some(row) = state.store.role_by_id(&tenant, role_id.uuid()).await? else {
@@ -1837,7 +2021,7 @@ pub async fn assign_role(
     Path((account, role)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, admin) = authorize_admin_full(&state, &headers).await?;
     let account_id = AccountId::parse(&account)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))?;
     let role_id = RoleId::parse(&role)
@@ -1850,18 +2034,37 @@ pub async fn assign_role(
     {
         return Err(ApiError::not_found("account"));
     }
-    if state
-        .store
-        .role_by_id(&tenant, role_id.uuid())
-        .await?
-        .is_none()
-    {
+    let Some(role_row) = state.store.role_by_id(&tenant, role_id.uuid()).await? else {
         return Err(ApiError::not_found("role"));
-    }
-    state
+    };
+    if !state
         .store
         .assign_role(&tenant, account_id, role_id.uuid())
-        .await?;
+        .await?
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "role.assigned".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "role": role_row.name,
+            "role_id": role_id.to_typed_string(),
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append role.assigned audit event");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1871,17 +2074,41 @@ pub async fn unassign_role(
     Path((account, role)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, admin) = authorize_admin_full(&state, &headers).await?;
     let account_id = AccountId::parse(&account)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not an account id"))?;
     let role_id = RoleId::parse(&role)
         .map_err(|_| ApiError::problem(kinds::INVALID_REQUEST, "not a role id"))?;
+    let Some(role_row) = state.store.role_by_id(&tenant, role_id.uuid()).await? else {
+        return Err(ApiError::not_found("role assignment"));
+    };
     if !state
         .store
         .unassign_role(&tenant, account_id, role_id.uuid())
         .await?
     {
         return Err(ApiError::not_found("role assignment"));
+    }
+
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "role.unassigned".into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account_id.to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "role": role_row.name,
+            "role_id": role_id.to_typed_string(),
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        tracing::warn!(%err, "could not append role.unassigned audit event");
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1893,6 +2120,7 @@ fn role_json(role: &RoleRow) -> RoleView {
         description: role.description.clone(),
         permissions: role.permissions.clone(),
         created_at: ts(role.created_at),
+        updated_at: ts(role.updated_at),
     }
 }
 
@@ -1913,7 +2141,7 @@ pub async fn list_account_sessions(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<SessionList>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let account_id = parse_account(&id)?;
     state
         .store
@@ -2061,7 +2289,7 @@ pub async fn get_account_security(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let account_id = parse_account(&id)?;
     if state
         .store
@@ -2268,7 +2496,7 @@ pub async fn list_members(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let mut tx = state.store.begin_org(&ctx).await?;
@@ -2389,7 +2617,7 @@ pub async fn list_agents(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let mut tx = state.store.begin_org(&ctx).await?;
@@ -2600,7 +2828,7 @@ pub async fn list_grants(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let mut tx = state.store.begin_org(&ctx).await?;
@@ -2751,7 +2979,7 @@ pub async fn list_audit(
     Path(org): Path<String>,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
@@ -2810,7 +3038,7 @@ pub async fn list_tenant_audit(
     headers: HeaderMap,
     Query(query): Query<TenantAuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let from = parse_audit_time(query.from.as_deref(), "from")?;
     let to = parse_audit_time(query.to.as_deref(), "to")?;
@@ -2883,7 +3111,7 @@ pub async fn get_usage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<UsageView>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let summary = state.store.usage_summary(&tenant).await?;
     Ok(Json(usage_view(summary)))
 }
@@ -2999,7 +3227,7 @@ pub async fn verify_audit(
     Path(org): Path<String>,
     Query(bounds): Query<AuditBounds>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let from = bounds.from.unwrap_or(1).max(1);
@@ -3268,7 +3496,7 @@ pub async fn get_rate_limits(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<RateLimitsDocument>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.rate_limits(&tenant).await?;
     let counters = state.store.rate_limit_counters(&tenant).await?;
     Ok(Json(rate_limits_document(&state, &rows, &counters)))

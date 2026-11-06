@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{ApiError, kinds};
-use crate::management::authorize_admin;
+use crate::management::{authorize_admin, authorize_admin_read};
 use crate::state::AppState;
 
 /// The most overrides one language may carry; the hosted dictionary is far smaller.
@@ -54,7 +54,7 @@ pub async fn get_sign_in_copy(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     Ok(Json(copy_document(&state, &tenant).await?))
 }
 

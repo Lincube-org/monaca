@@ -37,6 +37,7 @@ use crate::state::AppState;
         crate::management::update_account,
         crate::management::list_roles,
         crate::management::create_role,
+        crate::management::update_role,
         crate::management::list_account_sessions,
         crate::management::revoke_account_session,
         crate::management::revoke_account_sessions,
@@ -64,6 +65,7 @@ use crate::state::AppState;
         crate::management::CreateAccountBody,
         crate::management::UpdateAccountBody,
         crate::management::CreateRoleBody,
+        crate::management::UpdateRoleBody,
         crate::clients::CreateClientBody,
         crate::clients::UpdateClientBody,
         crate::orgs::CreateOrgBody,
@@ -594,7 +596,7 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "One API resource",
     ),
     ("/v1/roles", &["get", "post"], "Tenant roles"),
-    ("/v1/roles/{role}", &["delete"], "One tenant role"),
+    ("/v1/roles/{role}", &["patch", "delete"], "One tenant role"),
     ("/v1/webhooks", &["get", "post"], "Webhooks"),
     (
         "/v1/webhooks/{webhook}",
@@ -1097,7 +1099,10 @@ pub fn management_routes() -> Router<Arc<AppState>> {
             "/v1/roles",
             get(crate::management::list_roles).post(crate::management::create_role),
         )
-        .route("/v1/roles/{role}", delete(crate::management::delete_role))
+        .route(
+            "/v1/roles/{role}",
+            patch(crate::management::update_role).delete(crate::management::delete_role),
+        )
         .route(
             "/v1/accounts/{id}/roles/{role}",
             post(crate::management::assign_role).delete(crate::management::unassign_role),

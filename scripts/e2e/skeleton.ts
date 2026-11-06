@@ -756,6 +756,16 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "creation 403 MONACA_QUOTA_EXCEEDED; deleting one account decrements the total and frees one slot; " +
       "clearing the quota makes remaining null, and an empty or negative patch is 400",
   },
+  {
+    step: "76",
+    title: "role access tiers",
+    assertion:
+      "a role's permissions grant management tiers: management:read opens GET, management:write adds " +
+      "ordinary mutations, monaca:admin adds role administration; the tier is re-read from the account's " +
+      "current roles so assigning or removing a role changes the next request without a new token, " +
+      "issuance keeps monaca:admin only for a full account, and role.updated/assigned/unassigned are " +
+      "written to the audit chain",
+  },
 ];
 
 interface StepResult {
@@ -16380,6 +16390,299 @@ function typeIdUuid(id: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/**
+ * Step 76 — tenant roles grant management tiers (§6.2).
+ *
+ * A role names permission scopes. Three of them are management tiers: `management:read` opens
+ * every `GET`, `management:write` adds ordinary mutations, and `monaca:admin` adds role
+ * administration itself. The tier is re-read from the account's current roles on every request,
+ * so assigning or removing a role changes the next call without minting a new token.
+ */
+async function roleTierFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const email = `tier-${runId}@demo.localhost`;
+  const password = `pw-${runId}-tier`;
+  const viewerName = `viewer-${runId}`;
+  const operatorName = `operator-${runId}`;
+  const delegateName = `delegate-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "76",
+    title: "role access tiers",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  const errorCode = (body: unknown): unknown =>
+    (body as { monaca_error_code?: unknown })?.monaca_error_code;
+  const role = async (name: string, permissions: string[]): Promise<string | undefined> => {
+    const created = await call(`${base}/v1/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name, description: "e2e tier", permissions }),
+    });
+    return created.status === 201 ? (created.body as { id?: string })?.id : undefined;
+  };
+  const assign = (accountId: string, roleId: string, token: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "POST",
+      headers: managementHeaders(token),
+    });
+  const unassign = (accountId: string, roleId: string, token: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "DELETE",
+      headers: managementHeaders(token),
+    });
+  const listAccounts = (token: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts?limit=1`, { headers: managementHeaders(token) });
+  const createAccount = (token: string, suffix: string): Promise<HttpResult> =>
+    call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers: managementHeaders(token),
+      body: JSON.stringify({
+        email: `tier-write-${suffix}-${runId}@demo.localhost`,
+        display_name: "Tier writer",
+        password: `pw-${runId}-${suffix}`,
+      }),
+    });
+  const patchRole = (roleId: string, token: string, body: Record<string, unknown>): Promise<HttpResult> =>
+    call(`${base}/v1/roles/${roleId}`, {
+      method: "PATCH",
+      headers: managementHeaders(token),
+      body: JSON.stringify(body),
+    });
+  const createRole = (token: string, name: string, permissions: string[]): Promise<HttpResult> =>
+    call(`${base}/v1/roles`, {
+      method: "POST",
+      headers: managementHeaders(token),
+      body: JSON.stringify({ name, permissions }),
+    });
+  const audit = (token: string, query: Record<string, string>): Promise<HttpResult> =>
+    call(`${base}/v1/audit?${new URLSearchParams(query)}`, { headers: managementHeaders(token) });
+
+  try {
+    const viewerId = await role(viewerName, ["management:read"]);
+    const operatorId = await role(operatorName, ["management:read", "management:write"]);
+    const delegateId = await role(delegateName, ["monaca:admin"]);
+    checks.push([
+      "read, write and full roles are created",
+      viewerId !== undefined && operatorId !== undefined && delegateId !== undefined,
+    ]);
+    if (viewerId === undefined || operatorId === undefined || delegateId === undefined) {
+      return fail("a tier role was not created");
+    }
+
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Tier holder", password }),
+    });
+    const accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+
+    const signedIn = await consoleSignIn(
+      base,
+      email,
+      password,
+      consoleSecret,
+      "tier-none",
+      "openid offline_access monaca:admin",
+    );
+    if (signedIn.session === undefined) return fail(signedIn.error ?? "sign-in failed");
+    const token0 = signedIn.session.accessToken;
+    const scope0 = jwtClaims(token0)?.scope as unknown;
+    checks.push([
+      "an account with no role receives no monaca:admin scope",
+      Array.isArray(scope0) && !scope0.map(String).includes("monaca:admin"),
+    ]);
+
+    const beforeAssign = await listAccounts(token0);
+    checks.push([
+      "a token with no role cannot read /v1",
+      beforeAssign.status === 403 && errorCode(beforeAssign.body) === "MONACA_INSUFFICIENT_SCOPE",
+    ]);
+
+    // --- read tier ------------------------------------------------------------------------------
+    checks.push(["assigning management:read is 204", (await assign(accountId, viewerId, adminToken)).status === 204]);
+    checks.push(["the same token now reads /v1", (await listAccounts(token0)).status === 200]);
+    checks.push([
+      "read tier cannot create an account",
+      (await createAccount(token0, "viewer")).status === 403,
+    ]);
+    checks.push([
+      "read tier cannot change a role",
+      (await patchRole(viewerId, token0, { description: "not allowed" })).status === 403,
+    ]);
+
+    // --- write tier -----------------------------------------------------------------------------
+    checks.push([
+      "assigning management:write is 204",
+      (await assign(accountId, operatorId, adminToken)).status === 204,
+    ]);
+    checks.push([
+      "the same token now creates an account",
+      (await createAccount(token0, "operator")).status === 201,
+    ]);
+    checks.push([
+      "write tier cannot create a role (privilege escalation is full-only)",
+      (await createRole(token0, `escalate-${runId}`, ["monaca:admin"])).status === 403,
+    ]);
+
+    // --- full tier ------------------------------------------------------------------------------
+    checks.push([
+      "assigning monaca:admin is 204",
+      (await assign(accountId, delegateId, adminToken)).status === 204,
+    ]);
+    const updated = await patchRole(viewerId, token0, {
+      permissions: ["management:read", "tools:read"],
+    });
+    checks.push([
+      "the pre-existing token can change a role as soon as the full role is assigned",
+      updated.status === 200 &&
+        ((updated.body as { permissions?: unknown })?.permissions as string[] | undefined)?.includes(
+          "tools:read",
+        ) === true,
+    ]);
+
+    const elevated = await consoleSignIn(
+      base,
+      email,
+      password,
+      consoleSecret,
+      "tier-full",
+      "openid offline_access monaca:admin",
+    );
+    if (elevated.session === undefined) return fail(elevated.error ?? "re-sign-in failed");
+    const token1 = elevated.session.accessToken;
+    const scope1 = jwtClaims(token1)?.scope as unknown;
+    checks.push([
+      "issuance keeps monaca:admin for an account whose role grants it",
+      Array.isArray(scope1) && scope1.map(String).includes("monaca:admin"),
+    ]);
+
+    const tempRole = await createRole(token1, `temp-${runId}`, []);
+    const tempRoleId = (tempRole.body as { id?: string })?.id;
+    checks.push([
+      "full tier can create a role",
+      tempRole.status === 201 && tempRoleId !== undefined,
+    ]);
+    if (tempRoleId !== undefined) {
+      checks.push([
+        "full tier can delete a role",
+        (await call(`${base}/v1/roles/${tempRoleId}`, {
+          method: "DELETE",
+          headers: managementHeaders(token1),
+        })).status === 204,
+      ]);
+    }
+
+    const updatedEvents = await audit(token1, { action: "role.updated", limit: "200" });
+    checks.push([
+      "reading roles as the full tier is allowed and the update is audited",
+      updatedEvents.status === 200 && JSON.stringify(updatedEvents.body).includes(viewerId),
+    ]);
+    const assignedEvents = await audit(token1, {
+      action: "role.assigned",
+      subject: accountId,
+      limit: "200",
+    });
+    checks.push([
+      "each assignment writes role.assigned with the account as its subject",
+      assignedEvents.status === 200 &&
+        Number((assignedEvents.body as { total?: unknown })?.total) >= 3,
+    ]);
+
+    // --- demotion is immediate, even for a token carrying monaca:admin -------------------------
+    checks.push([
+      "removing the full role is 204",
+      (await unassign(accountId, delegateId, token1)).status === 204,
+    ]);
+    checks.push([
+      "the token that carried monaca:admin can no longer change a role",
+      (await patchRole(viewerId, token1, { description: "after demotion" })).status === 403,
+    ]);
+    checks.push([
+      "the token that carried monaca:admin can no longer create a role",
+      (await createRole(token1, `demoted-${runId}`, [])).status === 403,
+    ]);
+    checks.push([
+      "removing the write role is 204",
+      (await unassign(accountId, operatorId, adminToken)).status === 204,
+    ]);
+    checks.push([
+      "the same token can no longer create an account",
+      (await createAccount(token1, "demoted")).status === 403,
+    ]);
+    checks.push(["the same token still reads /v1 as the read tier", (await listAccounts(token1)).status === 200]);
+    checks.push([
+      "removing the read role is 204",
+      (await unassign(accountId, viewerId, adminToken)).status === 204,
+    ]);
+    checks.push([
+      "with no role left the token cannot read /v1",
+      (await listAccounts(token1)).status === 403,
+    ]);
+
+    const unassignedEvents = await audit(adminToken, {
+      action: "role.unassigned",
+      subject: accountId,
+      limit: "200",
+    });
+    checks.push([
+      "each removal writes role.unassigned with the account as its subject",
+      unassignedEvents.status === 200 &&
+        Number((unassignedEvents.body as { total?: unknown })?.total) >= 3,
+    ]);
+
+    // --- validation ------------------------------------------------------------------------------
+    checks.push([
+      "an empty role patch is 400",
+      (await patchRole(viewerId, adminToken, {})).status === 400,
+    ]);
+    checks.push([
+      "a permission outside the scope grammar is 400",
+      (await patchRole(viewerId, adminToken, { permissions: ["bad scope"] })).status === 400,
+    ]);
+    checks.push([
+      "a patch naming a missing role is 404",
+      (await patchRole("rol_01h455vb4pex5vsknk084sn02q", adminToken, { description: "x" })).status === 404,
+    ]);
+
+    for (const id of [viewerId, operatorId, delegateId]) {
+      await call(`${base}/v1/roles/${id}`, { method: "DELETE", headers });
+    }
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "76",
+    title: "role access tiers",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: no role 403 → read → write → full → issuance → audit → demotion → validation`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -16612,6 +16915,7 @@ async function main(): Promise<number> {
   push(await auditQueryFlow(base, adminToken, parsed.consoleSecret));
   push(await revocationImmediateFlow(base, adminToken, parsed.consoleSecret));
   push(await usageQuotaFlow(base, adminToken, parsed.consoleSecret));
+  push(await roleTierFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

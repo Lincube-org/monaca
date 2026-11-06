@@ -3934,7 +3934,8 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        patch?: never;
+        /** Update a tenant role */
+        patch: operations["update_role"];
         trace?: never;
     };
     "/v1/sign-in-copy": {
@@ -4833,6 +4834,8 @@ export interface components {
             name: string;
             /** @description Permission scopes the role grants. */
             permissions: string[];
+            /** @description RFC 3339 time of the last name, description or permission change. */
+            updated_at: string;
         };
         /** @description `GET /v1/accounts/{id}/sessions`. */
         SessionList: {
@@ -4908,6 +4911,15 @@ export interface components {
         UpdateOrgBody: {
             /** @description `active` | `archived`. */
             state?: string | null;
+        };
+        /** @description The body of `PATCH /v1/roles/{role}`; an absent field is left alone. */
+        UpdateRoleBody: {
+            /** @description A new free-form description. */
+            description?: string | null;
+            /** @description A new unique name. */
+            name?: string | null;
+            /** @description The replacement permission set; an empty array clears every permission. */
+            permissions?: string[] | null;
         };
         /** @description The `/version` body. */
         VersionResponse: {
@@ -5671,6 +5683,46 @@ export interface operations {
             };
             /** @description The name or a permission is invalid. */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_role: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                role: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateRoleBody"];
+            };
+        };
+        responses: {
+            /** @description The updated role. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoleView"];
+                };
+            };
+            /** @description No field, an invalid name or a permission outside the scope grammar. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such role. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

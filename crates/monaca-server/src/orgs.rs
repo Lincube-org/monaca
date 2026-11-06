@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use time::Duration;
 
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts};
+use crate::management::{authorize_admin, authorize_admin_read, ts};
 use crate::schemas::{OrgList, OrgView};
 use crate::state::AppState;
 
@@ -112,7 +112,7 @@ pub async fn list_orgs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<OrgList>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.all_orgs(&tenant).await?;
     let items: Vec<OrgView> = rows.iter().map(org_json).collect();
     Ok(Json(OrgList { items, next: None }))
@@ -135,7 +135,7 @@ pub async fn get_org(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<OrgView>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let row = load_org(&state, &tenant, &org).await?;
     Ok(Json(org_json(&row)))
 }
@@ -228,7 +228,7 @@ pub async fn list_email_domains(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let rows = state.store.org_email_domains(&tenant, org.org_id()).await?;
     let items: Vec<Value> = rows
@@ -346,7 +346,7 @@ pub async fn list_invitations(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let rows = state.store.org_invitations(&tenant, org.org_id()).await?;
     let items: Vec<Value> = rows.iter().map(invitation_json).collect();

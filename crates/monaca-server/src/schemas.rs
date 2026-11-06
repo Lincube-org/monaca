@@ -201,6 +201,8 @@ pub struct RoleView {
     pub permissions: Vec<String>,
     /// RFC 3339 creation time.
     pub created_at: String,
+    /// RFC 3339 time of the last name, description or permission change.
+    pub updated_at: String,
 }
 
 /// `GET /v1/roles`.

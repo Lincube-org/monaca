@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::delivery::{EMAIL, SMS};
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts};
+use crate::management::{authorize_admin, authorize_admin_read, ts};
 use crate::state::AppState;
 
 /// A route as an administrator submits it. `secret` omitted keeps the stored one; an empty string
@@ -100,7 +100,7 @@ async fn get_connector(
     headers: &HeaderMap,
     channel: &str,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(state, headers).await?;
+    let (tenant, _) = authorize_admin_read(state, headers).await?;
     let row = state.store.delivery_connector(&tenant, channel).await?;
     Ok(Json(connector_json(channel, row.as_ref())))
 }

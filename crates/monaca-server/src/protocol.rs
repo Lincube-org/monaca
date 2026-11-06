@@ -3681,10 +3681,18 @@ async fn authorization_code_grant(
         .account_by_id(&tenant, AccountId::from_uuid(row.account_id))
         .await?
         .ok_or_else(|| ApiError::token(TokenErrorCode::InvalidGrant, "account is gone"))?;
-    // `monaca:admin` is a capability only a tenant administrator may hold. A non-admin request
-    // that asked for it gets the other scopes and no `monaca:admin` (RFC 6749 §3.3); the
-    // management API still re-checks the flag on every request, so a demotion is immediate.
-    let granted_scope = issued_scope(&row.scope, account.is_tenant_admin);
+    // `monaca:admin` is a full-management capability: the tenant-administrator flag grants it,
+    // and so does any tenant role whose permissions name it. A request without either gets the
+    // other scopes and no `monaca:admin` (RFC 6749 §3.3). The roles are read once and reused for
+    // the id_token below; `/v1` re-reads them on every request, so a role change is immediate.
+    let roles = state
+        .store
+        .account_roles(&tenant, account.account_id())
+        .await?;
+    let granted_scope = issued_scope(
+        &row.scope,
+        role_grants_management(account.is_tenant_admin, &roles),
+    );
 
     let key = state.signing_key(&tenant).await?;
     let now = state.now().unix_timestamp();
@@ -3741,13 +3749,7 @@ async fn authorization_code_grant(
                 .flatten(),
             auth_time: Some(row.auth_time.unix_timestamp()),
             at_hash: Some(at_hash(&access_token)),
-            roles: state
-                .store
-                .account_roles(&tenant, account.account_id())
-                .await?
-                .into_iter()
-                .map(|role| role.name)
-                .collect(),
+            roles: roles.iter().map(|role| role.name.clone()).collect(),
             org_roles: state
                 .store
                 .org_role_names(&tenant, org.org_id(), account.account_id())
@@ -3873,9 +3875,17 @@ async fn refresh_grant(
         }
         None => row.scope.clone(),
     };
-    // A refresh may have been issued while the account was an administrator. Re-evaluate the
-    // capability on every rotation so a demotion cannot outlive the old access token.
-    let scope = issued_scope(&scope, account.is_tenant_admin);
+    // A refresh may have been issued while the account was an administrator, or while a role
+    // granted full management. Re-evaluate the capability on every rotation so a demotion or a
+    // role removal cannot outlive the old access token.
+    let roles = state
+        .store
+        .account_roles(&tenant, account.account_id())
+        .await?;
+    let scope = issued_scope(
+        &scope,
+        role_grants_management(account.is_tenant_admin, &roles),
+    );
 
     // RFC 9449 §5: a token bound to a key may only be refreshed by proving that key. A refresh
     // that starts using DPoP binds the rotated tokens to the proof's key.
@@ -3960,13 +3970,7 @@ async fn refresh_grant(
                 .flatten(),
             auth_time: Some(row.auth_time.unix_timestamp()),
             at_hash: Some(at_hash(&access_token)),
-            roles: state
-                .store
-                .account_roles(&tenant, account.account_id())
-                .await?
-                .into_iter()
-                .map(|role| role.name)
-                .collect(),
+            roles: roles.iter().map(|role| role.name.clone()).collect(),
             org_roles: state
                 .store
                 .org_role_names(&tenant, org.org_id(), account.account_id())
@@ -4242,12 +4246,13 @@ async fn agent_token(
 #[allow(clippy::too_many_arguments)]
 /// The scopes an issued token may actually carry.
 ///
-/// `monaca:admin` is governed by the account's tenant-admin flag rather than a role, so a
-/// non-admin who asked for it receives the other scopes and no `monaca:admin` (RFC 6749 §3.3).
-/// `/v1` re-checks the flag on every request, because a token minted before a demotion still
-/// carries the scope until it is rotated.
-fn issued_scope(scope: &[String], is_tenant_admin: bool) -> Vec<String> {
-    if is_tenant_admin || !scope.iter().any(|value| value == "monaca:admin") {
+/// `monaca:admin` is a full-management capability granted by the tenant-admin flag or by a
+/// tenant role; a caller with neither who asked for it receives the other scopes and no
+/// `monaca:admin` (RFC 6749 §3.3). `/v1` re-reads the account's roles on every request, so a
+/// token minted before a demotion still carries the scope until it is rotated, but it no
+/// longer opens the API.
+fn issued_scope(scope: &[String], management_full: bool) -> Vec<String> {
+    if management_full || !scope.iter().any(|value| value == "monaca:admin") {
         return scope.to_vec();
     }
     scope
@@ -4255,6 +4260,18 @@ fn issued_scope(scope: &[String], is_tenant_admin: bool) -> Vec<String> {
         .filter(|value| value.as_str() != "monaca:admin")
         .cloned()
         .collect()
+}
+
+/// Whether the account holds full management: the tenant-admin flag, or a role whose permissions
+/// name `monaca:admin`. Used at issuance so the token scope matches the capability `/v1` will
+/// re-evaluate on every request.
+fn role_grants_management(is_tenant_admin: bool, roles: &[monaca_store::RoleRow]) -> bool {
+    is_tenant_admin
+        || roles.iter().any(|role| {
+            role.permissions
+                .iter()
+                .any(|permission| permission == "monaca:admin")
+        })
 }
 
 async fn issue_refresh(

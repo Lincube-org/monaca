@@ -61,6 +61,9 @@ pub struct AccountLivenessRow {
     pub state: String,
     /// Whether the account may call the management API.
     pub is_tenant_admin: bool,
+    /// The management tier the account's current roles grant: 0 none, 1 read, 2 write, 3 full.
+    /// Tenant administrators are 3 regardless of roles.
+    pub management_level: i32,
     /// Whether the session named by the token is still usable.
     pub session_live: bool,
     /// Whether the token's `jti` is on the revocation list.
@@ -434,6 +437,8 @@ pub struct RoleRow {
     pub permissions: Vec<String>,
     /// Creation time.
     pub created_at: OffsetDateTime,
+    /// When the name, description or permissions last changed.
+    pub updated_at: OffsetDateTime,
 }
 
 /// An arbitrary role in an org schema's `roles` table (§5.7).
@@ -1179,6 +1184,16 @@ impl Store {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, AccountLivenessRow>(
             "SELECT a.primary_email, a.display_name, a.avatar_url, a.state, a.is_tenant_admin,
+                    CASE WHEN a.is_tenant_admin THEN 3 ELSE COALESCE((
+                        SELECT max(CASE
+                            WHEN 'monaca:admin' = ANY(r.permissions) THEN 3
+                            WHEN 'management:write' = ANY(r.permissions) THEN 2
+                            WHEN 'management:read' = ANY(r.permissions) THEN 1
+                            ELSE 0 END)
+                        FROM tenant.account_roles ar
+                        JOIN tenant.roles r ON r.id = ar.role_id
+                        WHERE ar.account_id = a.id
+                    ), 0) END AS management_level,
                     ($2::uuid IS NULL OR EXISTS (
                         SELECT 1 FROM tenant.sessions s
                         WHERE s.id = $2 AND s.revoked_at IS NULL AND s.expires_at > now()
@@ -3019,7 +3034,7 @@ impl Store {
     pub async fn roles(&self, tenant: &TenantRow) -> Result<Vec<RoleRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, RoleRow>(
-            "SELECT id, name, description, permissions, created_at
+            "SELECT id, name, description, permissions, created_at, updated_at
              FROM tenant.roles ORDER BY name",
         )
         .fetch_all(&pool)
@@ -3034,7 +3049,7 @@ impl Store {
     ) -> Result<Option<RoleRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, RoleRow>(
-            "SELECT id, name, description, permissions, created_at
+            "SELECT id, name, description, permissions, created_at, updated_at
              FROM tenant.roles WHERE id = $1",
         )
         .bind(role_id)
@@ -3054,13 +3069,42 @@ impl Store {
         sqlx::query_as::<_, RoleRow>(
             "INSERT INTO tenant.roles (id, name, description, permissions)
              VALUES ($1,$2,$3,$4)
-             RETURNING id, name, description, permissions, created_at",
+             RETURNING id, name, description, permissions, created_at, updated_at",
         )
         .bind(Uuid::now_v7())
         .bind(name)
         .bind(description)
         .bind(permissions)
         .fetch_one(&pool)
+        .await
+        .map_err(|err| unique_conflict(err, "role"))
+    }
+
+    /// Change the fields the caller supplied and stamp `updated_at`; `None` leaves a field alone.
+    /// A name another row holds is `AlreadyExists { entity: "role" }`.
+    pub async fn update_role(
+        &self,
+        tenant: &TenantRow,
+        role_id: Uuid,
+        name: Option<&str>,
+        description: Option<&str>,
+        permissions: Option<&[String]>,
+    ) -> Result<Option<RoleRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query_as::<_, RoleRow>(
+            "UPDATE tenant.roles
+             SET name = COALESCE($2, name),
+                 description = COALESCE($3, description),
+                 permissions = CASE WHEN $4::text[] IS NULL THEN permissions ELSE $4 END,
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING id, name, description, permissions, created_at, updated_at",
+        )
+        .bind(role_id)
+        .bind(name)
+        .bind(description)
+        .bind(permissions.map(<[String]>::to_vec))
+        .fetch_optional(&pool)
         .await
         .map_err(|err| unique_conflict(err, "role"))
     }
@@ -3075,16 +3119,16 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Assign a role to an account; the primary key makes a second assignment a no-op the caller
-    /// treats as success.
+    /// Assign a role to an account; the primary key makes a second assignment a no-op. Returns
+    /// whether this call actually added the row, so the caller audits only a real change.
     pub async fn assign_role(
         &self,
         tenant: &TenantRow,
         account_id: AccountId,
         role_id: Uuid,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO tenant.account_roles (account_id, role_id) VALUES ($1,$2)
              ON CONFLICT DO NOTHING",
         )
@@ -3092,7 +3136,7 @@ impl Store {
         .bind(role_id)
         .execute(&pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Remove one assignment; false when the account did not hold the role.
@@ -3120,7 +3164,7 @@ impl Store {
     ) -> Result<Vec<RoleRow>, StoreError> {
         let pool = self.tenant_pool(&tenant.db_name).await?;
         Ok(sqlx::query_as::<_, RoleRow>(
-            "SELECT r.id, r.name, r.description, r.permissions, r.created_at
+            "SELECT r.id, r.name, r.description, r.permissions, r.created_at, r.updated_at
              FROM tenant.roles r
              JOIN tenant.account_roles a ON a.role_id = r.id
              WHERE a.account_id = $1

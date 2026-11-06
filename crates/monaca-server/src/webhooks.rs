@@ -28,7 +28,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts};
+use crate::management::{authorize_admin, authorize_admin_read, ts};
 use crate::state::AppState;
 
 /// Audit actions a tenant may subscribe to.
@@ -126,7 +126,7 @@ pub async fn list_webhooks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.webhooks(&tenant).await?;
     let items: Vec<Value> = rows.iter().map(webhook_json).collect();
     Ok(Json(json!({ "items": items, "next": null })))
@@ -309,7 +309,7 @@ pub async fn list_webhook_deliveries(
     Query(query): Query<DeliveriesQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let id = parse_webhook_id(&id)?;
     if state.store.webhook(&tenant, id).await?.is_none() {
         return Err(ApiError::not_found("webhook"));

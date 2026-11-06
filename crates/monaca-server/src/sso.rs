@@ -28,7 +28,7 @@ use time::{Duration, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::error::{ApiError, kinds};
-use crate::management::authorize_admin;
+use crate::management::{authorize_admin, authorize_admin_read};
 use crate::orgs::normalise_domain;
 use crate::social::{check_connector_id, exchange_code, found};
 use crate::state::AppState;
@@ -170,7 +170,7 @@ pub async fn list_sso_connectors(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.sso_connectors(&tenant).await?;
     let items: Vec<Value> = rows.iter().map(sso_connector_json).collect();
     Ok(Json(json!({ "items": items, "next": null })))

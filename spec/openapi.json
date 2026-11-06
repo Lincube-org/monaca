@@ -999,6 +999,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "updated_at": {
+            "description": "RFC 3339 time of the last name, description or permission change.",
+            "type": "string"
           }
         },
         "required": [
@@ -1006,7 +1010,8 @@
           "name",
           "description",
           "permissions",
-          "created_at"
+          "created_at",
+          "updated_at"
         ],
         "type": "object"
       },
@@ -1232,6 +1237,36 @@
             "description": "`active` | `archived`.",
             "type": [
               "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateRoleBody": {
+        "description": "The body of `PATCH /v1/roles/{role}`; an absent field is left alone.",
+        "properties": {
+          "description": {
+            "description": "A new free-form description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "A new unique name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permissions": {
+            "description": "The replacement permission set; an empty array clears every permission.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
               "null"
             ]
           }
@@ -3253,6 +3288,51 @@
           }
         },
         "summary": "One tenant role"
+      },
+      "patch": {
+        "operationId": "update_role",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRoleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleView"
+                }
+              }
+            },
+            "description": "The updated role."
+          },
+          "400": {
+            "description": "No field, an invalid name or a permission outside the scope grammar."
+          },
+          "404": {
+            "description": "No such role."
+          }
+        },
+        "summary": "Update a tenant role",
+        "tags": [
+          "management"
+        ]
       }
     },
     "/v1/sign-in-copy": {

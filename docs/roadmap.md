@@ -1140,6 +1140,36 @@ real propagation window and was measured (28/30 immediate), but it is not a revo
 counters and revocation checks are shared rows read per request. Bench figures come from the local
 debug build; the CI release numbers are in the run log.
 
+## Role model — management tiers
+
+Tenant roles already existed as named scope sets; what was missing was a management meaning. Three
+permissions now are the tiers: `management:read` opens every `GET` on `/v1`, `management:write`
+adds ordinary mutations, and `monaca:admin` adds role administration itself (a write-tier caller
+cannot mint a role that grants `monaca:admin`, so it cannot escalate). The tenant-admin flag stays
+as the bootstrap owner override; roles are additive delegation.
+
+The tier is computed by `account_liveness` in the same primary-key statement that already answers
+account state, session liveness and token revocation: a subquery over `account_roles` →
+`roles.permissions` with a three-way `max(CASE …)`, so an ordinary `/v1` request pays no extra
+round trip. Because it is re-read per request, assigning or removing a role changes the next call;
+the test proves demotion with a token that still carries `monaca:admin`.
+
+Issuance matches the same rule: `monaca:admin` survives only for the tenant-admin flag or a role
+that names it. A read or write role can call `/v1` with a token that never carried
+`monaca:admin`, because the role row, not the token scope, is the authority for a user token.
+`PATCH /v1/roles/{role}` changes name, description or permissions; `role.updated`,
+`role.assigned` and `role.unassigned` join the audit action list (74 actions, 74 event schemas).
+
+Migration `tenant_54` adds `roles.updated_at` and backfills it for existing rows. Step 76 covers
+the tiers, the immediate promotion/demotion, issuance, the three audit events and the validation
+errors (29 checks locally). The contract's §6.2, §7.3, §8.1 and §12 were updated with the code;
+the OpenAPI document is 118 paths / 166 operations and `schema.gen.ts` is regenerated.
+
+Known limits: `is_tenant_admin` is still a boolean set only by bootstrap/CLI, so a tenant owner
+cannot be demoted through the API; roles delegate but do not replace that flag. Read-tier accounts
+can list every role and its permissions (they can read all of `/v1`), and there is no per-endpoint
+finer permission than the three tiers.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::clients::normalise_scopes;
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts};
+use crate::management::{authorize_admin, authorize_admin_read, ts};
 use crate::state::AppState;
 
 /// The body of `POST /v1/resources`.
@@ -97,7 +97,7 @@ pub async fn list_resources(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.api_resources(&tenant).await?;
     let items: Vec<Value> = rows.iter().map(resource_json).collect();
     Ok(Json(json!({ "items": items, "next": null })))
@@ -109,7 +109,7 @@ pub async fn get_resource(
     headers: HeaderMap,
     Path(resource): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let row = load_resource(&state, &tenant, &resource).await?;
     Ok(Json(resource_json(&row)))
 }

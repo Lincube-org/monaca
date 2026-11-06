@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::clients::normalise_scopes;
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, parse_account, ts};
+use crate::management::{authorize_admin, authorize_admin_read, parse_account, ts};
 use crate::state::AppState;
 
 /// The body of `POST /v1/orgs/{org}/roles`.
@@ -112,7 +112,7 @@ pub async fn list_org_roles(
     headers: HeaderMap,
     Path(org): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let mut tx = state.store.begin_org(&ctx).await?;
@@ -242,7 +242,7 @@ pub async fn list_member_roles(
     headers: HeaderMap,
     Path((org, account)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let org = state.store.org_by_slug(&tenant, &org).await?;
     let ctx = org.ctx(&tenant);
     let account_id = parse_account(&account)?;

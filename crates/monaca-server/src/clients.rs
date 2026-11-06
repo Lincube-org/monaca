@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{ApiError, kinds};
-use crate::management::{authorize_admin, ts, validate_custom_css};
+use crate::management::{authorize_admin, authorize_admin_read, ts, validate_custom_css};
 use crate::schemas::{ClientList, ClientSecretView, ClientView, CreatedClientView};
 use crate::state::AppState;
 
@@ -181,7 +181,7 @@ pub async fn list_clients(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<ClientList>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let rows = state.store.clients(&tenant).await?;
     let mut items = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -208,7 +208,7 @@ pub async fn get_client(
     headers: HeaderMap,
     Path(client): Path<String>,
 ) -> Result<Json<ClientView>, ApiError> {
-    let (tenant, _) = authorize_admin(&state, &headers).await?;
+    let (tenant, _) = authorize_admin_read(&state, &headers).await?;
     let row = load_client(&state, &tenant, &client).await?;
     let (redirect_uris, post_logout) = registered_uris(&state, &tenant, &row).await?;
     Ok(Json(client_json(&row, &redirect_uris, &post_logout)))
