@@ -10,6 +10,9 @@ import type { ListAuditQuery } from "./types";
 export const queryKeys = {
   session: () => ["session"] as const,
 
+  tenant: () => ["tenant"] as const,
+  usage: () => ["usage"] as const,
+
   organizations: () => ["organizations"] as const,
 
   clients: () => ["clients"] as const,
@@ -27,6 +30,8 @@ export const queryKeys = {
 
   connectors: () => ["connectors"] as const,
 
+  deliveryConnector: (channel: "email" | "sms") => ["delivery-connector", channel] as const,
+
   ssoConnectors: () => ["sso-connectors"] as const,
 
   signInExperience: () => ["sign-in-experience"] as const,
@@ -36,6 +41,8 @@ export const queryKeys = {
   signInCopy: () => ["sign-in-copy"] as const,
 
   emailTemplates: () => ["email-templates"] as const,
+
+  messageTemplates: (channel?: "email" | "sms") => ["message-templates", channel ?? "all"] as const,
 
   webhooks: () => ["webhooks"] as const,
   webhookDeliveries: (webhookId: string) => ["webhooks", webhookId, "deliveries"] as const,

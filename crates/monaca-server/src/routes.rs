@@ -31,6 +31,9 @@ use crate::state::AppState;
         crate::metrics::scrape,
         crate::management::get_rate_limits,
         crate::management::update_rate_limits,
+        crate::management::get_me,
+        crate::management::get_tenant,
+        crate::management::update_tenant,
         crate::management::list_accounts,
         crate::management::create_account,
         crate::management::get_account,
@@ -66,6 +69,10 @@ use crate::state::AppState;
         crate::management::UpdateAccountBody,
         crate::management::CreateRoleBody,
         crate::management::UpdateRoleBody,
+        crate::management::MeRoleView,
+        crate::management::MeView,
+        crate::management::TenantView,
+        crate::management::UpdateTenantBody,
         crate::clients::CreateClientBody,
         crate::clients::UpdateClientBody,
         crate::orgs::CreateOrgBody,
@@ -595,6 +602,8 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         &["get", "patch", "delete"],
         "One API resource",
     ),
+    ("/v1/me", &["get"], "The signed-in account"),
+    ("/v1/tenant", &["get", "patch"], "Tenant lifecycle"),
     ("/v1/roles", &["get", "post"], "Tenant roles"),
     ("/v1/roles/{role}", &["patch", "delete"], "One tenant role"),
     ("/v1/webhooks", &["get", "post"], "Webhooks"),
@@ -902,6 +911,11 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/accounts",
             get(crate::management::list_accounts).post(crate::management::create_account),
+        )
+        .route("/v1/me", get(crate::management::get_me))
+        .route(
+            "/v1/tenant",
+            get(crate::management::get_tenant).patch(crate::management::update_tenant),
         )
         .route(
             "/v1/usage",

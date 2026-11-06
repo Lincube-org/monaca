@@ -83,6 +83,7 @@ export interface TenantRole {
   description: string;
   permissions: string[];
   created_at: string;
+  updated_at?: string;
 }
 
 /**
@@ -495,12 +496,24 @@ export type {
   AuditSubjectType,
 } from "@monaca/ui";
 
+/** The management tier `/v1/me` reports; the console hides write controls below `write`. */
+export type ManagementTier = "none" | "read" | "write" | "full";
+
+export interface SessionRole {
+  id: string;
+  name: string;
+  permissions: string[];
+}
+
 export interface SessionInfo {
   authenticated: boolean;
   account_id: string;
   email: string;
   tenant: string;
   orgs: { slug: string; role: OrgRole }[];
+  management: ManagementTier;
+  roles: SessionRole[];
+  is_tenant_admin: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -818,4 +831,101 @@ export interface ProblemDetails {
   detail?: string;
   instance?: string;
   monaca_error_code?: string;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tenant lifecycle, usage and console-facing delivery configuration (§6.2)
+// ---------------------------------------------------------------------------------------------
+
+export interface Tenant {
+  id: string;
+  slug: string;
+  state: "active" | "suspended" | "archived";
+  issuer: string;
+}
+
+/** Only archive/reactivate is offered through the API; suspension is a platform CLI action. */
+export interface UpdateTenantRequest {
+  state: "active" | "archived";
+}
+
+export interface UsageUsers {
+  total: number;
+  quota: number | null;
+  remaining: number | null;
+  enforcement: "reject";
+}
+
+export interface UsageDaily {
+  date: string;
+  active_accounts: number;
+  logins: number;
+  timezone: "UTC";
+}
+
+export interface Usage {
+  users: UsageUsers;
+  daily: UsageDaily;
+  updated_at: string;
+}
+
+/** `max_accounts: null` clears the cap. */
+export interface UpdateUsageRequest {
+  max_accounts: number | null;
+}
+
+export interface DeliveryConnector {
+  channel: "email" | "sms";
+  configured: boolean;
+  provider: string | null;
+  endpoint: string | null;
+  from_address: string | null;
+  from_name: string | null;
+  secret_set: boolean;
+  enabled: boolean;
+  updated_at: string | null;
+}
+
+export interface UpdateDeliveryConnectorRequest {
+  provider: string;
+  endpoint: string;
+  from_address: string;
+  from_name?: string | null;
+  /** Omit to keep the stored secret; an empty string clears it. */
+  secret?: string;
+  enabled?: boolean;
+}
+
+export interface MessageTemplate {
+  purpose: string;
+  channel: "email" | "sms";
+  locale: string;
+  subject: string | null;
+  body: string;
+  variables: string[];
+  customized: boolean;
+  updated_at: string | null;
+}
+
+export interface UpdateMessageTemplateRequest {
+  subject: string;
+  body: string;
+}
+
+/** The dry-run and real DELETE both return the counts; `confirmation` is only on the dry run. */
+export interface AccountDeletion {
+  dry_run?: boolean;
+  account_id: string;
+  email: string;
+  state?: string;
+  sessions: number;
+  refresh_tokens: number;
+  confirmation?: string;
+}
+
+/** Absent fields are left alone; `permissions` replaces the stored set. */
+export interface UpdateTenantRoleRequest {
+  name?: string;
+  description?: string;
+  permissions?: string[];
 }

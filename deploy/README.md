@@ -63,6 +63,43 @@ is exactly what the compose file sets.
 startup checks (§2.2). The bootstrap secrets are read only when the seeded rows do not exist:
 an existing admin password or client secret is never overwritten by a later deploy.
 
+## Owner override: `is_tenant_admin` is CLI-demoted only
+
+The tenant owner override is a boolean on `tenant.accounts`, set only by `bootstrap` or
+`tenant create`. There is **no** `/v1` endpoint that clears it: an API token cannot demote the
+account it belongs to. This is deliberate — the management API is shared by tenant administrators,
+and a self-demotion endpoint would be a privilege-escalation target with no second pair of eyes.
+
+The only off-switch is the offline CLI:
+
+    monaca-server tenant demote-admin --slug <slug> --email <account-email> --dry-run
+    monaca-server tenant demote-admin --slug <slug> --email <account-email>
+
+Run it on the same host and with the same `MONACA_ENV`, `MONACA_CONTROL_DATABASE_URL` and
+`MONACA_ADMIN_DATABASE_URL` as the server. It requires no management token and does not need the
+server to be running. After it succeeds:
+
+1. The account's `/v1` management tier drops to whatever its tenant roles grant; if it holds no
+   `monaca:admin` role, its next `/v1` request is `403`.
+2. A user token minted before the demotion still carries `monaca:admin` until it expires, but
+   `/v1` re-reads the account row on every request, so the scope alone no longer opens the API.
+3. Verify with the console Settings page or `GET /v1/me`: `is_tenant_admin` is `false` and
+   `management` is the role-derived tier.
+
+**Deployment checklist.** Before closing a decommissioned operator's access, or after a
+privileged account changes hands:
+
+- [ ] `tenant demote-admin --dry-run` names the right account.
+- [ ] `tenant demote-admin` succeeded.
+- [ ] The account's `/v1/me` reports `is_tenant_admin: false` and no `monaca:admin` role.
+- [ ] Any remaining access is an explicit tenant role, listed on `GET /v1/me`.
+- [ ] Tenant lifecycle changes still go through `tenant suspend|resume|archive`; the API only
+      offers the reversible archive/reactivate pair.
+
+The CLI demotion is not written to the tenant audit chain (the CLI has no request actor). If an
+audit trail is required for an offboarding, record the command and its output alongside the
+operator ticket.
+
 **KEK rotation is an offline, three-step procedure** (§10.7). `MONACA_KEK` derives every tenant
 DEK, and sealed signing keys, TOTP seeds, passkey blobs and connector secrets are encrypted under
 those DEKs. There is no stored key id: decryption tries the current key first and the retiring key

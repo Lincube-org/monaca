@@ -766,6 +766,15 @@ const ACCEPTANCE_STEPS: { step: string; title: string; assertion: string }[] = [
       "issuance keeps monaca:admin only for a full account, and role.updated/assigned/unassigned are " +
       "written to the audit chain",
   },
+  {
+    step: "77",
+    title: "me and tenant lifecycle",
+    assertion:
+      "GET /v1/me reports the account, its roles and the current management tier, and follows a role " +
+      "removal on the same token; GET /v1/tenant reports the lifecycle record; the API refuses " +
+      "suspension but archives and reactivates, /v1/me is 403 while archived while the lifecycle read " +
+      "still answers, and both transitions are tenant-chain audit events with the tenant as subject",
+  },
 ];
 
 interface StepResult {
@@ -16683,6 +16692,213 @@ async function roleTierFlow(
   };
 }
 
+/**
+ * Step 77 — `/v1/me` and the tenant lifecycle pair (§6.2).
+ *
+ * The console needs the signed-in account's current management tier, and an operator needs the
+ * archive/reactivate pair. The test proves both: `/v1/me` follows a role assignment without a new
+ * token, an archived tenant refuses `/v1/me`, and the lifecycle pair is the only surface that still
+ * answers while archived. The tenant is reactivated in `finally` so a failed assertion cannot leave
+ * the rest of the run against an archived demo.
+ */
+async function tenantLifecycleAndMeFlow(
+  base: string,
+  adminToken: string,
+  consoleSecret: string,
+): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const headers = managementHeaders(adminToken);
+  const email = `lifecycle-${runId}@demo.localhost`;
+  const password = `pw-${runId}-lifecycle`;
+  const roleName = `me-reader-${runId}`;
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const fail = (why: string): StepResult => ({
+    step: "77",
+    title: "me and tenant lifecycle",
+    status: "fail",
+    ms: Math.round(performance.now() - t),
+    detail: why || detail,
+  });
+  const errorCode = (body: unknown): unknown =>
+    (body as { monaca_error_code?: unknown })?.monaca_error_code;
+  const me = (token: string): Promise<HttpResult> =>
+    call(`${base}/v1/me`, { headers: managementHeaders(token) });
+  const tenantCall = (token: string, method = "GET", body?: unknown): Promise<HttpResult> =>
+    call(`${base}/v1/tenant`, {
+      method,
+      headers: managementHeaders(token),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const audit = (query: Record<string, string>): Promise<HttpResult> =>
+    call(`${base}/v1/audit?${new URLSearchParams(query)}`, { headers });
+
+  let roleId: string | undefined;
+  let accountId: string | undefined;
+  try {
+    const createdRole = await call(`${base}/v1/roles`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: roleName, permissions: ["management:read"] }),
+    });
+    roleId = (createdRole.body as { id?: string })?.id;
+    if (createdRole.status !== 201 || roleId === undefined) {
+      return fail(`POST /v1/roles → ${createdRole.status} ${text(createdRole.body)}`);
+    }
+    const created = await call(`${base}/v1/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email, display_name: "Lifecycle holder", password }),
+    });
+    accountId = (created.body as { id?: string })?.id;
+    if (created.status !== 201 || accountId === undefined) {
+      return fail(`POST /v1/accounts → ${created.status} ${text(created.body)}`);
+    }
+    await call(`${base}/v1/orgs/${ORG}/members`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ account_id: accountId, role: "member" }),
+    });
+    await call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+      method: "POST",
+      headers,
+    });
+
+    const signedIn = await consoleSignIn(
+      base,
+      email,
+      password,
+      consoleSecret,
+      "lifecycle",
+      "openid offline_access monaca:admin",
+    );
+    if (signedIn.session === undefined) return fail(signedIn.error ?? "sign-in failed");
+    const userToken = signedIn.session.accessToken;
+
+    const firstMe = await me(userToken);
+    const body = firstMe.body as {
+      account_id?: string;
+      email?: string;
+      management?: string;
+      is_tenant_admin?: boolean;
+      roles?: { name?: string; permissions?: string[] }[];
+    };
+    checks.push([
+      "GET /v1/me reports the account, its role and the read tier",
+      firstMe.status === 200 &&
+        body.account_id === accountId &&
+        body.email === email &&
+        body.management === "read" &&
+        body.is_tenant_admin === false &&
+        (body.roles ?? []).some(
+          (role) => role.name === roleName && role.permissions?.includes("management:read") === true,
+        ),
+    ]);
+
+    checks.push([
+      "removing the role lowers /v1/me on the same token",
+      (await call(`${base}/v1/accounts/${accountId}/roles/${roleId}`, {
+        method: "DELETE",
+        headers,
+      })).status === 204 &&
+        (await me(userToken)).status === 200 &&
+        ((await me(userToken)).body as { management?: string }).management === "none",
+    ]);
+
+    const readTenant = await tenantCall(adminToken);
+    const tenantBody = readTenant.body as { id?: string; slug?: string; state?: string };
+    checks.push([
+      "GET /v1/tenant reports the tenant and its active state",
+      readTenant.status === 200 && tenantBody.slug === TENANT && tenantBody.state === "active",
+    ]);
+    const tenantId = tenantBody.id;
+
+    checks.push([
+      "suspension is refused through the API",
+      (await tenantCall(adminToken, "PATCH", { state: "suspended" })).status === 400,
+    ]);
+    checks.push([
+      "an invalid lifecycle state is 400",
+      (await tenantCall(adminToken, "PATCH", { state: "provisioning" })).status === 400,
+    ]);
+
+    const archived = await tenantCall(adminToken, "PATCH", { state: "archived" });
+    checks.push([
+      "archiving the tenant is 200 and reports archived",
+      archived.status === 200 &&
+        (archived.body as { state?: string }).state === "archived",
+    ]);
+    checks.push([
+      "an archived tenant refuses /v1/me",
+      (await me(userToken)).status === 403 &&
+        errorCode((await me(userToken)).body) === "MONACA_TENANT_ARCHIVED",
+    ]);
+    checks.push([
+      "the lifecycle read still answers while archived",
+      (await tenantCall(adminToken)).status === 200 &&
+        ((await tenantCall(adminToken)).body as { state?: string }).state === "archived",
+    ]);
+
+    const reactivated = await tenantCall(adminToken, "PATCH", { state: "active" });
+    checks.push([
+      "reactivating the tenant is 200 and reports active",
+      reactivated.status === 200 &&
+        (reactivated.body as { state?: string }).state === "active",
+    ]);
+    checks.push([
+      "the same user token reads /v1/me once the tenant is active",
+      (await me(userToken)).status === 200,
+    ]);
+
+    const archivedEvents = await audit({ action: "tenant.archived", limit: "200" });
+    const archivedItems = (archivedEvents.body as {
+      items?: { action?: string; subject?: { id?: string } }[];
+    }).items ?? [];
+    checks.push([
+      "tenant.archived is on the tenant chain with the tenant as its subject",
+      archivedEvents.status === 200 &&
+        archivedItems.length >= 1 &&
+        archivedItems.every(
+          (item) => item.action === "tenant.archived" && item.subject?.id === tenantId,
+        ),
+    ]);
+    const reactivatedEvents = await audit({ action: "tenant.reactivated", limit: "200" });
+    const reactivatedItems = (reactivatedEvents.body as {
+      items?: { action?: string; subject?: { id?: string } }[];
+    }).items ?? [];
+    checks.push([
+      "tenant.reactivated is on the tenant chain with the tenant as its subject",
+      reactivatedEvents.status === 200 &&
+        reactivatedItems.length >= 1 &&
+        reactivatedItems.every(
+          (item) => item.action === "tenant.reactivated" && item.subject?.id === tenantId,
+        ),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    // Never leave the shared demo tenant archived for the rest of the run.
+    await tenantCall(adminToken, "PATCH", { state: "active" }).catch(() => undefined);
+    if (roleId !== undefined) {
+      await call(`${base}/v1/roles/${roleId}`, { method: "DELETE", headers }).catch(() => undefined);
+    }
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "77",
+    title: "me and tenant lifecycle",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: /v1/me tier → role removal → archive → 403 → reactivate → audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -16916,6 +17132,7 @@ async function main(): Promise<number> {
   push(await revocationImmediateFlow(base, adminToken, parsed.consoleSecret));
   push(await usageQuotaFlow(base, adminToken, parsed.consoleSecret));
   push(await roleTierFlow(base, adminToken, parsed.consoleSecret));
+  push(await tenantLifecycleAndMeFlow(base, adminToken, parsed.consoleSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

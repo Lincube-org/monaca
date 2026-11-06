@@ -1170,6 +1170,44 @@ cannot be demoted through the API; roles delegate but do not replace that flag. 
 can list every role and its permissions (they can read all of `/v1`), and there is no per-endpoint
 finer permission than the three tiers.
 
+## Admin console — the minimum an operator needs
+
+The console already had a mock-backed shell and a real BFF client; the gap was the default and the
+missing operational surfaces. `VITE_USE_MOCKS` now defaults to **false**, so an unset environment
+shows real data or a signed-out page, never a fixture. `VITE_USE_MOCKS=true` remains the explicit
+UI-development mode.
+
+Added to the console against existing `/v1` endpoints: account deletion with the dry-run counts
+and the typed-email confirmation; usage and the account cap; email/SMS delivery connectors with a
+write-only secret; multilingual message templates with placeholder validation, reset and restore.
+Tenant lifecycle needed two new endpoints: `GET /v1/tenant` and `PATCH /v1/tenant`, the latter
+accepting only active → archived and archived → active. Suspension stays a platform CLI action
+because the API would otherwise be unable to reverse it. Both transitions write
+`tenant.archived`/`tenant.reactivated` on the tenant chain.
+
+The BFF calls the new `GET /v1/me` at sign-in and stores the account's roles and management tier;
+the console hides write controls below `write` and role administration below `full`. A read or
+write role can read the console without a `monaca:admin` scope because the role row is the
+authority. The gateway falls back to `none` when `/v1/me` fails, which can only understate access;
+the server remains the enforcement point.
+
+`is_tenant_admin` stays CLI-only to demote. The new `tenant demote-admin --slug --email` command
+is the sole off-switch; `deploy/README.md` carries the dry-run/verify checklist, and no `/v1`
+endpoint clears the flag.
+
+Verification: step 77 covers `/v1/me` following a role change on the same token, the active
+`/v1/tenant` record, `/v1/tenant` refusing suspension, archive/reactivate, the archived `/v1/me`
+403, and both audit events (12 checks locally). The walk-through is 79 steps now (the same two
+gateway-only skips); the OpenAPI document is 120 paths / 169 operations and `schema.gen.ts` is
+regenerated. The console's typecheck, tests and production build pass locally.
+
+Known limits: the console's audit page reads the **organization** chain; the tenant chain is
+available at `GET /v1/audit` but has no console view yet. The read-only guard is applied to the
+pages this batch touched (users, tenant settings, roles, delivery, message templates); the other
+pages still render their buttons and rely on the server's 403. The BFF caches the tier at sign-in,
+so a role grant or removal is reflected in the UI after the next sign-in even though the API
+enforces it immediately.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

@@ -14,7 +14,7 @@ use monaca_crypto::hash_password;
 use monaca_types::{AccountId, OrgId, TypedId};
 use serde_json::json;
 
-use crate::cli::{TenantArgs, TenantCommand, TenantCreateArgs, TenantStateArgs};
+use crate::cli::{TenantArgs, TenantCommand, TenantCreateArgs, TenantDemoteArgs, TenantStateArgs};
 use crate::state::AppState;
 
 /// Run the `tenant` subcommand.
@@ -24,6 +24,7 @@ pub async fn run(args: TenantArgs) -> anyhow::Result<()> {
         TenantCommand::Suspend(args) => change_state(args, "suspended").await,
         TenantCommand::Resume(args) => change_state(args, "active").await,
         TenantCommand::Archive(args) => change_state(args, "archived").await,
+        TenantCommand::DemoteAdmin(args) => demote_admin(args).await,
     }
 }
 
@@ -198,6 +199,46 @@ async fn create(args: TenantCreateArgs) -> anyhow::Result<()> {
             "login_client_id": args.login_client_id,
             "login_redirect_uri": args.login_redirect_uri,
         }))?
+    );
+    Ok(())
+}
+
+/// Clear the owner override. There is deliberately no HTTP endpoint for this: a tenant
+/// administrator cannot demote the owner through the API they share.
+async fn demote_admin(args: TenantDemoteArgs) -> anyhow::Result<()> {
+    check_slug(&args.slug)?;
+    let state = Arc::clone(&crate::admin_state().await?);
+    let store = &state.store;
+    let tenant = store.tenant_by_slug(&args.slug).await?;
+    let Some((account, _)) = store.account_by_email(&tenant, &args.email).await? else {
+        anyhow::bail!("no account `{}` in tenant `{}`", args.email, args.slug);
+    };
+    if !account.is_tenant_admin {
+        println!(
+            "tenant {}: {} ({}) is already not a tenant administrator",
+            tenant.slug,
+            account.primary_email,
+            account.account_id().to_typed_string()
+        );
+        return Ok(());
+    }
+    if args.dry_run {
+        println!(
+            "tenant {}: would clear is_tenant_admin on {} ({})",
+            tenant.slug,
+            account.primary_email,
+            account.account_id().to_typed_string()
+        );
+        return Ok(());
+    }
+    store
+        .set_tenant_admin(&tenant, account.account_id(), false)
+        .await?;
+    println!(
+        "tenant {}: cleared is_tenant_admin on {} ({})",
+        tenant.slug,
+        account.primary_email,
+        account.account_id().to_typed_string()
     );
     Ok(())
 }

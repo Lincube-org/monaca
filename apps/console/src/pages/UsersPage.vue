@@ -25,7 +25,13 @@ import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
 import { describeError } from "@/api/contract";
-import type { AccountPasskey, AccountRole, AccountSession, AccountWithRoles } from "@/api/types";
+import type {
+  AccountDeletion,
+  AccountPasskey,
+  AccountRole,
+  AccountSession,
+  AccountWithRoles,
+} from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
@@ -36,10 +42,12 @@ import {
   useAccounts,
   useAssignAccountRole,
   useCreateAccount,
+  useDeleteAccount,
   useDeleteAccountPasskey,
   useResetAccountMfa,
   useRevokeAccountSession,
   useRevokeAccountSessions,
+  useSession,
   useTenantRoles,
   useUnassignAccountRole,
   useUpdateAccount,
@@ -54,6 +62,11 @@ import { useUiStore } from "@/stores/ui";
  * refresh token, which is why the confirmation says so rather than offering a silent toggle.
  */
 const ui = useUiStore();
+const session = useSession();
+const canWrite = computed(() => {
+  const tier = session.data.value?.management ?? "none";
+  return tier === "write" || tier === "full";
+});
 
 const searchInput = ref("");
 const appliedSearch = ref("");
@@ -185,6 +198,45 @@ async function submitEdit(): Promise<void> {
     const described = describeError(error);
     editError.value =
       described.code === "MONACA_USERNAME_TAKEN" ? t("users.usernameTaken") : described.title;
+  }
+}
+
+// --- Delete -------------------------------------------------------------------------------------
+
+const deleteOpen = ref(false);
+const deleteTarget = ref<AccountWithRoles | null>(null);
+const deletion = ref<AccountDeletion | null>(null);
+const deleteConfirm = ref("");
+const deleteError = ref<string | null>(null);
+const removeAccount = useDeleteAccount();
+
+async function openDelete(account: AccountWithRoles): Promise<void> {
+  deleteTarget.value = account;
+  deletion.value = null;
+  deleteConfirm.value = "";
+  deleteError.value = null;
+  deleteOpen.value = true;
+  try {
+    deletion.value = await removeAccount.mutateAsync({ accountId: account.id });
+  } catch (error) {
+    deleteError.value = describeError(error).title;
+  }
+}
+
+async function confirmDelete(): Promise<void> {
+  const target = deleteTarget.value;
+  if (!target) return;
+  deleteError.value = null;
+  try {
+    await removeAccount.mutateAsync({ accountId: target.id, confirm: deleteConfirm.value });
+    deleteOpen.value = false;
+    toast({
+      title: t("users.deletedToast"),
+      description: t("users.deletedDescription", { email: target.email }),
+      variant: "success",
+    });
+  } catch (error) {
+    deleteError.value = describeError(error).title;
   }
 }
 
@@ -573,7 +625,7 @@ function formatDateTime(at: string): string {
                   v-if="account.state === 'active'"
                   variant="secondary"
                   size="xs"
-                  :disabled="updateAccount.isPending.value"
+                  :disabled="!canWrite || updateAccount.isPending.value"
                   @click="openSuspend(account)"
                 >
                   {{ t('users.suspend') }}
@@ -582,10 +634,18 @@ function formatDateTime(at: string): string {
                   v-else
                   variant="secondary"
                   size="xs"
-                  :disabled="updateAccount.isPending.value"
+                  :disabled="!canWrite || updateAccount.isPending.value"
                   @click="reactivate(account)"
                 >
                   {{ t('users.reactivate') }}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  :disabled="!canWrite || removeAccount.isPending.value"
+                  @click="openDelete(account)"
+                >
+                  {{ t('users.delete') }}
                 </Button>
               </div>
             </TableCell>
@@ -729,6 +789,52 @@ function formatDateTime(at: string): string {
           <Button variant="ghost" type="button" @click="suspendOpen = false">{{ t('common.cancel') }}</Button>
           <Button variant="danger" type="button" :disabled="updateAccount.isPending.value" @click="confirmSuspend">
             {{ updateAccount.isPending.value ? t('common.saving') : t('users.suspend') }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="deleteOpen">
+      <DialogContent class="max-w-[460px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('users.deleteTitle', { email: deleteTarget?.email ?? '' }) }}</DialogTitle>
+          <DialogDescription>{{ t('users.deleteHint') }}</DialogDescription>
+        </DialogHeader>
+
+        <p v-if="deletion === null && deleteError === null" class="text-[12.5px] text-ink-muted">
+          {{ t('users.deleteDryRun') }}
+        </p>
+        <p v-if="deletion" class="text-[12.5px] text-ink-muted">
+          {{
+            t('users.deleteCounts', {
+              sessions: deletion.sessions,
+              tokens: deletion.refresh_tokens,
+            })
+          }}
+        </p>
+        <p class="text-[12.5px] text-deny">{{ t('users.deletePermanent') }}</p>
+
+        <div class="flex flex-col gap-1.5">
+          <Label for="delete-confirm">{{ t('users.deleteConfirmField') }}</Label>
+          <Input id="delete-confirm" v-model="deleteConfirm" autocomplete="off" />
+        </div>
+
+        <p v-if="deleteError" class="text-[12.5px] text-deny">{{ deleteError }}</p>
+
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="deleteOpen = false">{{ t('common.cancel') }}</Button>
+          <Button
+            variant="danger"
+            type="button"
+            :disabled="
+              !canWrite ||
+              removeAccount.isPending.value ||
+              deleteTarget === null ||
+              deleteConfirm.trim().toLowerCase() !== (deleteTarget?.email ?? '').toLowerCase()
+            "
+            @click="confirmDelete"
+          >
+            {{ removeAccount.isPending.value ? t('common.saving') : t('users.deleteConfirm') }}
           </Button>
         </DialogFooter>
       </DialogContent>

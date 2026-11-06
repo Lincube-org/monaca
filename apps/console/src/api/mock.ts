@@ -37,6 +37,7 @@ import {
   type SeededOrgInvitation,
 } from "./fixtures";
 import type {
+  AccountDeletion,
   AccountRole,
   AccountDetail,
   AccountSecurity,
@@ -70,11 +71,13 @@ import type {
   CreatedClient,
   CreatedWebhook,
   CaptchaPatch,
+  DeliveryConnector,
   EmailTemplate,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
   Member,
+  MessageTemplate,
   Organization,
   OrganizationEmailDomain,
   OrganizationInvitation,
@@ -87,17 +90,24 @@ import type {
   SignInCopy,
   SignInExperience,
   SsoConnector,
+  Tenant,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateDeliveryConnectorRequest,
   UpdateEmailTemplateRequest,
+  UpdateMessageTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateRateLimitsRequest,
   UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
+  UpdateTenantRequest,
+  UpdateTenantRoleRequest,
+  UpdateUsageRequest,
   UpdateWebhookRequest,
+  Usage,
   Webhook,
   WebhookDelivery,
   WebhookSecret,
@@ -169,6 +179,35 @@ class MockStore {
   private emailDomains: SeededEmailDomain[] = seedEmailDomains();
   private invitations: SeededOrgInvitation[] = seedOrgInvitations();
   private tenantRoles: TenantRole[] = seedTenantRoles();
+  /** The tenant lifecycle state the console can archive/reactivate. */
+  private tenantState: Tenant["state"] = "active";
+  private usageQuota: number | null = null;
+  private usageLogins = 3;
+  private deliveryConnectors: Record<"email" | "sms", DeliveryConnector> = {
+    email: {
+      channel: "email",
+      configured: false,
+      provider: null,
+      endpoint: null,
+      from_address: null,
+      from_name: null,
+      secret_set: false,
+      enabled: false,
+      updated_at: null,
+    },
+    sms: {
+      channel: "sms",
+      configured: false,
+      provider: null,
+      endpoint: null,
+      from_address: null,
+      from_name: null,
+      secret_set: false,
+      enabled: false,
+      updated_at: null,
+    },
+  };
+  private messageTemplates: MessageTemplate[] = [];
   /** account id → the tenant role ids it holds. A role may be held by many accounts. */
   private accountRoles = new Map<string, Set<string>>();
   /** account id → its lowercase sign-in username, when one is set. */
@@ -196,6 +235,33 @@ class MockStore {
     this.seedMemberRoles();
     this.seedAccountRoles();
     this.seedAccountSecurity();
+    this.seedMessageTemplates();
+  }
+
+  /** The mock's message catalogue: the English email rows plus one SMS verification purpose. */
+  private seedMessageTemplates(): void {
+    for (const template of this.emailTemplates) {
+      this.messageTemplates.push({
+        purpose: template.purpose,
+        channel: "email",
+        locale: "en",
+        subject: template.subject,
+        body: template.body,
+        variables: [...template.variables],
+        customized: template.customized,
+        updated_at: template.updated_at,
+      });
+    }
+    this.messageTemplates.push({
+      purpose: "sms_verification",
+      channel: "sms",
+      locale: "en",
+      subject: null,
+      body: "Your {{tenant}} code is {{code}}.",
+      variables: ["tenant", "code", "expires_in"],
+      customized: false,
+      updated_at: null,
+    });
   }
 
   /**
@@ -269,7 +335,74 @@ class MockStore {
       email: admin.email,
       tenant: TENANT,
       orgs: [{ slug: DEFAULT_ORG, role: "owner" }],
+      management: "full",
+      roles: this.tenantRoles
+        .filter((role) => this.accountRoles.get(admin.id)?.has(role.id) === true)
+        .map((role) => ({ id: role.id, name: role.name, permissions: [...role.permissions] })),
+      is_tenant_admin: true,
     };
+  }
+
+  getTenant(): Tenant {
+    return {
+      id: `ten_${TENANT}`,
+      slug: TENANT,
+      state: this.tenantState,
+      issuer: `http://localhost:8080/t/${TENANT}`,
+    };
+  }
+
+  async updateTenant(body: UpdateTenantRequest): Promise<Tenant> {
+    if (body.state !== "active" && body.state !== "archived") {
+      throw new ApiError("state must be active or archived", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    if (this.tenantState !== body.state) {
+      const action = body.state === "archived" ? "tenant.archived" : "tenant.reactivated";
+      const from = this.tenantState;
+      this.tenantState = body.state;
+      await this.append({
+        action,
+        actor: this.session().account_id,
+        subjectType: "tenant",
+        subjectId: TENANT,
+        decision: "allow",
+        payload: { from, to: body.state },
+      });
+    }
+    return this.getTenant();
+  }
+
+  getUsage(): Usage {
+    const total = this.accounts.length;
+    return {
+      users: {
+        total,
+        quota: this.usageQuota,
+        remaining: this.usageQuota === null ? null : Math.max(this.usageQuota - total, 0),
+        enforcement: "reject",
+      },
+      daily: {
+        date: new Date().toISOString().slice(0, 10),
+        active_accounts: Math.min(total, 3),
+        logins: this.usageLogins,
+        timezone: "UTC",
+      },
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  updateUsage(body: UpdateUsageRequest): Usage {
+    if (body.max_accounts !== null && (!Number.isInteger(body.max_accounts) || body.max_accounts < 0)) {
+      throw new ApiError("max_accounts must be a non-negative integer or null", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    this.usageQuota = body.max_accounts;
+    return this.getUsage();
   }
 
   listOrganizations(): Page<Organization> {
@@ -857,6 +990,46 @@ class MockStore {
     };
   }
 
+  async deleteAccount(accountId: string, confirm?: string): Promise<AccountDeletion> {
+    parseAccountId(accountId);
+    const account = this.accounts.find((candidate) => candidate.id === accountId);
+    if (!account) {
+      throw new ApiError("account not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    const sessions = this.sessions.filter((session) => session.account_id === accountId).length;
+    const result: AccountDeletion = {
+      account_id: account.id,
+      email: account.email,
+      state: account.state,
+      sessions,
+      refresh_tokens: sessions * 2,
+    };
+    if (confirm === undefined) {
+      return { ...result, dry_run: true, confirmation: `repeat DELETE with ?confirm=${account.email}` };
+    }
+    if (confirm.trim().toLowerCase() !== account.email.toLowerCase()) {
+      throw new ApiError("the confirmation does not name this account", {
+        status: 400,
+        code: "MONACA_CONFIRMATION_REQUIRED",
+      });
+    }
+    this.accounts = this.accounts.filter((candidate) => candidate.id !== accountId);
+    this.sessions = this.sessions.filter((session) => session.account_id !== accountId);
+    this.members = this.members.filter((member) => member.account_id !== accountId);
+    this.accountRoles.delete(accountId);
+    this.accountUsernames.delete(accountId);
+    this.accountSecurity.delete(accountId);
+    await this.append({
+      action: "account.deleted",
+      actor: this.session().account_id,
+      subjectType: "account",
+      subjectId: accountId,
+      decision: "allow",
+      payload: { email: account.email },
+    });
+    return result;
+  }
+
   listTenantRoles(): Page<TenantRole> {
     // Ordered by name, as `tenant.roles` is, so a new role lands where a reader looks for it.
     const items = [...this.tenantRoles]
@@ -897,6 +1070,31 @@ class MockStore {
       subjectId: TENANT,
       decision: "allow",
       payload: { name: role.name },
+    });
+    return cloneTenantRole(role);
+  }
+
+  async updateTenantRole(roleId: string, body: UpdateTenantRoleRequest): Promise<TenantRole> {
+    parseRoleId(roleId);
+    const role = this.tenantRoles.find((candidate) => candidate.id === roleId);
+    if (!role) {
+      throw new ApiError("role not found", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    if (body.name === undefined && body.description === undefined && body.permissions === undefined) {
+      throw new ApiError("nothing to update", { status: 400, code: "MONACA_INVALID_REQUEST" });
+    }
+    const before = cloneTenantRole(role);
+    if (body.name !== undefined) role.name = body.name.trim();
+    if (body.description !== undefined) role.description = body.description.trim();
+    if (body.permissions !== undefined) role.permissions = [...new Set(body.permissions)];
+    role.updated_at = new Date().toISOString();
+    await this.append({
+      action: "role.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { id: role.id, from: before, to: cloneTenantRole(role) },
     });
     return cloneTenantRole(role);
   }
@@ -1264,6 +1462,66 @@ class MockStore {
       },
     });
     return cloneConnector(updated);
+  }
+
+  getDeliveryConnector(channel: "email" | "sms"): DeliveryConnector {
+    return { ...this.deliveryConnectors[channel] };
+  }
+
+  async updateDeliveryConnector(
+    channel: "email" | "sms",
+    body: UpdateDeliveryConnectorRequest,
+  ): Promise<DeliveryConnector> {
+    if (body.provider.trim() === "" || body.endpoint.trim() === "" || body.from_address.trim() === "") {
+      throw new ApiError("provider, endpoint and from_address are required", {
+        status: 400,
+        code: "MONACA_INVALID_REQUEST",
+      });
+    }
+    const current = this.deliveryConnectors[channel];
+    const next: DeliveryConnector = {
+      channel,
+      configured: true,
+      provider: body.provider.trim(),
+      endpoint: body.endpoint.trim(),
+      from_address: body.from_address.trim(),
+      from_name: body.from_name?.trim() || null,
+      secret_set: body.secret === undefined ? current.secret_set : body.secret.trim() !== "",
+      enabled: body.enabled ?? true,
+      updated_at: new Date().toISOString(),
+    };
+    this.deliveryConnectors[channel] = next;
+    await this.append({
+      action: channel === "email" ? "email_connector.updated" : "sms_connector.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { channel, provider: next.provider, enabled: next.enabled },
+    });
+    return { ...next };
+  }
+
+  async deleteDeliveryConnector(channel: "email" | "sms"): Promise<void> {
+    this.deliveryConnectors[channel] = {
+      channel,
+      configured: false,
+      provider: null,
+      endpoint: null,
+      from_address: null,
+      from_name: null,
+      secret_set: false,
+      enabled: false,
+      updated_at: null,
+    };
+    await this.append({
+      action: channel === "email" ? "email_connector.deleted" : "sms_connector.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { channel },
+    });
   }
 
   async deleteConnector(connectorId: string): Promise<void> {
@@ -1968,6 +2226,82 @@ class MockStore {
       payload: { purpose, subject, body: copy },
     });
     return copyEmailTemplate(template);
+  }
+
+  listMessageTemplates(channel?: "email" | "sms"): Page<MessageTemplate> {
+    const items = [...this.messageTemplates]
+      .filter((row) => channel === undefined || row.channel === channel)
+      .sort(
+        (left, right) =>
+          left.purpose.localeCompare(right.purpose) || left.locale.localeCompare(right.locale),
+      )
+      .map(cloneMessageTemplate);
+    return { items, next: null };
+  }
+
+  async updateMessageTemplate(
+    purpose: string,
+    locale: string,
+    body: UpdateMessageTemplateRequest,
+  ): Promise<MessageTemplate> {
+    const template = this.messageTemplates.find(
+      (row) => row.purpose === purpose && row.locale === locale,
+    );
+    if (!template) {
+      throw new ApiError("unknown message template", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    template.subject = body.subject;
+    template.body = body.body;
+    template.customized = true;
+    template.updated_at = new Date().toISOString();
+    await this.append({
+      action: "message_template.updated",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "info",
+      payload: { purpose, locale, subject: body.subject, body: body.body },
+    });
+    return cloneMessageTemplate(template);
+  }
+
+  async deleteMessageTemplate(purpose: string, locale: string): Promise<void> {
+    const template = this.messageTemplates.find(
+      (row) => row.purpose === purpose && row.locale === locale,
+    );
+    if (!template) {
+      throw new ApiError("unknown message template", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    template.customized = false;
+    template.updated_at = null;
+    await this.append({
+      action: "message_template.deleted",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { purpose, locale },
+    });
+  }
+
+  async restoreMessageTemplate(purpose: string, locale: string): Promise<MessageTemplate> {
+    const template = this.messageTemplates.find(
+      (row) => row.purpose === purpose && row.locale === locale,
+    );
+    if (!template) {
+      throw new ApiError("unknown message template", { status: 404, code: "MONACA_NOT_FOUND" });
+    }
+    template.customized = false;
+    template.updated_at = null;
+    await this.append({
+      action: "message_template.restored",
+      actor: this.session().account_id,
+      subjectType: "tenant",
+      subjectId: TENANT,
+      decision: "allow",
+      payload: { purpose, locale },
+    });
+    return cloneMessageTemplate(template);
   }
 
   async resetEmailTemplate(purpose: string): Promise<void> {
@@ -2987,6 +3321,10 @@ function copyEmailTemplate(template: EmailTemplate): EmailTemplate {
   return { ...template, variables: [...template.variables] };
 }
 
+function cloneMessageTemplate(template: MessageTemplate): MessageTemplate {
+  return { ...template, variables: [...template.variables] };
+}
+
 function cloneAccountSecurity(security: AccountSecurity): AccountSecurity {
   return {
     ...security,
@@ -3191,6 +3529,22 @@ export const mockApi: MonacaApi = {
     await delay();
     return store.session();
   },
+  async getTenant() {
+    await delay();
+    return store.getTenant();
+  },
+  async updateTenant(body) {
+    await delay();
+    return store.updateTenant(body);
+  },
+  async getUsage() {
+    await delay();
+    return store.getUsage();
+  },
+  async updateUsage(body) {
+    await delay();
+    return store.updateUsage(body);
+  },
   async listOrganizations() {
     await delay();
     return store.listOrganizations();
@@ -3255,6 +3609,10 @@ export const mockApi: MonacaApi = {
     await delay();
     return store.updateAccount(accountId, body);
   },
+  async deleteAccount(accountId, confirm) {
+    await delay();
+    return store.deleteAccount(accountId, confirm);
+  },
   async listTenantRoles() {
     await delay();
     return store.listTenantRoles();
@@ -3262,6 +3620,10 @@ export const mockApi: MonacaApi = {
   async createTenantRole(body) {
     await delay();
     return store.createTenantRole(body);
+  },
+  async updateTenantRole(roleId, body) {
+    await delay();
+    return store.updateTenantRole(roleId, body);
   },
   async deleteTenantRole(roleId) {
     await delay();
@@ -3315,6 +3677,18 @@ export const mockApi: MonacaApi = {
     await delay();
     return store.deleteConnector(connectorId);
   },
+  async getDeliveryConnector(channel) {
+    await delay();
+    return store.getDeliveryConnector(channel);
+  },
+  async updateDeliveryConnector(channel, body) {
+    await delay();
+    return store.updateDeliveryConnector(channel, body);
+  },
+  async deleteDeliveryConnector(channel) {
+    await delay();
+    return store.deleteDeliveryConnector(channel);
+  },
   async listSsoConnectors() {
     await delay();
     return store.listSsoConnectors();
@@ -3362,6 +3736,22 @@ export const mockApi: MonacaApi = {
   async resetEmailTemplate(purpose) {
     await delay();
     return store.resetEmailTemplate(purpose);
+  },
+  async listMessageTemplates(channel) {
+    await delay();
+    return store.listMessageTemplates(channel);
+  },
+  async updateMessageTemplate(purpose, locale, body) {
+    await delay();
+    return store.updateMessageTemplate(purpose, locale, body);
+  },
+  async deleteMessageTemplate(purpose, locale) {
+    await delay();
+    return store.deleteMessageTemplate(purpose, locale);
+  },
+  async restoreMessageTemplate(purpose, locale) {
+    await delay();
+    return store.restoreMessageTemplate(purpose, locale);
   },
   async listWebhooks() {
     await delay();

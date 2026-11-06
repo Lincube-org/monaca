@@ -38,7 +38,7 @@ pub enum Command {
     Audit(AuditArgs),
     /// Re-wrap sealed values under the current KEK (the second step of a rotation).
     Rewrap(RewrapArgs),
-    /// Create, suspend, resume or archive a tenant.
+    /// Create, suspend, resume, archive or demote a tenant administrator.
     Tenant(TenantArgs),
     /// Print generated contracts.
     Openapi(OpenapiArgs),
@@ -63,6 +63,8 @@ pub enum TenantCommand {
     Resume(TenantStateArgs),
     /// Stop serving a tenant and mark it archived; its data is retained.
     Archive(TenantStateArgs),
+    /// Clear `is_tenant_admin` on one account; the only off-API demotion path.
+    DemoteAdmin(TenantDemoteArgs),
 }
 
 /// `tenant create` options.
@@ -101,6 +103,20 @@ pub struct TenantStateArgs {
     #[arg(long)]
     pub slug: String,
     /// Print the transition without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `tenant demote-admin` options.
+#[derive(Debug, Args)]
+pub struct TenantDemoteArgs {
+    /// Tenant slug.
+    #[arg(long)]
+    pub slug: String,
+    /// The account whose owner override is cleared.
+    #[arg(long)]
+    pub email: String,
+    /// Print the plan without writing anything.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -274,6 +290,16 @@ mod tests {
             ],
             vec!["monaca-server", "tenant", "resume", "--slug", "life"],
             vec!["monaca-server", "tenant", "archive", "--slug", "life"],
+            vec![
+                "monaca-server",
+                "tenant",
+                "demote-admin",
+                "--slug",
+                "life",
+                "--email",
+                "admin@life.localhost",
+                "--dry-run",
+            ],
         ] {
             Cli::try_parse_from(args.clone())
                 .unwrap_or_else(|err| panic!("{args:?} should parse: {err}"));

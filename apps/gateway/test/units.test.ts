@@ -59,6 +59,9 @@ describe("SessionStore", () => {
       accountId: "acc_1",
       email: "a@b.c",
       orgs: [],
+      management: "full",
+      roles: [],
+      isTenantAdmin: true,
       tokens: { accessToken: "at", expiresAt: Date.now() + 60_000 },
     });
     expect(store.get(session.id)).toBeUndefined();
@@ -69,6 +72,9 @@ describe("SessionStore", () => {
       accountId: "acc_2",
       email: "d@e.f",
       orgs: [],
+      management: "read",
+      roles: [],
+      isTenantAdmin: false,
       tokens: { accessToken: "at", expiresAt: Date.now() + 60_000 },
     });
     expect(store.size).toBe(1);

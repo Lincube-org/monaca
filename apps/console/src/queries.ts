@@ -33,8 +33,10 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  DeliveryConnector,
   EmailTemplate,
   Grant,
+  MessageTemplate,
   ListAuditQuery,
   Member,
   Organization,
@@ -49,17 +51,24 @@ import type {
   SignInCopy,
   SignInExperience,
   SsoConnector,
+  Tenant,
   TenantRole,
   UpdateSignInCopyRequest,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateDeliveryConnectorRequest,
   UpdateEmailTemplateRequest,
+  UpdateMessageTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateRateLimitsRequest,
   UpdateSignInExperienceRequest,
+  UpdateTenantRequest,
+  UpdateTenantRoleRequest,
+  UpdateUsageRequest,
   UpdateWebhookRequest,
+  Usage,
   Webhook,
   WebhookDelivery,
   WebhookSecret,
@@ -93,6 +102,45 @@ export function useSession(): UseQueryReturnType<SessionInfo, Error> {
     queryFn: () => api.getSession(),
     staleTime: STALE.slow,
     retry: false,
+  });
+}
+
+export function useTenant(): UseQueryReturnType<Tenant, Error> {
+  return useQuery({
+    queryKey: queryKeys.tenant(),
+    queryFn: () => api.getTenant(),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useUpdateTenant() {
+  const client = useQueryClient();
+  return useMutation<Tenant, Error, UpdateTenantRequest>({
+    mutationFn: (body) => api.updateTenant(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.tenant() });
+      void client.invalidateQueries({ queryKey: queryKeys.session() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUsage(): UseQueryReturnType<Usage, Error> {
+  return useQuery({
+    queryKey: queryKeys.usage(),
+    queryFn: () => api.getUsage(),
+    staleTime: STALE.fast,
+  });
+}
+
+export function useUpdateUsage() {
+  const client = useQueryClient();
+  return useMutation<Usage, Error, UpdateUsageRequest>({
+    mutationFn: (body) => api.updateUsage(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.usage() });
+      invalidateTenantAudit(client);
+    },
   });
 }
 
@@ -335,6 +383,22 @@ export function useUpdateAccount() {
   });
 }
 
+export function useDeleteAccount() {
+  const client = useQueryClient();
+  return useMutation<
+    import("@/api/types").AccountDeletion,
+    Error,
+    { accountId: string; confirm?: string }
+  >({
+    mutationFn: ({ accountId, confirm }) => api.deleteAccount(accountId, confirm),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["accounts"], exact: false });
+      void client.invalidateQueries({ queryKey: queryKeys.usage() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
 /** The detail read for an edit form; disabled until a row names an account. */
 export function useAccount(
   accountId: MaybeRefOrGetter<string | null>,
@@ -359,6 +423,21 @@ export function useCreateTenantRole() {
   const client = useQueryClient();
   return useMutation<TenantRole, Error, CreateTenantRoleRequest>({
     mutationFn: (body) => api.createTenantRole(body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.tenantRoles() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useUpdateTenantRole() {
+  const client = useQueryClient();
+  return useMutation<
+    TenantRole,
+    Error,
+    { roleId: string; body: UpdateTenantRoleRequest }
+  >({
+    mutationFn: ({ roleId, body }) => api.updateTenantRole(roleId, body),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.tenantRoles() });
       invalidateTenantAudit(client);
@@ -630,6 +709,42 @@ export function useUpdateSignInCopy() {
  * The mail copy is a list, so every write refetches it: a reset also flips `customized` and the
  * `updated_at` the row shows, which a single-object write-back would only guess at.
  */
+export function useDeliveryConnector(
+  channel: "email" | "sms",
+): UseQueryReturnType<DeliveryConnector, Error> {
+  return useQuery({
+    queryKey: queryKeys.deliveryConnector(channel),
+    queryFn: () => api.getDeliveryConnector(channel),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useUpdateDeliveryConnector() {
+  const client = useQueryClient();
+  return useMutation<
+    DeliveryConnector,
+    Error,
+    { channel: "email" | "sms"; body: UpdateDeliveryConnectorRequest }
+  >({
+    mutationFn: ({ channel, body }) => api.updateDeliveryConnector(channel, body),
+    onSuccess: (_updated, { channel }) => {
+      void client.invalidateQueries({ queryKey: queryKeys.deliveryConnector(channel) });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteDeliveryConnector() {
+  const client = useQueryClient();
+  return useMutation<void, Error, "email" | "sms">({
+    mutationFn: (channel) => api.deleteDeliveryConnector(channel),
+    onSuccess: (_result, channel) => {
+      void client.invalidateQueries({ queryKey: queryKeys.deliveryConnector(channel) });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
 export function useEmailTemplates(): UseQueryReturnType<Page<EmailTemplate>, Error> {
   return useQuery({
     queryKey: queryKeys.emailTemplates(),
@@ -655,6 +770,54 @@ export function useResetEmailTemplate() {
     mutationFn: (purpose) => api.resetEmailTemplate(purpose),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.emailTemplates() });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useMessageTemplates(
+  channel?: MaybeRefOrGetter<"email" | "sms" | undefined>,
+): UseQueryReturnType<Page<MessageTemplate>, Error> {
+  const value = computed(() => (channel === undefined ? undefined : toValue(channel)));
+  return useQuery({
+    queryKey: computed(() => queryKeys.messageTemplates(value.value)),
+    queryFn: () => api.listMessageTemplates(value.value),
+    staleTime: STALE.slow,
+  });
+}
+
+export function useUpdateMessageTemplate() {
+  const client = useQueryClient();
+  return useMutation<
+    MessageTemplate,
+    Error,
+    { purpose: string; locale: string; body: UpdateMessageTemplateRequest }
+  >({
+    mutationFn: ({ purpose, locale, body }) => api.updateMessageTemplate(purpose, locale, body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["message-templates"], exact: false });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useDeleteMessageTemplate() {
+  const client = useQueryClient();
+  return useMutation<void, Error, { purpose: string; locale: string }>({
+    mutationFn: ({ purpose, locale }) => api.deleteMessageTemplate(purpose, locale),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["message-templates"], exact: false });
+      invalidateTenantAudit(client);
+    },
+  });
+}
+
+export function useRestoreMessageTemplate() {
+  const client = useQueryClient();
+  return useMutation<MessageTemplate, Error, { purpose: string; locale: string }>({
+    mutationFn: ({ purpose, locale }) => api.restoreMessageTemplate(purpose, locale),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["message-templates"], exact: false });
       invalidateTenantAudit(client);
     },
   });

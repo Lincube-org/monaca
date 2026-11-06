@@ -26,21 +26,29 @@ import type { TenantRole } from "@/api/types";
 import PageHeader from "@/components/PageHeader.vue";
 import QueryBoundary from "@/components/QueryBoundary.vue";
 import { t } from "@/i18n";
-import { useCreateTenantRole, useDeleteTenantRole, useTenantRoles } from "@/queries";
+import {
+  useCreateTenantRole,
+  useDeleteTenantRole,
+  useSession,
+  useTenantRoles,
+  useUpdateTenantRole,
+} from "@/queries";
 import { useUiStore } from "@/stores/ui";
 
 /**
  * Tenant roles — permission sets that apply in every organization (§6.2).
  *
  * The table is the definition only: who holds a role is managed from the Users page, because the
- * directory row is what carries an account's roles. A role is immutable after creation, so there is
- * no edit action — a changed permission set is a new role. Deleting one revokes its scopes on every
- * holder's next token, which the confirmation says rather than leaving to be discovered.
+ * directory row is what carries an account's roles. Editing replaces the permission set; deleting
+ * one drops every assignment and revokes its scopes on the holder's next request.
  */
 const ui = useUiStore();
+const session = useSession();
+const canAdmin = computed(() => session.data.value?.management === "full");
 
 const roles = useTenantRoles();
 const createRole = useCreateTenantRole();
+const updateRole = useUpdateTenantRole();
 const deleteRole = useDeleteTenantRole();
 
 const rows = computed(() => roles.data.value?.items ?? []);
@@ -74,6 +82,56 @@ function openCreate(): void {
   permissionsText.value = "";
   formError.value = null;
   createOpen.value = true;
+}
+
+// --- Edit ---------------------------------------------------------------------------------------
+
+const editOpen = ref(false);
+const editTarget = ref<TenantRole | null>(null);
+const editName = ref("");
+const editDescription = ref("");
+const editPermissions = ref("");
+const editError = ref<string | null>(null);
+
+function openEdit(role: TenantRole): void {
+  editTarget.value = role;
+  editName.value = role.name;
+  editDescription.value = role.description;
+  editPermissions.value = role.permissions.join(" ");
+  editError.value = null;
+  editOpen.value = true;
+}
+
+async function submitEdit(): Promise<void> {
+  const target = editTarget.value;
+  if (!target) return;
+  if (editName.value.trim().length === 0) {
+    editError.value = t("tenantRoles.invalidName");
+    return;
+  }
+  if (!permissionsLookValid.value) {
+    editError.value = t("tenantRoles.invalidPermissions");
+    return;
+  }
+  editError.value = null;
+  try {
+    await updateRole.mutateAsync({
+      roleId: target.id,
+      body: {
+        name: editName.value.trim(),
+        description: editDescription.value.trim(),
+        permissions: splitPermissions(editPermissions.value),
+      },
+    });
+    editOpen.value = false;
+    toast({
+      title: t("tenantRoles.updatedToast"),
+      description: t("tenantRoles.updatedDescription", { name: editName.value.trim() }),
+      variant: "success",
+    });
+  } catch (error) {
+    editError.value = describeError(error).title;
+  }
 }
 
 async function submit(): Promise<void> {
@@ -151,7 +209,7 @@ function formatDate(at: string): string {
           <RefreshCw :class="roles.isFetching.value ? 'animate-spin' : ''" />
           {{ t('common.refresh') }}
         </Button>
-        <Button variant="primary" size="sm" @click="openCreate">
+        <Button variant="primary" size="sm" :disabled="!canAdmin" @click="openCreate">
           <Plus />
           {{ t('tenantRoles.create') }}
         </Button>
@@ -200,12 +258,20 @@ function formatDate(at: string): string {
               {{ formatDate(role.created_at) }}
             </TableCell>
             <TableCell>
-              <div class="flex justify-end">
+              <div class="flex justify-end gap-1.5">
+                <Button
+                  variant="secondary"
+                  size="xs"
+                  :disabled="!canAdmin"
+                  @click="openEdit(role)"
+                >
+                  {{ t('common.edit') }}
+                </Button>
                 <Button
                   variant="secondary"
                   size="xs"
                   class="text-ink-muted hover:text-deny"
-                  :disabled="deleteRole.isPending.value"
+                  :disabled="!canAdmin || deleteRole.isPending.value"
                   @click="openDelete(role)"
                 >
                   {{ t('tenantRoles.delete') }}
@@ -267,6 +333,46 @@ function formatDate(at: string): string {
             <Button variant="ghost" type="button" @click="createOpen = false">{{ t('common.cancel') }}</Button>
             <Button variant="primary" type="submit" :disabled="createRole.isPending.value">
               {{ createRole.isPending.value ? t('common.saving') : t('tenantRoles.create') }}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="editOpen">
+      <DialogContent class="max-w-[460px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('tenantRoles.editTitle', { name: editTarget?.name ?? '' }) }}</DialogTitle>
+          <DialogDescription>{{ t('tenantRoles.createDescription') }}</DialogDescription>
+        </DialogHeader>
+
+        <form class="flex flex-col gap-3.5" @submit.prevent="submitEdit">
+          <div class="flex flex-col gap-1.5">
+            <Label for="tenant-role-edit-name">{{ t('tenantRoles.nameField') }}</Label>
+            <Input id="tenant-role-edit-name" v-model="editName" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="tenant-role-edit-description">{{ t('tenantRoles.descriptionField') }}</Label>
+            <Input id="tenant-role-edit-description" v-model="editDescription" autocomplete="off" />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="tenant-role-edit-permissions">{{ t('tenantRoles.permissionsField') }}</Label>
+            <Input
+              id="tenant-role-edit-permissions"
+              v-model="editPermissions"
+              :invalid="editPermissions.length > 0 && !permissionsLookValid"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p class="text-[11.5px] leading-snug text-ink-faint">
+              {{ t('tenantRoles.permissionsHint') }}
+            </p>
+          </div>
+          <p v-if="editError" class="text-[12.5px] text-deny">{{ editError }}</p>
+          <DialogFooter>
+            <Button variant="ghost" type="button" @click="editOpen = false">{{ t('common.cancel') }}</Button>
+            <Button variant="primary" type="submit" :disabled="!canAdmin || updateRole.isPending.value">
+              {{ updateRole.isPending.value ? t('common.saving') : t('common.save') }}
             </Button>
           </DialogFooter>
         </form>

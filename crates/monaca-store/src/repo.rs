@@ -1290,6 +1290,25 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Set or clear the owner override on one account. The management API never calls this: the
+    /// only route that clears `is_tenant_admin` is the `tenant demote-admin` CLI.
+    pub async fn set_tenant_admin(
+        &self,
+        tenant: &TenantRow,
+        account_id: AccountId,
+        is_admin: bool,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query(
+            "UPDATE tenant.accounts SET is_tenant_admin = $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(account_id.uuid())
+        .bind(is_admin)
+        .execute(&pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// The tenant's hosted sign-in switches. The migration seeds the row, so this never creates
     /// one; a missing row is a provisioning bug and surfaces as a database error.
     pub async fn sign_in_experience(

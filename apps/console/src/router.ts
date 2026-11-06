@@ -78,6 +78,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "Email templates" },
   },
   {
+    path: "/delivery",
+    name: "delivery",
+    component: () => import("@/pages/DeliveryPage.vue"),
+    meta: { title: "Delivery connectors" },
+  },
+  {
+    path: "/message-templates",
+    name: "message-templates",
+    component: () => import("@/pages/MessageTemplatesPage.vue"),
+    meta: { title: "Message templates" },
+  },
+  {
     path: "/connectors",
     name: "connectors",
     component: () => import("@/pages/ConnectorsPage.vue"),

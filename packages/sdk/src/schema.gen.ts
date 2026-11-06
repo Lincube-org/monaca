@@ -2843,6 +2843,23 @@ export interface paths {
         };
         trace?: never;
     };
+    "/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the signed-in account and its management tier */
+        get: operations["get_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/message-templates": {
         parameters: {
             query?: never;
@@ -4198,6 +4215,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tenant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the tenant lifecycle record */
+        get: operations["get_tenant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Archive or reactivate the tenant */
+        patch: operations["update_tenant"];
+        trace?: never;
+    };
     "/v1/usage": {
         parameters: {
             query?: never;
@@ -4679,6 +4714,32 @@ export interface components {
              */
             window_secs: number;
         };
+        /** @description A role as `/v1/me` reports it to its holder. */
+        MeRoleView: {
+            /** @description The `rol_…` id. */
+            id: string;
+            /** @description The role name carried by the id_token. */
+            name: string;
+            /** @description The permission scopes the role grants. */
+            permissions: string[];
+        };
+        /** @description `GET /v1/me` — the signed-in account and its current management tier. */
+        MeView: {
+            /** @description The `acc_…` id. */
+            account_id: string;
+            /** @description Display name. */
+            display_name: string;
+            /** @description Primary email. */
+            email: string;
+            /** @description The owner override, set only by bootstrap or the CLI. */
+            is_tenant_admin: boolean;
+            /** @description `none`, `read`, `write` or `full`. */
+            management: string;
+            /** @description The tenant roles the account holds. */
+            roles: components["schemas"]["MeRoleView"][];
+            /** @description `active` or `disabled`. */
+            state: string;
+        };
         /** @description `GET /v1/orgs`. */
         OrgList: {
             /** @description The orgs. */
@@ -4861,6 +4922,17 @@ export interface components {
             /** @description The browser user agent, or `null`. */
             user_agent?: string | null;
         };
+        /** @description `GET /v1/tenant` — the tenant's own lifecycle record. */
+        TenantView: {
+            /** @description The `ten_…` id. */
+            id: string;
+            /** @description The issuer prefix, `{base}/t/{slug}`. */
+            issuer: string;
+            /** @description The URL slug. */
+            slug: string;
+            /** @description `active`, `suspended` or `archived`. */
+            state: string;
+        };
         /**
          * @description The body of `PATCH /v1/accounts/{id}`.
          *
@@ -4920,6 +4992,11 @@ export interface components {
             name?: string | null;
             /** @description The replacement permission set; an empty array clears every permission. */
             permissions?: string[] | null;
+        };
+        /** @description The body of `PATCH /v1/tenant`; only the archive/reactivate pair is accepted. */
+        UpdateTenantBody: {
+            /** @description `archived` from active, or `active` from archived. */
+            state: string;
         };
         /** @description The `/version` body. */
         VersionResponse: {
@@ -5459,6 +5536,33 @@ export interface operations {
             };
         };
     };
+    get_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The account and its current roles. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeView"];
+                };
+            };
+            /** @description An automation client has no account identity. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_orgs: {
         parameters: {
             query?: never;
@@ -5723,6 +5827,64 @@ export interface operations {
             };
             /** @description No such role. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantView"];
+                };
+            };
+        };
+    };
+    update_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTenantBody"];
+            };
+        };
+        responses: {
+            /** @description The updated tenant record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantView"];
+                };
+            };
+            /** @description A state outside active/archived or a transition the API does not offer. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller does not hold full management. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

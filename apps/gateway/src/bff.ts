@@ -21,7 +21,9 @@ import {
   readCookie,
   serializeSessionCookie,
   type BffOrg,
+  type BffRole,
   type BffSession,
+  type ManagementTier,
   type SessionStore,
 } from "./sessions.ts";
 
@@ -128,6 +130,57 @@ async function lookupOwnOrgs(deps: BffDeps, accessToken: string, accountId: stri
   }
 }
 
+interface MeResponse {
+  management?: unknown;
+  roles?: unknown;
+  is_tenant_admin?: unknown;
+}
+
+/**
+ * The signed-in account's current management tier and roles (§6.2 `/v1/me`).
+ *
+ * The console uses this to hide write controls a read-only operator cannot use. A failed lookup
+ * falls back to the most restrictive tier: the server still rejects every mutation, so a stale
+ * gateway must not pretend the caller can write.
+ */
+async function lookupMe(
+  deps: BffDeps,
+  accessToken: string,
+): Promise<{ management: ManagementTier; roles: BffRole[]; isTenantAdmin: boolean }> {
+  const { config } = deps;
+  try {
+    const response = await fetch(new URL("/v1/me", config.serverUrl), {
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      deps.logger.warn("bff: /v1/me lookup failed", { status: response.status });
+      return { management: "none", roles: [], isTenantAdmin: false };
+    }
+    const body = (await response.json()) as MeResponse;
+    const management: ManagementTier =
+      body.management === "read" || body.management === "write" || body.management === "full"
+        ? body.management
+        : "none";
+    const roles = Array.isArray(body.roles)
+      ? (body.roles as BffRole[]).filter(
+          (role) =>
+            typeof role === "object" &&
+            role !== null &&
+            typeof role.id === "string" &&
+            typeof role.name === "string" &&
+            Array.isArray(role.permissions),
+        )
+      : [];
+    return { management, roles, isTenantAdmin: body.is_tenant_admin === true };
+  } catch (error) {
+    deps.logger.warn("bff: /v1/me lookup error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { management: "none", roles: [], isTenantAdmin: false };
+  }
+}
+
 function currentSession(c: Context, deps: BffDeps): BffSession | undefined {
   const id = readCookie(c.req.header("cookie"), deps.config.sessionCookieName);
   return deps.sessions.get(id);
@@ -229,11 +282,15 @@ export function registerBffRoutes(app: Hono, deps: BffDeps): void {
     }
 
     const orgs = await lookupOwnOrgs(deps, exchanged.body.access_token, identity.accountId);
+    const me = await lookupMe(deps, exchanged.body.access_token);
     const session = sessions.createSession({
       tenant: config.tenant,
       accountId: identity.accountId,
       email: identity.email,
       orgs,
+      management: me.management,
+      roles: me.roles,
+      isTenantAdmin: me.isTenantAdmin,
       tokens: {
         accessToken: exchanged.body.access_token,
         refreshToken: exchanged.body.refresh_token,
@@ -275,6 +332,9 @@ export function registerBffRoutes(app: Hono, deps: BffDeps): void {
     email: session?.email ?? "",
     tenant: config.tenant,
     orgs: session?.orgs ?? [],
+    management: session?.management ?? "none",
+    roles: session?.roles ?? [],
+    is_tenant_admin: session?.isTenantAdmin ?? false,
   });
 
   app.get("/bff/session", (c) => c.json(sessionPayload(currentSession(c, deps))));

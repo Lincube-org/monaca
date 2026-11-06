@@ -48,6 +48,8 @@ pub struct AdminPrincipal {
     pub account_id: Option<AccountId>,
     /// The uuid written to `created_by`: the account's, or the client row's.
     pub actor_uuid: Uuid,
+    /// The strongest management tier the caller currently holds.
+    pub access: ManagementAccess,
 }
 
 impl AdminPrincipal {
@@ -256,6 +258,16 @@ impl ManagementAccess {
             Self::Full => "monaca:admin",
         }
     }
+
+    /// The wire name `/v1/me` reports.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Full => "full",
+        }
+    }
 }
 
 /// Resolve and verify the caller's bearer token, then require a management tier.
@@ -263,6 +275,7 @@ async fn authorize_management(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     required: ManagementAccess,
+    allow_archived: bool,
 ) -> Result<(TenantRow, AdminPrincipal), ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
@@ -282,7 +295,7 @@ async fn authorize_management(
     let tenant = state.store.tenant_by_id(tid.uuid()).await?;
     // A suspended or archived tenant keeps its data but must not answer `/v1`, even with a token
     // minted before the state changed.
-    if !tenant.is_active() {
+    if !tenant.is_active() && !(allow_archived && tenant.state == "archived") {
         return Err(match tenant.state.as_str() {
             "suspended" => ApiError::problem(
                 kinds::TENANT_SUSPENDED,
@@ -376,6 +389,7 @@ async fn authorize_management(
                 subject: sub,
                 account_id: Some(account_id),
                 actor_uuid: account_id.uuid(),
+                access,
             },
         ));
     }
@@ -428,6 +442,7 @@ async fn authorize_management(
             subject: sub,
             account_id: None,
             actor_uuid: client.id,
+            access: ManagementAccess::Full,
         },
     ))
 }
@@ -437,7 +452,7 @@ pub async fn authorize_admin(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<(TenantRow, AdminPrincipal), ApiError> {
-    authorize_management(state, headers, ManagementAccess::Write).await
+    authorize_management(state, headers, ManagementAccess::Write, false).await
 }
 
 /// Require read access: `GET` on the management API.
@@ -445,7 +460,7 @@ pub async fn authorize_admin_read(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<(TenantRow, AdminPrincipal), ApiError> {
-    authorize_management(state, headers, ManagementAccess::Read).await
+    authorize_management(state, headers, ManagementAccess::Read, false).await
 }
 
 /// Require full access: role administration, which would otherwise let a write-tier caller
@@ -454,7 +469,221 @@ pub async fn authorize_admin_full(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<(TenantRow, AdminPrincipal), ApiError> {
-    authorize_management(state, headers, ManagementAccess::Full).await
+    authorize_management(state, headers, ManagementAccess::Full, false).await
+}
+
+/// Any authenticated account, even one whose roles grant no management tier. Used by `/v1/me`.
+pub async fn authorize_self(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(TenantRow, AdminPrincipal), ApiError> {
+    authorize_management(state, headers, ManagementAccess::None, false).await
+}
+
+/// Read a tenant's own lifecycle record while it is archived, so the console can explain the
+/// state and offer reactivation.
+pub async fn authorize_tenant_read(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(TenantRow, AdminPrincipal), ApiError> {
+    authorize_management(state, headers, ManagementAccess::Read, true).await
+}
+
+/// Reactivate an archived tenant: the only management operation that works while archived.
+pub async fn authorize_tenant_full(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(TenantRow, AdminPrincipal), ApiError> {
+    authorize_management(state, headers, ManagementAccess::Full, true).await
+}
+
+/// A role as `/v1/me` reports it to its holder.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MeRoleView {
+    /// The `rol_…` id.
+    pub id: String,
+    /// The role name carried by the id_token.
+    pub name: String,
+    /// The permission scopes the role grants.
+    pub permissions: Vec<String>,
+}
+
+/// `GET /v1/me` — the signed-in account and its current management tier.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MeView {
+    /// The `acc_…` id.
+    pub account_id: String,
+    /// Primary email.
+    pub email: String,
+    /// Display name.
+    pub display_name: String,
+    /// `active` or `disabled`.
+    pub state: String,
+    /// The owner override, set only by bootstrap or the CLI.
+    pub is_tenant_admin: bool,
+    /// `none`, `read`, `write` or `full`.
+    pub management: &'static str,
+    /// The tenant roles the account holds.
+    pub roles: Vec<MeRoleView>,
+}
+
+/// `GET /v1/tenant` — the tenant's own lifecycle record.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TenantView {
+    /// The `ten_…` id.
+    pub id: String,
+    /// The URL slug.
+    pub slug: String,
+    /// `active`, `suspended` or `archived`.
+    pub state: String,
+    /// The issuer prefix, `{base}/t/{slug}`.
+    pub issuer: String,
+}
+
+/// The body of `PATCH /v1/tenant`; only the archive/reactivate pair is accepted.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateTenantBody {
+    /// `archived` from active, or `active` from archived.
+    pub state: String,
+}
+
+fn tenant_view(tenant: &TenantRow) -> TenantView {
+    TenantView {
+        id: tenant.tenant_id().to_typed_string(),
+        slug: tenant.slug.clone(),
+        state: tenant.state.clone(),
+        issuer: tenant.issuer.clone(),
+    }
+}
+
+/// `GET /v1/me` — the account's identity, roles and effective management tier.
+#[utoipa::path(
+    get,
+    path = "/v1/me",
+    tag = "management",
+    summary = "Read the signed-in account and its management tier",
+    responses(
+        (status = 200, description = "The account and its current roles.", body = MeView),
+        (status = 403, description = "An automation client has no account identity.")
+    )
+)]
+pub async fn get_me(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<MeView>, ApiError> {
+    let (tenant, admin) = authorize_self(&state, &headers).await?;
+    let Some(account_id) = admin.account_id else {
+        return Err(ApiError::problem(
+            kinds::INSUFFICIENT_SCOPE,
+            "an automation client has no /v1/me",
+        ));
+    };
+    let account = state
+        .store
+        .account_by_id(&tenant, account_id)
+        .await?
+        .ok_or_else(|| ApiError::problem(kinds::UNAUTHORIZED, "the account is gone"))?;
+    let roles = state.store.account_roles(&tenant, account_id).await?;
+    Ok(Json(MeView {
+        account_id: account_id.to_typed_string(),
+        email: account.primary_email.clone(),
+        display_name: account.display_name.clone(),
+        state: account.state.clone(),
+        is_tenant_admin: account.is_tenant_admin,
+        management: admin.access.as_str(),
+        roles: roles
+            .into_iter()
+            .map(|role| MeRoleView {
+                id: role.role_id().to_typed_string(),
+                name: role.name,
+                permissions: role.permissions,
+            })
+            .collect(),
+    }))
+}
+
+/// `GET /v1/tenant` — the tenant's own lifecycle record.
+#[utoipa::path(
+    get,
+    path = "/v1/tenant",
+    tag = "management",
+    summary = "Read the tenant lifecycle record",
+    responses((status = 200, description = "The tenant record.", body = TenantView))
+)]
+pub async fn get_tenant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<TenantView>, ApiError> {
+    let (tenant, _) = authorize_tenant_read(&state, &headers).await?;
+    Ok(Json(tenant_view(&tenant)))
+}
+
+/// `PATCH /v1/tenant` — archive an active tenant, or reactivate an archived one.
+#[utoipa::path(
+    patch,
+    path = "/v1/tenant",
+    tag = "management",
+    summary = "Archive or reactivate the tenant",
+    request_body = UpdateTenantBody,
+    responses(
+        (status = 200, description = "The updated tenant record.", body = TenantView),
+        (status = 400, description = "A state outside active/archived or a transition the API does not offer."),
+        (status = 403, description = "The caller does not hold full management.")
+    )
+)]
+pub async fn update_tenant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateTenantBody>,
+) -> Result<Json<TenantView>, ApiError> {
+    let (tenant, admin) = authorize_tenant_full(&state, &headers).await?;
+    let target = body.state.trim();
+    if !matches!(target, "active" | "archived") {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            "state must be `active` or `archived`; `suspended` is a platform CLI action",
+        ));
+    }
+    if tenant.state == target {
+        return Ok(Json(tenant_view(&tenant)));
+    }
+    let allowed = matches!(
+        (tenant.state.as_str(), target),
+        ("active", "archived") | ("archived", "active")
+    );
+    if !allowed {
+        return Err(ApiError::problem(
+            kinds::INVALID_REQUEST,
+            format!(
+                "tenant cannot move from `{}` to `{target}` through the management API",
+                tenant.state
+            ),
+        ));
+    }
+    let updated = state.store.set_tenant_state(&tenant.slug, target).await?;
+    let action = if target == "archived" {
+        "tenant.archived"
+    } else {
+        "tenant.reactivated"
+    };
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: action.into(),
+        actor_chain: vec![admin.actor()],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Tenant,
+            id: Some(tenant.tenant_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({ "from": &tenant.state, "to": &updated.state }),
+    };
+    if let Err(err) = state.audit_tenant(&updated, &event).await {
+        tracing::warn!(%err, "could not append {action} audit event");
+    }
+    Ok(Json(tenant_view(&updated)))
 }
 
 /// The query string of `GET /v1/accounts`.

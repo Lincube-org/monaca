@@ -1,5 +1,6 @@
 import type {
   AccountWithRoles,
+  AccountDeletion,
   AccountDetail,
   AccountSession,
   AccountSecurity,
@@ -28,11 +29,13 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  DeliveryConnector,
   EmailTemplate,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
   Member,
+  MessageTemplate,
   Organization,
   OrganizationEmailDomain,
   OrganizationInvitation,
@@ -46,17 +49,24 @@ import type {
   SignInCopy,
   SignInExperience,
   SsoConnector,
+  Tenant,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateDeliveryConnectorRequest,
   UpdateEmailTemplateRequest,
+  UpdateMessageTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateRateLimitsRequest,
   UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
+  UpdateTenantRequest,
+  UpdateTenantRoleRequest,
+  UpdateUsageRequest,
   UpdateWebhookRequest,
+  Usage,
   Webhook,
   WebhookDelivery,
   WebhookSecret,
@@ -76,6 +86,14 @@ import type {
  */
 export interface MonacaApi {
   getSession(): Promise<SessionInfo>;
+
+  /** The tenant's own lifecycle record and the archive/reactivate pair. */
+  getTenant(): Promise<Tenant>;
+  updateTenant(body: UpdateTenantRequest): Promise<Tenant>;
+
+  /** The account counter, today's activity and the reject-semantics quota. */
+  getUsage(): Promise<Usage>;
+  updateUsage(body: UpdateUsageRequest): Promise<Usage>;
 
   /**
    * Organizations are tenant-level: unlike the pages below they are not scoped to the org switcher,
@@ -110,6 +128,8 @@ export interface MonacaApi {
   /** The detail read, which also names the sign-in username for the edit form. */
   getAccount(accountId: string): Promise<AccountDetail>;
   updateAccount(accountId: string, body: UpdateAccountRequest): Promise<AccountDetail>;
+  /** `confirm` absent asks for the dry-run counts; the real call repeats the account's email. */
+  deleteAccount(accountId: string, confirm?: string): Promise<AccountDeletion>;
 
   /**
    * Tenant roles are what an account holds everywhere; organization roles are per-org and live
@@ -118,6 +138,7 @@ export interface MonacaApi {
    */
   listTenantRoles(): Promise<Page<TenantRole>>;
   createTenantRole(body: CreateTenantRoleRequest): Promise<TenantRole>;
+  updateTenantRole(roleId: string, body: UpdateTenantRoleRequest): Promise<TenantRole>;
   deleteTenantRole(roleId: string): Promise<void>;
   assignAccountRole(accountId: string, roleId: string): Promise<void>;
   unassignAccountRole(accountId: string, roleId: string): Promise<void>;
@@ -143,6 +164,14 @@ export interface MonacaApi {
   createConnector(body: CreateConnectorRequest): Promise<Connector>;
   updateConnector(connectorId: string, body: UpdateConnectorRequest): Promise<Connector>;
   deleteConnector(connectorId: string): Promise<void>;
+
+  /** The email/SMS delivery route; one row per channel, secret never returned. */
+  getDeliveryConnector(channel: "email" | "sms"): Promise<DeliveryConnector>;
+  updateDeliveryConnector(
+    channel: "email" | "sms",
+    body: UpdateDeliveryConnectorRequest,
+  ): Promise<DeliveryConnector>;
+  deleteDeliveryConnector(channel: "email" | "sms"): Promise<void>;
 
   /**
    * Enterprise SSO identity providers, tenant-level like social connectors. A connector owns the
@@ -181,6 +210,16 @@ export interface MonacaApi {
   listEmailTemplates(): Promise<Page<EmailTemplate>>;
   updateEmailTemplate(purpose: string, body: UpdateEmailTemplateRequest): Promise<EmailTemplate>;
   resetEmailTemplate(purpose: string): Promise<void>;
+
+  /** Every purpose and locale with its effective copy; editing creates an override. */
+  listMessageTemplates(channel?: "email" | "sms"): Promise<Page<MessageTemplate>>;
+  updateMessageTemplate(
+    purpose: string,
+    locale: string,
+    body: UpdateMessageTemplateRequest,
+  ): Promise<MessageTemplate>;
+  deleteMessageTemplate(purpose: string, locale: string): Promise<void>;
+  restoreMessageTemplate(purpose: string, locale: string): Promise<MessageTemplate>;
 
   /**
    * Outbound webhook subscriptions, tenant-level like the sign-in switches: one endpoint may

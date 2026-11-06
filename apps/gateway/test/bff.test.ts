@@ -199,6 +199,9 @@ describe("BFF session and API rewrite", () => {
         email: "admin@demo.localhost",
         tenant: "demo",
         orgs: [{ slug: "acme", role: "owner" }],
+        management: "none",
+        roles: [],
+        is_tenant_admin: false,
       });
     }
 
@@ -209,6 +212,9 @@ describe("BFF session and API rewrite", () => {
       email: "",
       tenant: "demo",
       orgs: [],
+      management: "none",
+      roles: [],
+      is_tenant_admin: false,
     });
   });
 

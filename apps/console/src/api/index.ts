@@ -5,16 +5,12 @@ import { mockApi } from "./mock";
 /**
  * Which implementation the pages get.
  *
- * `VITE_USE_MOCKS` defaults to **on** (stage 0): the console is fully usable before a server or a
- * gateway exists, which is the only way the UI work can proceed in parallel with the Rust work.
- * Setting it to `false` binds the BFF client; nothing else in the app changes.
- *
- * The default is deliberately on rather than off. An unset variable in a fresh clone should give a
- * working console, not a dead one — a missing env var is not a security boundary, and the mode is
- * surfaced in the UI (see the shell's "Mock data" notice) so it can never be mistaken for real data.
+ * The console is an operations tool now, so the default is the **real** BFF client. Setting
+ * `VITE_USE_MOCKS=true` keeps the fixture backend for UI work without a server; nothing else in
+ * the app changes. An unset variable must not silently show invented data to an operator.
  */
 export const USE_MOCKS: boolean =
-  (import.meta.env["VITE_USE_MOCKS"] ?? "true").toString().toLowerCase() !== "false";
+  (import.meta.env["VITE_USE_MOCKS"] ?? "false").toString().toLowerCase() === "true";
 
 export const api: MonacaApi = USE_MOCKS ? mockApi : httpApi;
 

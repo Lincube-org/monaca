@@ -1,6 +1,7 @@
 import { ApiError, type MonacaApi } from "./contract";
 import type {
   AccountWithRoles,
+  AccountDeletion,
   AccountDetail,
   AccountSession,
   AccountSecurity,
@@ -29,11 +30,13 @@ import type {
   CreateWebhookRequest,
   CreatedClient,
   CreatedWebhook,
+  DeliveryConnector,
   EmailTemplate,
   Grant,
   ListAccountsQuery,
   ListAuditQuery,
   Member,
+  MessageTemplate,
   Organization,
   OrganizationEmailDomain,
   OrganizationInvitation,
@@ -47,17 +50,24 @@ import type {
   SignInCopy,
   SignInExperience,
   SsoConnector,
+  Tenant,
   TenantRole,
   UpdateAccountRequest,
   UpdateApiResourceRequest,
   UpdateClientRequest,
+  UpdateDeliveryConnectorRequest,
   UpdateEmailTemplateRequest,
+  UpdateMessageTemplateRequest,
   UpdateOrganizationRequest,
   UpdateOrgRoleRequest,
   UpdateRateLimitsRequest,
   UpdateSignInCopyRequest,
   UpdateSignInExperienceRequest,
+  UpdateTenantRequest,
+  UpdateTenantRoleRequest,
+  UpdateUsageRequest,
   UpdateWebhookRequest,
+  Usage,
   Webhook,
   WebhookDelivery,
   WebhookSecret,
@@ -130,6 +140,22 @@ function query(params: Record<string, string | number | undefined>): string {
 export const httpApi: MonacaApi = {
   getSession(): Promise<SessionInfo> {
     return request<SessionInfo>("/session");
+  },
+
+  getTenant(): Promise<Tenant> {
+    return request<Tenant>("/tenant");
+  },
+
+  updateTenant(body: UpdateTenantRequest): Promise<Tenant> {
+    return request<Tenant>("/tenant", { method: "PATCH", body: JSON.stringify(body) });
+  },
+
+  getUsage(): Promise<Usage> {
+    return request<Usage>("/usage");
+  },
+
+  updateUsage(body: UpdateUsageRequest): Promise<Usage> {
+    return request<Usage>("/usage", { method: "PATCH", body: JSON.stringify(body) });
   },
 
   listOrganizations(): Promise<Page<Organization>> {
@@ -210,12 +236,26 @@ export const httpApi: MonacaApi = {
     });
   },
 
+  deleteAccount(accountId: string, confirm?: string): Promise<AccountDeletion> {
+    return request<AccountDeletion>(
+      `/accounts/${encodeURIComponent(accountId)}${query({ confirm })}`,
+      { method: "DELETE" },
+    );
+  },
+
   listTenantRoles(): Promise<Page<TenantRole>> {
     return request<Page<TenantRole>>("/roles");
   },
 
   createTenantRole(body: CreateTenantRoleRequest): Promise<TenantRole> {
     return request<TenantRole>("/roles", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  updateTenantRole(roleId: string, body: UpdateTenantRoleRequest): Promise<TenantRole> {
+    return request<TenantRole>(`/roles/${encodeURIComponent(roleId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
   },
 
   deleteTenantRole(roleId: string): Promise<void> {
@@ -289,6 +329,24 @@ export const httpApi: MonacaApi = {
     return request<void>(`/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" });
   },
 
+  getDeliveryConnector(channel: "email" | "sms"): Promise<DeliveryConnector> {
+    return request<DeliveryConnector>(`/${channel}-connector`);
+  },
+
+  updateDeliveryConnector(
+    channel: "email" | "sms",
+    body: UpdateDeliveryConnectorRequest,
+  ): Promise<DeliveryConnector> {
+    return request<DeliveryConnector>(`/${channel}-connector`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteDeliveryConnector(channel: "email" | "sms"): Promise<void> {
+    return request<void>(`/${channel}-connector`, { method: "DELETE" });
+  },
+
   listSsoConnectors(): Promise<Page<SsoConnector>> {
     return request<Page<SsoConnector>>("/sso-connectors");
   },
@@ -354,6 +412,37 @@ export const httpApi: MonacaApi = {
     return request<void>(`/email-templates/${encodeURIComponent(purpose)}`, {
       method: "DELETE",
     });
+  },
+
+  listMessageTemplates(channel?: "email" | "sms"): Promise<Page<MessageTemplate>> {
+    return request<Page<MessageTemplate>>(
+      `/message-templates${query({ channel })}`,
+    );
+  },
+
+  updateMessageTemplate(
+    purpose: string,
+    locale: string,
+    body: UpdateMessageTemplateRequest,
+  ): Promise<MessageTemplate> {
+    return request<MessageTemplate>(
+      `/message-templates/${encodeURIComponent(purpose)}/${encodeURIComponent(locale)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    );
+  },
+
+  deleteMessageTemplate(purpose: string, locale: string): Promise<void> {
+    return request<void>(
+      `/message-templates/${encodeURIComponent(purpose)}/${encodeURIComponent(locale)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  restoreMessageTemplate(purpose: string, locale: string): Promise<MessageTemplate> {
+    return request<MessageTemplate>(
+      `/message-templates/${encodeURIComponent(purpose)}/${encodeURIComponent(locale)}/restore`,
+      { method: "POST" },
+    );
   },
 
   listWebhooks(): Promise<Page<Webhook>> {

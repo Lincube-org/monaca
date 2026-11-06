@@ -7,18 +7,32 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Input,
   Label,
   Separator,
   toast,
 } from "@monaca/ui";
 import { Check, Copy, Monitor, Moon, Sun } from "lucide-vue-next";
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 
 import { GATEWAY_URL, USE_MOCKS } from "@/api";
+import { describeError } from "@/api/contract";
 import PageHeader from "@/components/PageHeader.vue";
 import { useTheme } from "@/composables/use-theme";
 import { t } from "@/i18n";
-import { useSession } from "@/queries";
+import {
+  useSession,
+  useTenant,
+  useUpdateTenant,
+  useUpdateUsage,
+  useUsage,
+} from "@/queries";
 import { useUiStore, type ThemeChoice } from "@/stores/ui";
 
 /**
@@ -33,7 +47,73 @@ import { useUiStore, type ThemeChoice } from "@/stores/ui";
  */
 const ui = useUiStore();
 const session = useSession();
+const tenantQuery = useTenant();
+const usageQuery = useUsage();
+const updateTenant = useUpdateTenant();
+const updateUsage = useUpdateUsage();
 const { resolved, apply } = useTheme(() => ui.theme);
+
+const canWrite = computed(() => {
+  const tier = session.data.value?.management ?? "none";
+  return tier === "write" || tier === "full";
+});
+const tenant = computed(() => tenantQuery.data.value ?? null);
+const usage = computed(() => usageQuery.data.value ?? null);
+const quota = ref("");
+watch(
+  () => usage.value,
+  (value) => {
+    if (value) quota.value = value.users.quota === null ? "" : String(value.users.quota);
+  },
+  { immediate: true },
+);
+
+const archiveOpen = ref(false);
+const actionError = ref<string | null>(null);
+
+async function archiveTenant(): Promise<void> {
+  actionError.value = null;
+  try {
+    const updated = await updateTenant.mutateAsync({ state: "archived" });
+    archiveOpen.value = false;
+    toast({
+      title: t("tenant.archivedToast"),
+      description: t("tenant.archivedDescription", { tenant: updated.slug }),
+      variant: "success",
+    });
+  } catch (error) {
+    actionError.value = describeError(error).title;
+  }
+}
+
+async function reactivateTenant(): Promise<void> {
+  actionError.value = null;
+  try {
+    const updated = await updateTenant.mutateAsync({ state: "active" });
+    toast({
+      title: t("tenant.reactivatedToast"),
+      description: t("tenant.reactivatedDescription", { tenant: updated.slug }),
+      variant: "success",
+    });
+  } catch (error) {
+    actionError.value = describeError(error).title;
+  }
+}
+
+async function saveQuota(): Promise<void> {
+  const raw = quota.value.trim();
+  const value = raw === "" ? null : Number(raw);
+  if (value !== null && (!Number.isInteger(value) || value < 0 || value > 10_000_000)) {
+    toast({ title: t("tenant.quotaFailed"), description: "0–10,000,000 or empty", variant: "error" });
+    return;
+  }
+  try {
+    await updateUsage.mutateAsync({ max_accounts: value });
+    toast({ title: t("tenant.quotaSaved"), variant: "success" });
+  } catch (error) {
+    toast({ title: t("tenant.quotaFailed"), description: describeError(error).title, variant: "error" });
+  }
+}
 
 function setTheme(choice: ThemeChoice): void {
   ui.setTheme(choice);
@@ -126,6 +206,109 @@ const themeOptions: { value: ThemeChoice; label: string; icon: typeof Sun }[] = 
     </Card>
 
     <Card>
+      <CardHeader class="flex-row items-center justify-between">
+        <div>
+          <CardTitle>{{ t('tenant.title') }}</CardTitle>
+          <CardDescription>{{ t('tenant.subtitle', { tenant: ui.tenant }) }}</CardDescription>
+        </div>
+        <Badge v-if="!canWrite" variant="muted">{{ t('tenant.readOnly') }}</Badge>
+      </CardHeader>
+      <CardContent>
+        <dl class="grid grid-cols-[minmax(8rem,auto)_1fr] items-baseline gap-x-4 gap-y-2.5 text-[13px]">
+          <dt class="text-ink-faint">{{ t('tenant.state') }}</dt>
+          <dd class="m-0">
+            <Badge :variant="tenant?.state === 'active' ? 'allow' : 'deny'">
+              {{
+                tenant?.state === "active"
+                  ? t("tenant.active")
+                  : tenant?.state === "archived"
+                    ? t("tenant.archived")
+                    : t("tenant.suspended")
+              }}
+            </Badge>
+          </dd>
+          <dt class="text-ink-faint">{{ t('settings.tenant') }}</dt>
+          <dd class="mono-data m-0">{{ tenant?.slug ?? ui.tenant }}</dd>
+          <dt class="text-ink-faint">{{ t('tenant.issuer') }}</dt>
+          <dd class="mono-data m-0 break-all text-[11.5px] text-ink-muted">
+            {{ tenant?.issuer ?? "—" }}
+          </dd>
+        </dl>
+        <p v-if="actionError" class="mt-3 text-[12.5px] text-deny">{{ actionError }}</p>
+        <div class="mt-3 flex items-center gap-2">
+          <Button
+            v-if="tenant?.state === 'active'"
+            variant="danger"
+            size="sm"
+            :disabled="!canWrite || updateTenant.isPending.value"
+            @click="archiveOpen = true"
+          >
+            {{ t('tenant.archive') }}
+          </Button>
+          <Button
+            v-else-if="tenant?.state === 'archived'"
+            variant="primary"
+            size="sm"
+            :disabled="!canWrite || updateTenant.isPending.value"
+            @click="reactivateTenant"
+          >
+            {{ t('tenant.reactivate') }}
+          </Button>
+          <span v-if="tenant?.state === 'suspended'" class="text-[12px] text-ink-faint">
+            {{ t('tenant.suspended') }} — resume through the platform CLI.
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader>
+        <CardTitle>{{ t('tenant.usage') }}</CardTitle>
+        <CardDescription>{{ t('tenant.enforcement') }}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <dl class="grid grid-cols-[minmax(8rem,auto)_1fr] items-baseline gap-x-4 gap-y-2.5 text-[13px]">
+          <dt class="text-ink-faint">{{ t('tenant.usersTotal') }}</dt>
+          <dd class="m-0">{{ usage?.users.total ?? "—" }}</dd>
+          <dt class="text-ink-faint">{{ t('tenant.quota') }}</dt>
+          <dd class="m-0">
+            {{ usage?.users.quota === null ? t('tenant.unlimited') : usage?.users.quota }}
+          </dd>
+          <dt class="text-ink-faint">{{ t('tenant.remaining') }}</dt>
+          <dd class="m-0">
+            {{ usage?.users.remaining === null ? t('tenant.unlimited') : usage?.users.remaining }}
+          </dd>
+          <dt class="text-ink-faint">{{ t('tenant.activeToday') }}</dt>
+          <dd class="m-0">{{ usage?.daily.active_accounts ?? "—" }}</dd>
+          <dt class="text-ink-faint">{{ t('tenant.loginsToday') }}</dt>
+          <dd class="m-0">{{ usage?.daily.logins ?? "—" }}</dd>
+        </dl>
+        <div class="mt-4 flex flex-col gap-1.5">
+          <Label for="quota">{{ t('tenant.quotaField') }}</Label>
+          <p class="m-0 text-[11.5px] text-ink-faint">{{ t('tenant.quotaHint') }}</p>
+          <div class="flex items-center gap-2">
+            <Input
+              id="quota"
+              v-model="quota"
+              type="number"
+              min="0"
+              max="10000000"
+              :disabled="!canWrite || updateUsage.isPending.value"
+            />
+            <Button
+              variant="primary"
+              size="sm"
+              :disabled="!canWrite || updateUsage.isPending.value"
+              @click="saveQuota"
+            >
+              {{ t('tenant.saveQuota') }}
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+
+    <Card>
       <CardHeader>
         <CardTitle>{{ t('settings.mockMode') }}</CardTitle>
         <CardDescription>{{ t('settings.mockModeHint') }}</CardDescription>
@@ -158,5 +341,21 @@ const themeOptions: { value: ThemeChoice; label: string; icon: typeof Sun }[] = 
         </dl>
       </CardContent>
     </Card>
+
+    <Dialog v-model:open="archiveOpen">
+      <DialogContent class="max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>{{ t('tenant.archiveTitle', { tenant: tenant?.slug ?? ui.tenant }) }}</DialogTitle>
+          <DialogDescription>{{ t('tenant.archiveDescription') }}</DialogDescription>
+        </DialogHeader>
+        <p v-if="actionError" class="text-[12.5px] text-deny">{{ actionError }}</p>
+        <DialogFooter>
+          <Button variant="ghost" type="button" @click="archiveOpen = false">{{ t('common.cancel') }}</Button>
+          <Button variant="danger" type="button" :disabled="updateTenant.isPending.value" @click="archiveTenant">
+            {{ updateTenant.isPending.value ? t('common.saving') : t('tenant.archive') }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

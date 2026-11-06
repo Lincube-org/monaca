@@ -658,6 +658,78 @@
         ],
         "type": "object"
       },
+      "MeRoleView": {
+        "description": "A role as `/v1/me` reports it to its holder.",
+        "properties": {
+          "id": {
+            "description": "The `rol_…` id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The role name carried by the id_token.",
+            "type": "string"
+          },
+          "permissions": {
+            "description": "The permission scopes the role grants.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "permissions"
+        ],
+        "type": "object"
+      },
+      "MeView": {
+        "description": "`GET /v1/me` — the signed-in account and its current management tier.",
+        "properties": {
+          "account_id": {
+            "description": "The `acc_…` id.",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "Display name.",
+            "type": "string"
+          },
+          "email": {
+            "description": "Primary email.",
+            "type": "string"
+          },
+          "is_tenant_admin": {
+            "description": "The owner override, set only by bootstrap or the CLI.",
+            "type": "boolean"
+          },
+          "management": {
+            "description": "`none`, `read`, `write` or `full`.",
+            "type": "string"
+          },
+          "roles": {
+            "description": "The tenant roles the account holds.",
+            "items": {
+              "$ref": "#/components/schemas/MeRoleView"
+            },
+            "type": "array"
+          },
+          "state": {
+            "description": "`active` or `disabled`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "email",
+          "display_name",
+          "state",
+          "is_tenant_admin",
+          "management",
+          "roles"
+        ],
+        "type": "object"
+      },
       "OrgList": {
         "description": "`GET /v1/orgs`.",
         "properties": {
@@ -1085,6 +1157,34 @@
         ],
         "type": "object"
       },
+      "TenantView": {
+        "description": "`GET /v1/tenant` — the tenant's own lifecycle record.",
+        "properties": {
+          "id": {
+            "description": "The `ten_…` id.",
+            "type": "string"
+          },
+          "issuer": {
+            "description": "The issuer prefix, `{base}/t/{slug}`.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The URL slug.",
+            "type": "string"
+          },
+          "state": {
+            "description": "`active`, `suspended` or `archived`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "state",
+          "issuer"
+        ],
+        "type": "object"
+      },
       "UpdateAccountBody": {
         "description": "The body of `PATCH /v1/accounts/{id}`.\n\nAny subset may be sent: `state` suspends or reactivates, while `display_name` and `username`\nedit the profile an administrator sees in the directory and the account can edit itself.",
         "properties": {
@@ -1271,6 +1371,19 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "UpdateTenantBody": {
+        "description": "The body of `PATCH /v1/tenant`; only the archive/reactivate pair is accepted.",
+        "properties": {
+          "state": {
+            "description": "`archived` from active, or `active` from archived.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
         "type": "object"
       },
       "VersionResponse": {
@@ -2711,6 +2824,30 @@
         "summary": "One email template"
       }
     },
+    "/v1/me": {
+      "get": {
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeView"
+                }
+              }
+            },
+            "description": "The account and its current roles."
+          },
+          "403": {
+            "description": "An automation client has no account identity."
+          }
+        },
+        "summary": "Read the signed-in account and its management tier",
+        "tags": [
+          "management"
+        ]
+      }
+    },
     "/v1/message-templates": {
       "get": {
         "responses": {
@@ -3423,6 +3560,62 @@
           }
         },
         "summary": "One SSO connector"
+      }
+    },
+    "/v1/tenant": {
+      "get": {
+        "operationId": "get_tenant",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantView"
+                }
+              }
+            },
+            "description": "The tenant record."
+          }
+        },
+        "summary": "Read the tenant lifecycle record",
+        "tags": [
+          "management"
+        ]
+      },
+      "patch": {
+        "operationId": "update_tenant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTenantBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantView"
+                }
+              }
+            },
+            "description": "The updated tenant record."
+          },
+          "400": {
+            "description": "A state outside active/archived or a transition the API does not offer."
+          },
+          "403": {
+            "description": "The caller does not hold full management."
+          }
+        },
+        "summary": "Archive or reactivate the tenant",
+        "tags": [
+          "management"
+        ]
       }
     },
     "/v1/usage": {

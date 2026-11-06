@@ -20,12 +20,25 @@ export interface BffOrg {
   readonly role: string;
 }
 
+/** The management tier `/v1/me` reports; the console uses it to hide write controls. */
+export type ManagementTier = "none" | "read" | "write" | "full";
+
+/** A tenant role as `/v1/me` returns it. */
+export interface BffRole {
+  readonly id: string;
+  readonly name: string;
+  readonly permissions: readonly string[];
+}
+
 export interface BffSession {
   readonly id: string;
   readonly tenant: string;
   readonly accountId: string;
   readonly email: string;
   readonly orgs: readonly BffOrg[];
+  readonly management: ManagementTier;
+  readonly roles: readonly BffRole[];
+  readonly isTenantAdmin: boolean;
   readonly createdAt: number;
   touchedAt: number;
   tokens: BffTokens;
@@ -91,6 +104,9 @@ export class SessionStore {
     accountId: string;
     email: string;
     orgs: readonly BffOrg[];
+    management: ManagementTier;
+    roles: readonly BffRole[];
+    isTenantAdmin: boolean;
     tokens: BffTokens;
   }): BffSession {
     const now = Date.now();
@@ -99,6 +115,9 @@ export class SessionStore {
       tenant: input.tenant,
       accountId: input.accountId,
       email: input.email,
+      management: input.management,
+      roles: input.roles,
+      isTenantAdmin: input.isTenantAdmin,
       orgs: input.orgs,
       createdAt: now,
       touchedAt: now,
