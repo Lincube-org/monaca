@@ -42,6 +42,8 @@ hex = { workspace = true }
 hmac = { workspace = true }
 data-encoding = { workspace = true }
 rand_core = { workspace = true }
+risaml = { version = "0.7", default-features = false, features = ["crypto-rustcrypto"] }
+quick-xml = "0.41"
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` is what the router test drives the app with; `axum::body::to_bytes`

@@ -96,9 +96,24 @@ privileged account changes hands:
 - [ ] Tenant lifecycle changes still go through `tenant suspend|resume|archive`; the API only
       offers the reversible archive/reactivate pair.
 
-The CLI demotion is not written to the tenant audit chain (the CLI has no request actor). If an
-audit trail is required for an offboarding, record the command and its output alongside the
-operator ticket.
+The demotion writes `account.tenant_admin_demoted` on the tenant audit chain: actor `tenant`
+(the command runs on the owner connection, not as an account), subject the demoted account, and
+payload `{"email","via":"cli","before":true,"after":false}`. `--dry-run` writes nothing. Record
+the command and its output alongside the operator ticket as well, because the chain proves what
+happened but not who ran the shell.
+
+**SAML federation.** A tenant registers a SAML IdP through `POST /v1/saml-connectors` with the
+provider's metadata XML. Before accepting it, the server refuses metadata that sets
+`WantAuthnRequestsSigned=true` (this SP sends unsigned AuthnRequests and will not silently
+downgrade the IdP's requirement), metadata with no HTTP-Redirect SSO endpoint, and metadata with
+no signing certificate. Give the IdP the SP metadata at
+`https://<host>/t/<tenant>/sso/<connector>/metadata`; its ACS is
+`https://<host>/t/<tenant>/sso/<connector>/acs`. `WantAssertionsSigned=true` is advertised and
+enforced, so the IdP must sign the Assertion itself, not only the Response.
+
+Operational boundaries: IdP-initiated SSO and SAML Single Logout are not implemented (an
+unsolicited POST is refused at the ACS); encrypted assertions are refused; role mapping from the
+configured attribute is additive and never grants a role that names `monaca:admin`.
 
 **KEK rotation is an offline, three-step procedure** (§10.7). `MONACA_KEK` derives every tenant
 DEK, and sealed signing keys, TOTP seeds, passkey blobs and connector secrets are encrypted under

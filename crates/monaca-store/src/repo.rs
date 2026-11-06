@@ -384,6 +384,56 @@ pub struct SsoStateRow {
     pub interaction_id: String,
 }
 
+/// An enterprise SSO (SAML 2.0) connector in `tenant.saml_connectors` (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct SamlConnectorRow {
+    /// Row id.
+    pub id: Uuid,
+    /// The slug the protocol and the page use, unique within the tenant.
+    pub connector_id: String,
+    /// Human-readable name shown on the sign-in page.
+    pub display_name: String,
+    /// The IdP metadata XML exactly as the administrator supplied it; the trust anchor.
+    pub metadata_xml: String,
+    /// The metadata's entity id, extracted at write time.
+    pub entity_id: String,
+    /// The lowercased email domains whose sign-ins route here.
+    pub email_domains: Vec<String>,
+    /// The assertion attribute carrying the verified address.
+    pub email_attribute: String,
+    /// The assertion attribute whose values name tenant roles; absent means no mapping.
+    pub role_attribute: Option<String>,
+    /// Whether the connector may start a sign-in at all.
+    pub enabled: bool,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+/// One SP-initiated SAML AuthnRequest awaiting its response (§6.1).
+#[derive(Debug, Clone, FromRow)]
+pub struct SamlStateRow {
+    /// The RelayState this SP sent and the response must echo.
+    pub id: String,
+    /// The connector the request was minted for.
+    pub connector_id: String,
+    /// The interaction the IdP is authenticating for.
+    pub interaction_id: String,
+    /// The AuthnRequest ID the response must echo as `InResponseTo`.
+    pub request_id: String,
+    /// The IdP entity id recorded when the request was issued.
+    pub idp_entity_id: String,
+    /// The ACS URL the request named; the response's recipient must equal it.
+    pub acs_url: String,
+    /// The outbound binding keyword (`redirect`).
+    pub request_binding: String,
+    /// The expected response binding keyword (`post`).
+    pub response_binding: String,
+    /// The AuthnRequest `IssueInstant`, when recorded.
+    pub issued_at: Option<String>,
+    /// When this correlation state stops being usable.
+    pub expires_at: OffsetDateTime,
+}
+
 /// A tenant webhook subscription in `tenant.webhooks` (§6.2).
 #[derive(Debug, Clone, FromRow)]
 pub struct WebhookRow {
@@ -2790,6 +2840,31 @@ impl Store {
                 entity: "sso email domain",
             });
         }
+        // SAML and OIDC connectors share the routing namespace: a slug or a domain may belong to
+        // only one of them, or the hosted page could not tell which protocol to start.
+        let saml_slug: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.saml_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if saml_slug.is_some() {
+            return Err(StoreError::AlreadyExists {
+                entity: "sso connector",
+            });
+        }
+        let saml_domain: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.saml_connectors
+             WHERE email_domains && $1 LIMIT 1",
+        )
+        .bind(email_domains)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if saml_domain.is_some() {
+            return Err(StoreError::AlreadyExists {
+                entity: "sso email domain",
+            });
+        }
         let row = sqlx::query_as::<_, SsoConnectorRow>(
             "INSERT INTO tenant.sso_connectors
                 (id, connector_id, display_name, issuer, authorize_url, token_url, userinfo_url,
@@ -2828,6 +2903,243 @@ impl Store {
             .execute(&pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // ------------------------------------------------------------- SAML 2.0 SSO
+
+    /// Every SAML connector the tenant configured, ordered by slug.
+    pub async fn saml_connectors(
+        &self,
+        tenant: &TenantRow,
+    ) -> Result<Vec<SamlConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SamlConnectorRow>(
+            "SELECT id, connector_id, display_name, metadata_xml, entity_id, email_domains,
+                    email_attribute, role_attribute, enabled, created_at
+             FROM tenant.saml_connectors ORDER BY connector_id",
+        )
+        .fetch_all(&pool)
+        .await?)
+    }
+
+    /// One SAML connector by its slug.
+    pub async fn saml_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+    ) -> Result<Option<SamlConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SamlConnectorRow>(
+            "SELECT id, connector_id, display_name, metadata_xml, entity_id, email_domains,
+                    email_attribute, role_attribute, enabled, created_at
+             FROM tenant.saml_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// The SAML connector that owns `domain` — the routing lookup shared with OIDC.
+    pub async fn saml_connector_for_domain(
+        &self,
+        tenant: &TenantRow,
+        domain: &str,
+    ) -> Result<Option<SamlConnectorRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SamlConnectorRow>(
+            "SELECT id, connector_id, display_name, metadata_xml, entity_id, email_domains,
+                    email_attribute, role_attribute, enabled, created_at
+             FROM tenant.saml_connectors WHERE $1 = ANY(email_domains) LIMIT 1",
+        )
+        .bind(domain)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Register a SAML connector; a slug or domain another connector holds — of either protocol —
+    /// is `AlreadyExists`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_saml_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        display_name: &str,
+        metadata_xml: &str,
+        entity_id: &str,
+        email_domains: &[String],
+        email_attribute: &str,
+        role_attribute: Option<&str>,
+    ) -> Result<SamlConnectorRow, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        let saml_slug: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.saml_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let oidc_slug: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.sso_connectors WHERE connector_id = $1",
+        )
+        .bind(connector_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if saml_slug.is_some() || oidc_slug.is_some() {
+            return Err(StoreError::AlreadyExists {
+                entity: "sso connector",
+            });
+        }
+        let saml_domain: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.saml_connectors
+             WHERE email_domains && $1 LIMIT 1",
+        )
+        .bind(email_domains)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let oidc_domain: Option<(String,)> = sqlx::query_as(
+            "SELECT connector_id FROM tenant.sso_connectors
+             WHERE email_domains && $1 LIMIT 1",
+        )
+        .bind(email_domains)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if saml_domain.is_some() || oidc_domain.is_some() {
+            return Err(StoreError::AlreadyExists {
+                entity: "sso email domain",
+            });
+        }
+        let row = sqlx::query_as::<_, SamlConnectorRow>(
+            "INSERT INTO tenant.saml_connectors
+                (id, connector_id, display_name, metadata_xml, entity_id, email_domains,
+                 email_attribute, role_attribute)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             RETURNING id, connector_id, display_name, metadata_xml, entity_id, email_domains,
+                       email_attribute, role_attribute, enabled, created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(connector_id)
+        .bind(display_name)
+        .bind(metadata_xml)
+        .bind(entity_id)
+        .bind(email_domains)
+        .bind(email_attribute)
+        .bind(role_attribute)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| unique_conflict(err, "sso connector"))?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Delete a SAML connector, its pending requests and its replay keys.
+    pub async fn delete_saml_connector(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let result = sqlx::query("DELETE FROM tenant.saml_connectors WHERE connector_id = $1")
+            .bind(connector_id)
+            .execute(&pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Mint a single-use SAML correlation state; the returned string is also the RelayState.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_saml_state(
+        &self,
+        tenant: &TenantRow,
+        state_id: &str,
+        connector_id: &str,
+        interaction_id: &str,
+        request_id: &str,
+        idp_entity_id: &str,
+        acs_url: &str,
+        request_binding: &str,
+        response_binding: &str,
+        issued_at: Option<&str>,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        sqlx::query(
+            "INSERT INTO tenant.saml_states
+                (id, connector_id, interaction_id, request_id, idp_entity_id, acs_url,
+                 request_binding, response_binding, issued_at, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(state_id)
+        .bind(connector_id)
+        .bind(interaction_id)
+        .bind(request_id)
+        .bind(idp_entity_id)
+        .bind(acs_url)
+        .bind(request_binding)
+        .bind(response_binding)
+        .bind(issued_at)
+        .bind(expires_at)
+        .execute(&pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Redeem a SAML correlation state: only an unconsumed, unexpired row for this connector is
+    /// returned, and it is consumed in the same conditional UPDATE so two responses cannot both
+    /// proceed. This is the one place `InResponseTo` acquires its authority.
+    pub async fn take_saml_state(
+        &self,
+        tenant: &TenantRow,
+        state_id: &str,
+        connector_id: &str,
+    ) -> Result<Option<SamlStateRow>, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        Ok(sqlx::query_as::<_, SamlStateRow>(
+            "UPDATE tenant.saml_states SET consumed_at = now()
+             WHERE id = $1 AND connector_id = $2 AND consumed_at IS NULL AND expires_at > now()
+             RETURNING id, connector_id, interaction_id, request_id, idp_entity_id, acs_url,
+                       request_binding, response_binding, issued_at, expires_at",
+        )
+        .bind(state_id)
+        .bind(connector_id)
+        .fetch_optional(&pool)
+        .await?)
+    }
+
+    /// Claim an assertion ID exactly once for a connector.
+    ///
+    /// The row is inserted on first sight, then claimed with a conditional UPDATE — the same
+    /// `consumed_at IS NULL AND expires_at > now()` semantics the flow state uses. A replay (or
+    /// an assertion already expired by the clock the row was written with) finds no claimable
+    /// row and is refused. Two concurrent submissions race on the UPDATE, so exactly one wins.
+    pub async fn consume_saml_assertion_once(
+        &self,
+        tenant: &TenantRow,
+        connector_id: &str,
+        assertion_id: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let pool = self.tenant_pool(&tenant.db_name).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO tenant.saml_assertions (assertion_id, connector_id, expires_at)
+             VALUES ($1,$2,$3) ON CONFLICT (assertion_id) DO NOTHING",
+        )
+        .bind(assertion_id)
+        .bind(connector_id)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+        let claimed = sqlx::query(
+            "UPDATE tenant.saml_assertions SET consumed_at = now()
+             WHERE assertion_id = $1 AND connector_id = $2
+               AND consumed_at IS NULL AND expires_at > now()",
+        )
+        .bind(assertion_id)
+        .bind(connector_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(claimed.rows_affected() == 1)
     }
 
     /// Mint a single-use SSO `state` bound to an interaction; returns the uuid to send.

@@ -8486,6 +8486,7 @@ async function tenantLifecycleFlow(base: string): Promise<StepResult> {
         state: `life-${runId}`,
         code_challenge: challenge,
         code_challenge_method: "S256",
+        resource: `${base}/v1`,
       })}`,
       { redirect: "manual" },
     );
@@ -8557,6 +8558,89 @@ async function tenantLifecycleFlow(base: string): Promise<StepResult> {
     checks.push([
       "the tenant's public client completes a password sign-in",
       first.signIn.status === 200 && first.token.status === 200,
+    ]);
+
+    const userToken = (first.token.body as { access_token?: string })?.access_token ?? "";
+    const me = (accessToken: string): Promise<HttpResult> =>
+      call(`${base}/v1/me`, { headers: { authorization: `Bearer ${accessToken}` } });
+    const demotedAudit = (): Promise<HttpResult> =>
+      call(
+        `${base}/v1/audit?${new URLSearchParams({
+          action: "account.tenant_admin_demoted",
+          limit: "5",
+        })}`,
+        { headers: { authorization: `Bearer ${bearer}` } },
+      );
+
+    const beforeMe = await me(userToken);
+    checks.push([
+      "the owner override makes /v1/me a tenant administrator",
+      beforeMe.status === 200 &&
+        (beforeMe.body as { is_tenant_admin?: boolean }).is_tenant_admin === true &&
+        (beforeMe.body as { management?: string }).management === "full",
+    ]);
+
+    const dryDemote = await cli([
+      "tenant",
+      "demote-admin",
+      "--slug",
+      slug,
+      "--email",
+      adminEmail,
+      "--dry-run",
+    ]);
+    checks.push([
+      "tenant demote-admin --dry-run reports the change without writing the chain",
+      dryDemote.code === 0 &&
+        dryDemote.stdout.includes("would clear") &&
+        ((await demotedAudit()).body as { items?: unknown[] }).items?.length === 0,
+    ]);
+
+    const demote = await cli([
+      "tenant",
+      "demote-admin",
+      "--slug",
+      slug,
+      "--email",
+      adminEmail,
+    ]);
+    const afterAudit = await demotedAudit();
+    const afterMe = await me(userToken);
+    const demoteItems =
+      (afterAudit.body as {
+        items?: {
+          action?: string;
+          actor_chain?: { type?: string }[];
+          subject?: { type?: string; id?: string };
+        }[];
+      }).items ?? [];
+    checks.push([
+      "tenant demote-admin clears the override, writes one tenant-chain event and lowers /v1/me",
+      demote.code === 0 &&
+        demote.stdout.includes("cleared is_tenant_admin") &&
+        afterAudit.status === 200 &&
+        demoteItems.length === 1 &&
+        demoteItems[0]?.action === "account.tenant_admin_demoted" &&
+        demoteItems[0]?.actor_chain?.[0]?.type === "tenant" &&
+        demoteItems[0]?.subject?.type === "account" &&
+        afterMe.status === 200 &&
+        (afterMe.body as { is_tenant_admin?: boolean }).is_tenant_admin === false &&
+        (afterMe.body as { management?: string }).management === "none",
+    ]);
+
+    const again = await cli([
+      "tenant",
+      "demote-admin",
+      "--slug",
+      slug,
+      "--email",
+      adminEmail,
+    ]);
+    checks.push([
+      "a second demote-admin writes nothing",
+      again.code === 0 &&
+        again.stdout.includes("already not a tenant administrator") &&
+        ((await demotedAudit()).body as { items?: unknown[] }).items?.length === 1,
     ]);
 
     const dry = await cli(["tenant", "suspend", "--slug", slug, "--dry-run"]);
@@ -16899,6 +16983,363 @@ async function tenantLifecycleAndMeFlow(
   };
 }
 
+/**
+ * Step 78 — SAML connectors and the assertion consumer service.
+ *
+ * The positive round-trip needs a signed assertion; that lives in the Rust unit test
+ * `saml::tests::a_signed_assertion_from_a_compliant_idp_completes_the_flow`, which drives a real
+ * risaml IdP. This step pins the configuration gate and the rejection paths the HTTP surface owns:
+ * an IdP that demands signed AuthnRequests is refused at creation, DTDs / multiple assertions /
+ * unsigned assertions are refused at the ACS, the RelayState is single-use, and IdP-initiated
+ * responses have no entry at all.
+ */
+async function samlFlow(base: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const slug = `saml-${runId}`;
+  const adminEmail = `admin@${slug}.localhost`;
+  const adminPassword = `Saml-${runId}-9xQ`;
+  const adminSecret = `saml-admin-${runId}`;
+  const loginClient = "e2e-login";
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const idpEntity = `https://idp-${runId}.example.com/metadata`;
+  const idpCert =
+    "MIIC6TCCAdOgAwIBAgIBATALBgkqhkiG9w0BAQswODELMAkGA1UEBhMCQ04xDzANBgNVBAoMBk1vbmFjYTEYMBYGA1UEAwwPTW9uYWNhIFRlc3QgSWRQMCIYDzIwMjYxMTA2MDk1MTEwWhgPMjA0NjExMDEwOTUxMTBaMDgxCzAJBgNVBAYTAkNOMQ8wDQYDVQQKDAZNb25hY2ExGDAWBgNVBAMMD01vbmFjYSBUZXN0IElkUDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMHTWirLVrxweZFfdnSb1Fq1ECY586Nn3sNq/V030lMyEjF4nopoKhjNNm0ueaANJRKxunOHYa2hiNrprDtHGYBx/mV3BEwjk2SwNJIZ+7OwWZz7frNTenPcECgE3p0QnnE/pTtw+VDBTT2blDnAh4E5bxbJGllc/ltWfi84VC+jLd3DQ19vlgar+FVbTMcxJibmEUpq5Wwn50moulH25HNFIhjXm22smvlgvq/BPm/SI5mBDWMIDG6DAfXO2+1xjOu+dhpc1sfT0+vKL2+1ESt03mmkWGwFep9JUacBDqNj0ujroXH1Rm/+qZHDt2c+ctEFhUN9pIlaY6PKxEiwohsCAwEAATALBgkqhkiG9w0BAQsDggEBAGzL0pvJNEgAjIfg5XGlC4ZXDrpzWjkvKb5MylJ/FkfLg/mM3NBFjAYkslOxXnA3OjFxDYabtRgV1hguuHZZBmBlylnGTh2R/k0Jj5CJ/xqdH7Z1CECvOCNk8mYUe4Z/nRIdEi1In4pD2QgHMFDWBU8i65VbcWZPLfxS8WkaUohmiGHlLYnwJybwQuGB90bfWLT8OqHNLysEpmuv6Gp8wQ3AQEm4Ams3fx4ib5MihhDi9OXPU+jsxOkf96QIA9r8uVA38FNIRKIDAEYQyaNVCPp4IWKk5I8/TbRUoeTyvgHhntisXL4FZi2Dy6nUq1QqZExCUaIGdf1S7jep+C12NWU=";
+  const bin =
+    process.env.MONACA_SERVER_BIN ??
+    (process.platform === "win32"
+      ? ".monaca/bin/monaca-server.exe"
+      : ".monaca/bin/monaca-server");
+  const checks: [string, boolean][] = [];
+  let detail = "";
+
+  const cli = async (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const proc = Bun.spawn([bin, ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr };
+  };
+
+  const metadata = (options: {
+    signedRequests?: boolean;
+    signingCertificate?: boolean;
+    redirectSso?: boolean;
+  }): string => {
+    const signed =
+      options.signedRequests === true ? ' WantAuthnRequestsSigned="true"' : "";
+    const key =
+      options.signingCertificate === false
+        ? ""
+        : `<KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>${idpCert}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></KeyDescriptor>`;
+    const sso =
+      options.redirectSso === false
+        ? ""
+        : `<SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp-${runId}.example.com/sso"/>`;
+    return `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${idpEntity}"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"${signed}>${key}${sso}</IDPSSODescriptor></EntityDescriptor>`;
+  };
+
+  const acs = (field: Record<string, string>): Promise<HttpResult> =>
+    call(`${base}/t/${slug}/sso/okta/acs`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(field).toString(),
+    });
+
+  const problemDetail = (body: unknown): string =>
+    String((body as { detail?: unknown })?.detail ?? "");
+
+  try {
+    const created = await cli([
+      "tenant",
+      "create",
+      "--slug",
+      slug,
+      "--admin-email",
+      adminEmail,
+      "--admin-password",
+      adminPassword,
+      "--admin-client-secret",
+      adminSecret,
+      "--login-client-id",
+      loginClient,
+      "--login-redirect-uri",
+      redirectUri,
+    ]);
+    checks.push([
+      "a SAML test tenant is provisioned",
+      created.code === 0 && created.stdout.includes(slug),
+    ]);
+    if (created.code !== 0) throw new Error(created.stderr || created.stdout);
+
+    const minted = await call(`${base}/t/${slug}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${btoa(`monaca-admin:${adminSecret}`)}`,
+      },
+      body: "grant_type=client_credentials&scope=monaca:admin",
+    });
+    const token = (minted.body as { access_token?: string })?.access_token ?? "";
+    if (minted.status !== 200 || token === "") throw new Error("no management token");
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+
+    const create = (body: unknown): Promise<HttpResult> =>
+      call(`${base}/v1/saml-connectors`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    const baseBody = {
+      connector_id: "okta",
+      display_name: "Okta",
+      metadata_xml: metadata({}),
+      email_domains: [`corp-${runId}.localhost`],
+    };
+
+    const signedRequests = await create({
+      ...baseBody,
+      metadata_xml: metadata({ signedRequests: true }),
+    });
+    checks.push([
+      "a connector whose IdP requires signed AuthnRequests is refused with the reason",
+      signedRequests.status === 400 &&
+        problemDetail(signedRequests.body).includes("WantAuthnRequestsSigned"),
+    ]);
+
+    const noCertificate = await create({
+      ...baseBody,
+      metadata_xml: metadata({ signingCertificate: false }),
+    });
+    checks.push([
+      "metadata without a signing certificate is refused",
+      noCertificate.status === 400 &&
+        problemDetail(noCertificate.body).includes("signing certificate"),
+    ]);
+
+    const noRedirect = await create({
+      ...baseBody,
+      metadata_xml: metadata({ redirectSso: false }),
+    });
+    checks.push([
+      "metadata without an HTTP-Redirect SSO endpoint is refused",
+      noRedirect.status === 400 && problemDetail(noRedirect.body).includes("HTTP-Redirect"),
+    ]);
+
+    const createdConnector = await create(baseBody);
+    const connectorBody = createdConnector.body as {
+      connector_id?: string;
+      entity_id?: string;
+      email_attribute?: string;
+      acs_url?: string;
+      sp_metadata_url?: string;
+    };
+    checks.push([
+      "a valid connector is stored with its entity id, ACS and SP metadata URL",
+      createdConnector.status === 201 &&
+        connectorBody.connector_id === "okta" &&
+        connectorBody.entity_id === idpEntity &&
+        connectorBody.email_attribute === "email" &&
+        (connectorBody.acs_url ?? "").endsWith(`/t/${slug}/sso/okta/acs`) &&
+        (connectorBody.sp_metadata_url ?? "").endsWith(`/t/${slug}/sso/okta/metadata`),
+    ]);
+
+    const conflicting = await call(`${base}/v1/sso-connectors`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connector_id: `oidc-${runId}`,
+        display_name: "OIDC",
+        issuer: `https://idp-${runId}.example.com`,
+        authorize_url: `https://idp-${runId}.example.com/authorize`,
+        token_url: `https://idp-${runId}.example.com/token`,
+        userinfo_url: `https://idp-${runId}.example.com/userinfo`,
+        client_id: "client",
+        client_secret: "secret",
+        email_domains: [`corp-${runId}.localhost`],
+      }),
+    });
+    checks.push([
+      "the domain cannot belong to an OIDC connector as well",
+      conflicting.status === 409 &&
+        (conflicting.body as { monaca_error_code?: string })?.monaca_error_code ===
+          "MONACA_SSO_DOMAIN_TAKEN",
+    ]);
+
+    const lookup = await call(
+      `${base}/t/${slug}/sso-connectors?${new URLSearchParams({
+        email: `someone@corp-${runId}.localhost`,
+      })}`,
+    );
+    const lookupItems =
+      (lookup.body as { items?: { connector_id?: string; display_name?: string }[] }).items ?? [];
+    checks.push([
+      "the public domain lookup routes the address to the SAML connector",
+      lookup.status === 200 &&
+        lookupItems.length === 1 &&
+        lookupItems[0]?.connector_id === "okta" &&
+        lookupItems[0]?.display_name === "Okta",
+    ]);
+
+    const spMetadata = await call(`${base}/t/${slug}/sso/okta/metadata`);
+    checks.push([
+      "the SP metadata advertises the ACS and asks for signed assertions",
+      spMetadata.status === 200 &&
+        spMetadata.headers.get("content-type")?.includes("samlmetadata") === true &&
+        String(spMetadata.body).includes(`/t/${slug}/sso/okta/acs`) &&
+        String(spMetadata.body).includes("WantAssertionsSigned=\"true\""),
+    ]);
+
+    const verifier = `saml-${runId}-${"v".repeat(40)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const started = await call(
+      `${base}/t/${slug}/oauth2/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: loginClient,
+        redirect_uri: redirectUri,
+        scope: "openid profile email",
+        state: `saml-${runId}`,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      })}`,
+      { redirect: "manual" },
+    );
+    const interaction = new URL(started.headers.get("location") ?? "", base).searchParams.get(
+      "interaction",
+    );
+    if (interaction === null) throw new Error(`authorize answered ${started.status}`);
+
+    const authorize = await call(
+      `${base}/t/${slug}/sso/okta/authorize?${new URLSearchParams({ interaction })}`,
+      { redirect: "manual" },
+    );
+    const redirect = new URL(authorize.headers.get("location") ?? "https://missing.invalid");
+    const relay = redirect.searchParams.get("RelayState") ?? "";
+    checks.push([
+      "the SP sends an unsigned AuthnRequest with a RelayState to the IdP",
+      authorize.status === 302 &&
+        redirect.origin === `https://idp-${runId}.example.com` &&
+        redirect.searchParams.get("SAMLRequest") !== null &&
+        relay !== "" &&
+        redirect.searchParams.get("Signature") === null,
+    ]);
+
+    const responseXml = (extra: string): string =>
+      `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" InResponseTo="_unknown"><saml:Issuer xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">${idpEntity}</saml:Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>${extra}</samlp:Response>`;
+    const assertion = (id: string): string =>
+      `<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${id}" IssueInstant="2026-11-06T00:00:00Z" Version="2.0"><saml:Issuer>${idpEntity}</saml:Issuer></saml:Assertion>`;
+    const encode = (xml: string): string => Buffer.from(xml, "utf8").toString("base64");
+
+    const noRelayState = await acs({ SAMLResponse: encode(responseXml(assertion("_a1"))) });
+    checks.push([
+      "a response without RelayState is refused before any lookup",
+      noRelayState.status === 400 && problemDetail(noRelayState.body).includes("RelayState"),
+    ]);
+
+    const unsolicited = await acs({
+      SAMLResponse: encode(
+        `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"><saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_a1"/></samlp:Response>`,
+      ),
+      RelayState: "not-a-state",
+    });
+    checks.push([
+      "an IdP-initiated response has no entry at the ACS",
+      unsolicited.status === 400 && problemDetail(unsolicited.body).includes("InResponseTo"),
+    ]);
+
+    const garbage = await acs({ SAMLResponse: "%%%", RelayState: relay });
+    checks.push([
+      "a SAMLResponse that is not base64 is refused",
+      garbage.status === 400 && problemDetail(garbage.body).includes("not base64"),
+    ]);
+
+    const twoAssertions = await acs({
+      SAMLResponse: encode(responseXml(`${assertion("_a1")}${assertion("_a2")}`)),
+      RelayState: relay,
+    });
+    checks.push([
+      "a response carrying two Assertions is refused",
+      twoAssertions.status === 400 && problemDetail(twoAssertions.body).includes("exactly one"),
+    ]);
+
+    const doctype = await acs({
+      SAMLResponse: encode(
+        `<!DOCTYPE Response [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>${responseXml(assertion("_a1"))}`,
+      ),
+      RelayState: relay,
+    });
+    checks.push([
+      "a response carrying a DTD is refused",
+      doctype.status === 400 && problemDetail(doctype.body).includes("DTD"),
+    ]);
+
+    const unsigned = await acs({
+      SAMLResponse: encode(responseXml(assertion("_a1"))),
+      RelayState: relay,
+    });
+    checks.push([
+      "an unsigned assertion is refused",
+      unsigned.status === 400 && problemDetail(unsigned.body).includes("rejected"),
+    ]);
+
+    const replay = await acs({
+      SAMLResponse: encode(responseXml(assertion("_a1"))),
+      RelayState: relay,
+    });
+    checks.push([
+      "the same RelayState is single-use even after a failed attempt",
+      replay.status === 400 && problemDetail(replay.body).includes("already used"),
+    ]);
+
+    const audit = await call(
+      `${base}/v1/audit?${new URLSearchParams({ action: "sso_connector.created", limit: "5" })}`,
+      { headers },
+    );
+    const auditItems = (audit.body as { items?: { action?: string; payload?: unknown }[] }).items ?? [];
+    checks.push([
+      "the SAML connector creation is on the tenant audit chain",
+      audit.status === 200 &&
+        auditItems.some(
+          (item) =>
+            item.action === "sso_connector.created" &&
+            (item.payload as { protocol?: string })?.protocol === "saml",
+        ),
+    ]);
+
+    const removed = await call(`${base}/v1/saml-connectors/okta`, {
+      method: "DELETE",
+      headers,
+    });
+    checks.push([
+      "the connector is deleted",
+      removed.status === 204,
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "78",
+    title: "SAML connectors and assertion checks",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: creation gate → SP metadata → unsigned request → XSW/DTD/base64 → unsigned assertion → single-use RelayState → audit → delete`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -17133,6 +17574,7 @@ async function main(): Promise<number> {
   push(await usageQuotaFlow(base, adminToken, parsed.consoleSecret));
   push(await roleTierFlow(base, adminToken, parsed.consoleSecret));
   push(await tenantLifecycleAndMeFlow(base, adminToken, parsed.consoleSecret));
+  push(await samlFlow(base));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

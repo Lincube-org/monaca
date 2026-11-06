@@ -326,6 +326,11 @@ const TENANT: &[(i64, &str, &str)] = &[
         "role update timestamps (M1)",
         include_str!("../migrations/tenant_54.sql"),
     ),
+    (
+        55,
+        "SAML connectors and one-time state (M1)",
+        include_str!("../migrations/tenant_55.sql"),
+    ),
 ];
 
 /// The org template (§5.7). Applied to a fresh `org_<oshort>` schema and replayed on every

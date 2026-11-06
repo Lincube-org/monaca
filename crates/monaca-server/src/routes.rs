@@ -310,6 +310,16 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "SSO provider callback",
     ),
     (
+        "/t/{tenant}/sso/{connector}/acs",
+        &["post"],
+        "SAML assertion consumer service",
+    ),
+    (
+        "/t/{tenant}/sso/{connector}/metadata",
+        &["get"],
+        "SAML SP metadata",
+    ),
+    (
         "/t/{tenant}/account",
         &["get", "patch"],
         "Signed-in account",
@@ -541,6 +551,12 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
         "/v1/sso-connectors/{connector}",
         &["delete"],
         "One SSO connector",
+    ),
+    ("/v1/saml-connectors", &["get", "post"], "SAML connectors"),
+    (
+        "/v1/saml-connectors/{connector}",
+        &["delete"],
+        "One SAML connector",
     ),
     ("/v1/clients", &["get", "post"], "OAuth clients"),
     (
@@ -813,6 +829,14 @@ pub fn protocol_routes() -> Router<Arc<AppState>> {
             "/t/{tenant}/sso/{connector}/callback",
             get(crate::sso::sso_callback),
         )
+        .route(
+            "/t/{tenant}/sso/{connector}/acs",
+            post(crate::saml::saml_acs),
+        )
+        .route(
+            "/t/{tenant}/sso/{connector}/metadata",
+            get(crate::saml::sp_metadata),
+        )
 }
 
 /// The signed-in account's own security settings — §6.1 `mfa`.
@@ -1037,6 +1061,14 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/sso-connectors/{connector}",
             delete(crate::sso::delete_sso_connector),
+        )
+        .route(
+            "/v1/saml-connectors",
+            get(crate::saml::list_saml_connectors).post(crate::saml::create_saml_connector),
+        )
+        .route(
+            "/v1/saml-connectors/{connector}",
+            delete(crate::saml::delete_saml_connector),
         )
         .route(
             "/v1/clients",

@@ -246,21 +246,36 @@ pub async fn list_public_sso_connectors(
     }
 
     let rows = match query.email.as_deref().and_then(email_domain) {
-        Some(domain) => state
-            .store
-            .sso_connector_for_domain(&tenant, &domain)
-            .await?
-            .into_iter()
-            .collect(),
-        None if query.email.is_none() => state.store.sso_connectors(&tenant).await?,
+        Some(domain) => {
+            let mut rows: Vec<(String, String)> = state
+                .store
+                .sso_connector_for_domain(&tenant, &domain)
+                .await?
+                .into_iter()
+                .map(|row| (row.connector_id, row.display_name))
+                .collect();
+            rows.extend(crate::saml::saml_lookup(&state, &tenant, Some(&domain)).await?);
+            rows
+        }
+        None if query.email.is_none() => {
+            let mut rows: Vec<(String, String)> = state
+                .store
+                .sso_connectors(&tenant)
+                .await?
+                .into_iter()
+                .map(|row| (row.connector_id, row.display_name))
+                .collect();
+            rows.extend(crate::saml::saml_lookup(&state, &tenant, None).await?);
+            rows
+        }
         None => Vec::new(),
     };
     let items: Vec<Value> = rows
-        .iter()
-        .map(|row| {
+        .into_iter()
+        .map(|(connector_id, display_name)| {
             json!({
-                "connector_id": row.connector_id,
-                "display_name": row.display_name,
+                "connector_id": connector_id,
+                "display_name": display_name,
             })
         })
         .collect();
@@ -296,7 +311,8 @@ pub async fn sso_authorize(
         ));
     }
     let Some(connector) = state.store.sso_connector(&tenant, &connector_id).await? else {
-        return Err(ApiError::not_found("SSO connector"));
+        return crate::saml::saml_authorize(&state, tenant, &connector_id, &query.interaction)
+            .await;
     };
     let interaction = state
         .peek_interaction(&tenant, &query.interaction)
@@ -495,7 +511,7 @@ pub async fn sso_callback(
 
 /// A first SSO sign-in creates the account; it joins the interaction's org the way a self-service
 /// registration does, and both chains record the connector (§8.1).
-async fn join_org_and_audit(
+pub(crate) async fn join_org_and_audit(
     state: &Arc<AppState>,
     tenant: &TenantRow,
     account: &AccountRow,
@@ -592,14 +608,14 @@ fn provider_redirect(
 }
 
 /// The lowercased domain of an email address, or `None` when it has no usable `@domain`.
-fn email_domain(email: &str) -> Option<String> {
+pub(crate) fn email_domain(email: &str) -> Option<String> {
     let (_, domain) = email.rsplit_once('@')?;
     let domain = domain.trim().to_ascii_lowercase();
     (!domain.is_empty()).then_some(domain)
 }
 
 /// Trim, lowercase and de-duplicate the configured domains, rejecting a connector that owns none.
-fn normalise_domains(raw: &[String]) -> Result<Vec<String>, ApiError> {
+pub(crate) fn normalise_domains(raw: &[String]) -> Result<Vec<String>, ApiError> {
     let mut domains: Vec<String> = Vec::new();
     for domain in raw {
         let Some(domain) = normalise_domain(domain) else {

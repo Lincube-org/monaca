@@ -35,6 +35,7 @@ mod rate_limit;
 mod resources;
 mod rewrap;
 mod routes;
+mod saml;
 mod schemas;
 mod session;
 mod sms;

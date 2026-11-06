@@ -10,12 +10,12 @@
 
 use std::sync::Arc;
 
+use monaca_audit::{AuditActor, AuditActorType, AuditDecision, AuditEvent, AuditSubject};
 use monaca_crypto::hash_password;
-use monaca_types::{AccountId, OrgId, TypedId};
+use monaca_types::{AccountId, EventId, OrgId, TypedId};
 use serde_json::json;
 
 use crate::cli::{TenantArgs, TenantCommand, TenantCreateArgs, TenantDemoteArgs, TenantStateArgs};
-use crate::state::AppState;
 
 /// Run the `tenant` subcommand.
 pub async fn run(args: TenantArgs) -> anyhow::Result<()> {
@@ -234,6 +234,34 @@ async fn demote_admin(args: TenantDemoteArgs) -> anyhow::Result<()> {
     store
         .set_tenant_admin(&tenant, account.account_id(), false)
         .await?;
+    // Clearing the owner override is the only action that can remove the tenant's highest
+    // privilege, so it must be visible in the same tenant chain every other administrative change
+    // writes to. The actor is the tenant itself: this ran on the owner connection, not as an
+    // account, and attributing it to a person would be a lie.
+    let event = AuditEvent {
+        id: EventId::new(),
+        at: state.now(),
+        action: "account.tenant_admin_demoted".into(),
+        actor_chain: vec![AuditActor::tenant(tenant.tenant_id())],
+        subject: AuditSubject {
+            subject_type: AuditActorType::Account,
+            id: Some(account.account_id().to_typed_string()),
+        },
+        decision: AuditDecision::Allow,
+        grant_id: None,
+        jti: None,
+        payload: json!({
+            "email": account.primary_email,
+            "via": "cli",
+            "before": true,
+            "after": false,
+        }),
+    };
+    if let Err(err) = state.audit_tenant(&tenant, &event).await {
+        // The override is already cleared; failing the command here would suggest it was not.
+        // Surface the missed chain entry loudly instead.
+        tracing::error!(%err, "could not append account.tenant_admin_demoted audit event");
+    }
     println!(
         "tenant {}: cleared is_tenant_admin on {} ({})",
         tenant.slug,

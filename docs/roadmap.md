@@ -1208,6 +1208,72 @@ pages still render their buttons and rely on the server's 403. The BFF caches th
 so a role grant or removal is reflected in the UI after the next sign-in even though the API
 enforces it immediately.
 
+## SAML 2.0 federation
+
+The enterprise SSO path already federated OIDC; SAML was the missing half. The connector is now a
+tenant-level IdP metadata document plus email domains, the same routing key the OIDC connectors use
+(and the store refuses a slug or domain that either protocol already owns). `risaml 0.7.0`
+(pure Rust, `crypto-rustcrypto`) is the parser and XML-DSig verifier; `quick-xml` runs one
+pre-scan before it.
+
+Three properties are enforced structurally rather than by convention:
+
+* **One signed node is the one consumed.** The pre-scan rejects any DTD (so no entity can be
+  declared), any non-predefined entity reference, any `EncryptedAssertion`, and anything other
+  than exactly one `Assertion` that is a direct child of `Response`. `risaml` verifies the
+  signature against the metadata's pinned certificates, requires the **Assertion itself** to be
+  signed (`WantAssertionsSigned=true` is advertised in the SP metadata), validates audience,
+  destination and recipient, and returns only content covered by a verified reference. Every
+  business field is read from that `SsoSession`; nothing looks an assertion up by ID in a second
+  parse.
+* **Replay is a database claim.** `RelayState` is the primary key of `saml_states` and is claimed
+  with `UPDATE … WHERE consumed_at IS NULL AND expires_at > now()`; the row also carries the
+  AuthnRequest ID the response's `InResponseTo` must echo. The assertion ID is claimed in
+  `saml_assertions` with the same conditional UPDATE, so a replayed assertion finds no claimable
+  row. Both tables cascade with the connector.
+* **Time is narrow.** `NotBefore` / `NotOnOrAfter` are widened by exactly two minutes — the
+  library applies the drift additively, so the lower bound gets `-120 s` and the upper `+120 s`.
+  An assertion without an upper bound is refused, because it could never be recorded as spent.
+
+The SP does not sign AuthnRequests, which is a deliberate interoperability trade-off. It is not
+silent: creation refuses metadata with `WantAuthnRequestsSigned=true` and names the flag in the
+400, so an IdP that requires signed requests fails at configuration, not on the first sign-in.
+Metadata with no HTTP-Redirect SSO endpoint and no signing certificate is refused for the same
+reason.
+
+IdP-initiated responses have no entry point. A Monaca session is bound to an interaction and a
+client redirect, neither of which an unsolicited POST can name; accepting one would be a second,
+looser path into the completion code. The ACS refuses a missing `RelayState` and a response with
+no `InResponseTo` before touching any state.
+
+The email attribute (default `email`) must resolve to an address at a connector-owned domain;
+missing is `403 MONACA_SSO_EMAIL_UNVERIFIED` and a foreign domain is `403
+MONACA_SSO_DOMAIN_MISMATCH`. JIT account creation and the org join reuse the OIDC path. The
+optional role attribute is applied additively, and a role whose permissions include
+`monaca:admin` is deliberately skipped: an IdP assertion must not be able to hand out the tenant's
+highest privilege on its own.
+
+`tenant demote-admin` now writes `account.tenant_admin_demoted` on the tenant chain (actor: the
+tenant, since the command runs on the owner connection; subject: the account) and `--dry-run`
+writes nothing. It is the only action that removes the owner override, so its absence from the
+chain was the gap this closes; step 67 pins both the write and the no-write (17 checks).
+
+Verification: seven Rust unit tests cover the pre-scan (single direct assertion, two assertions,
+assertion under `Extensions`, `EncryptedAssertion`, DTD, missing `InResponseTo`) and a full
+signed round-trip against a real risaml IdP, including `InResponseTo`, audience and a recorded
+upper bound. Step 78 covers the HTTP surface: creation gates, cross-protocol domain conflict,
+SP metadata, the unsigned redirect, missing RelayState, IdP-initiated refusal, non-base64 input,
+two assertions, DTD, unsigned assertion, single-use RelayState, the audit entry and delete
+(18 checks locally). Migration `tenant_55` adds the three tables; the OpenAPI document is
+124 paths / 174 operations, `schema.gen.ts` is regenerated, and the event schema directory is
+77 actions.
+
+Known limits: IdP-initiated SSO is not implemented; SAML Single Logout is not implemented (a
+session ends through the ordinary logout path, not an IdP-initiated `LogoutRequest`); encrypted
+assertions are refused because the SP holds no decryption key; role mapping is additive (it never
+removes a role the assertion does not name); and metadata is trusted as the administrator pasted
+it, so metadata signing is not verified.
+
 ## Not in these batches
 
 Consent/interaction storage beyond the three state tables, Redis-backed rate limiting (the

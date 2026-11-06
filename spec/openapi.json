@@ -2102,6 +2102,16 @@
         "summary": "Public SSO connectors"
       }
     },
+    "/t/{tenant}/sso/{connector}/acs": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SAML assertion consumer service"
+      }
+    },
     "/t/{tenant}/sso/{connector}/authorize": {
       "get": {
         "responses": {
@@ -2120,6 +2130,16 @@
           }
         },
         "summary": "SSO provider callback"
+      }
+    },
+    "/t/{tenant}/sso/{connector}/metadata": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SAML SP metadata"
       }
     },
     "/t/{tenant}/verification/sms": {
@@ -3470,6 +3490,34 @@
         "tags": [
           "management"
         ]
+      }
+    },
+    "/v1/saml-connectors": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SAML connectors"
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "SAML connectors"
+      }
+    },
+    "/v1/saml-connectors/{connector}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "See docs/contracts/m0.md for the body."
+          }
+        },
+        "summary": "One SAML connector"
       }
     },
     "/v1/sign-in-copy": {
