@@ -87,6 +87,20 @@ pub mod kinds {
     /// The resource does not exist, or is outside the caller's tenant.
     pub const NOT_FOUND: ProblemKind =
         ProblemKind::new("not_found", "MONACA_NOT_FOUND", "Not found", 404);
+    /// A state transition was refused because the resource is not in a state that allows it.
+    pub const STATE_CONFLICT: ProblemKind = ProblemKind::new(
+        "state_conflict",
+        "MONACA_STATE_CONFLICT",
+        "State conflict",
+        409,
+    );
+    /// A dependency the request needs is temporarily unavailable; the caller may retry.
+    pub const UNAVAILABLE: ProblemKind = ProblemKind::new(
+        "unavailable",
+        "MONACA_UNAVAILABLE",
+        "Temporarily unavailable",
+        503,
+    );
     /// A JWK with a private component was submitted.
     pub const PRIVATE_KEY_SUBMITTED: ProblemKind = ProblemKind::new(
         "private_key_submitted",
@@ -414,6 +428,10 @@ impl From<monaca_store::StoreError> for ApiError {
             monaca_store::StoreError::NotFound { entity, id } => {
                 ApiError::problem(kinds::NOT_FOUND, format!("{entity} `{id}` not found"))
             }
+            monaca_store::StoreError::Conflict { entity, id } => ApiError::problem(
+                kinds::STATE_CONFLICT,
+                format!("{entity} `{id}` is not in a state that allows this transition"),
+            ),
             monaca_store::StoreError::AlreadyExists { entity } => {
                 let kind = match *entity {
                     "email" => kinds::EMAIL_TAKEN,
@@ -424,6 +442,7 @@ impl From<monaca_store::StoreError> for ApiError {
                     "api resource" => kinds::RESOURCE_EXISTS,
                     "organization" => kinds::ORG_EXISTS,
                     "email domain" => kinds::DOMAIN_EXISTS,
+                    "custom domain" => kinds::DOMAIN_EXISTS,
                     "invitation" => kinds::INVITATION_EXISTS,
                     "sso connector" => kinds::SSO_CONNECTOR_EXISTS,
                     "sso email domain" => kinds::SSO_DOMAIN_TAKEN,

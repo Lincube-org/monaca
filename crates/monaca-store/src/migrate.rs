@@ -52,6 +52,11 @@ const CONTROL: &[(i64, &str, &str)] = &[
         "delivery-connector index (§5.3)",
         include_str!("../migrations/control_4.sql"),
     ),
+    (
+        5,
+        "custom tenant hostnames (§5.8)",
+        include_str!("../migrations/control_5.sql"),
+    ),
 ];
 
 /// The tenant set (§5.6). Applied to each tenant database after `CREATE DATABASE`.

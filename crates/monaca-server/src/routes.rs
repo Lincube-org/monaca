@@ -34,6 +34,14 @@ use crate::state::AppState;
         crate::management::get_me,
         crate::management::get_tenant,
         crate::management::update_tenant,
+        crate::domains::list_domains,
+        crate::domains::create_domain,
+        crate::domains::get_domain,
+        crate::domains::verify_domain,
+        crate::domains::activate_domain,
+        crate::domains::revoke_domain,
+        crate::domains::renew_domain,
+        crate::domains::recheck_domain,
         crate::management::list_accounts,
         crate::management::create_account,
         crate::management::get_account,
@@ -73,6 +81,9 @@ use crate::state::AppState;
         crate::management::MeView,
         crate::management::TenantView,
         crate::management::UpdateTenantBody,
+        crate::domains::TenantDomainView,
+        crate::domains::TenantDomainList,
+        crate::domains::CreateTenantDomainBody,
         crate::clients::CreateClientBody,
         crate::clients::UpdateClientBody,
         crate::orgs::CreateOrgBody,
@@ -109,6 +120,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(management_routes())
         .merge(internal_routes(state.config.production))
         .with_state(state.clone())
+        // The custom-host gate runs before CORS and every handler: an archived/suspended tenant
+        // must get the same fixed 404 as an unknown host, not the path handler's tenant error.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::domains::custom_host_gate,
+        ))
         // Only the protocol paths it recognizes are touched; see `cors` for the tenant gate.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -620,6 +637,37 @@ const SURFACE: &[(&str, &[&str], &str)] = &[
     ),
     ("/v1/me", &["get"], "The signed-in account"),
     ("/v1/tenant", &["get", "patch"], "Tenant lifecycle"),
+    (
+        "/v1/tenant-domains",
+        &["get", "post"],
+        "Custom tenant hostnames",
+    ),
+    ("/v1/tenant-domains/{host}", &["get"], "One custom hostname"),
+    (
+        "/v1/tenant-domains/{host}/verify",
+        &["post"],
+        "Verify a custom hostname",
+    ),
+    (
+        "/v1/tenant-domains/{host}/activate",
+        &["post"],
+        "Activate a custom hostname",
+    ),
+    (
+        "/v1/tenant-domains/{host}/revoke",
+        &["post"],
+        "Revoke a custom hostname",
+    ),
+    (
+        "/v1/tenant-domains/{host}/renew",
+        &["post"],
+        "Re-claim a revoked custom hostname",
+    ),
+    (
+        "/v1/tenant-domains/{host}/recheck",
+        &["post"],
+        "Re-check a custom hostname",
+    ),
     ("/v1/roles", &["get", "post"], "Tenant roles"),
     ("/v1/roles/{role}", &["patch", "delete"], "One tenant role"),
     ("/v1/webhooks", &["get", "post"], "Webhooks"),
@@ -940,6 +988,31 @@ pub fn management_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/tenant",
             get(crate::management::get_tenant).patch(crate::management::update_tenant),
+        )
+        .route(
+            "/v1/tenant-domains",
+            get(crate::domains::list_domains).post(crate::domains::create_domain),
+        )
+        .route("/v1/tenant-domains/{host}", get(crate::domains::get_domain))
+        .route(
+            "/v1/tenant-domains/{host}/verify",
+            post(crate::domains::verify_domain),
+        )
+        .route(
+            "/v1/tenant-domains/{host}/activate",
+            post(crate::domains::activate_domain),
+        )
+        .route(
+            "/v1/tenant-domains/{host}/revoke",
+            post(crate::domains::revoke_domain),
+        )
+        .route(
+            "/v1/tenant-domains/{host}/renew",
+            post(crate::domains::renew_domain),
+        )
+        .route(
+            "/v1/tenant-domains/{host}/recheck",
+            post(crate::domains::recheck_domain),
         )
         .route(
             "/v1/usage",

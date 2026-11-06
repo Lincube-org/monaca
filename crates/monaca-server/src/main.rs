@@ -17,6 +17,7 @@ mod config;
 mod copy;
 mod cors;
 mod delivery;
+mod domains;
 mod email_connector;
 mod error;
 mod internal;
@@ -52,6 +53,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use axum::ServiceExt as _;
 use clap::Parser;
 use monaca_store::{Store, StoreConfig};
 
@@ -120,6 +122,13 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
     let addr = resolve_addr(args.addr.as_deref())?;
     let state = build_state(false, true).await?;
     mailer::spawn(Arc::clone(&state));
+    // Custom hostnames are resolved from this map on the request path. A failure here is fatal:
+    // serving without the bindings would silently turn every custom host into a 404.
+    state
+        .refresh_domain_routes()
+        .await
+        .map_err(|err| anyhow::anyhow!("custom-domain routing cache: {err}"))?;
+    domains::spawn_background(Arc::clone(&state));
     let app = routes::router(Arc::clone(&state));
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -148,13 +157,23 @@ async fn serve(args: cli::ServeArgs) -> anyhow::Result<()> {
         });
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("the server stopped with an error")
+    // The host rewrite must run before routing: a custom host's `/oauth2/authorize` is matched as
+    // `/t/{slug}/oauth2/authorize`, and every downstream layer (CORS, metrics) must see that path.
+    let host_state = Arc::clone(&state);
+    let app = tower::ServiceBuilder::new()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::http::Request<axum::body::Body>| {
+                domains::rewrite_host(&host_state, &mut request);
+                request
+            },
+        ))
+        .service(app)
+        .into_make_service_with_connect_info::<SocketAddr>();
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("the server stopped with an error")
 }
 
 /// `monaca-server migrate`.

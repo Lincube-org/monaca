@@ -17,6 +17,7 @@
 //! input: the database name is `mt_<short>`, the schema `org_<oshort>` and the role
 //! `t<tshort>_o<oshort>`, each validated against the contract's character class before use.
 
+mod domains;
 mod migrate;
 mod provision;
 mod repo;
@@ -34,6 +35,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::{Mutex, OnceCell};
 
+pub use domains::{DomainRouteRow, TenantDomainRow};
 pub use migrate::{MigrationReport, apply_control, apply_tenant};
 pub use provision::{OrgRow, TenantRow};
 pub use repo::{
@@ -62,6 +64,15 @@ pub enum StoreError {
         /// The entity kind, e.g. `agent`.
         entity: &'static str,
         /// The typed id the caller asked for.
+        id: String,
+    },
+    /// A conditional state transition matched no row, because another writer changed the state
+    /// first or the row is not in a state that allows this transition.
+    #[error("{entity} `{id}` is not in a state that allows this transition")]
+    Conflict {
+        /// The entity kind, e.g. `custom domain`.
+        entity: &'static str,
+        /// The identity the caller named.
         id: String,
     },
     /// A migration's checksum does not match what was recorded, so the file changed after it ran.

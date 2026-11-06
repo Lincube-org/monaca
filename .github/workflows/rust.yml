@@ -395,6 +395,12 @@ jobs:
       MONACA_SMS_CODE_TTL_SECS: "15"
       MONACA_SMS_RESEND_SECS: "3"
       MONACA_SMS_CAPTURE_PORT: "38300"
+      # Step 79 starts the local DNS TXT mock on this port and points custom-domain verification
+      # at it; a production process always uses the system resolver. The one-second refresh makes
+      # the archived-tenant propagation check quick without sleeping for the default.
+      MONACA_DOMAIN_TXT_ENDPOINT: http://127.0.0.1:38400
+      MONACA_DOMAIN_CACHE_REFRESH_SECS: "1"
+      MONACA_DOMAIN_MOCK_PORT: "38400"
       # Step 69 starts the local SMTP capture on this port.
       MONACA_SMTP_CAPTURE_PORT: "2525"
       # The acceptance script calls the server directly on loopback, so that peer is a trusted

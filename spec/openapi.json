@@ -531,6 +531,19 @@
         ],
         "type": "object"
       },
+      "CreateTenantDomainBody": {
+        "description": "`POST /v1/tenant-domains` body.",
+        "properties": {
+          "domain": {
+            "description": "The hostname, for example `login.acme.com`. A scheme, port or path is refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "type": "object"
+      },
       "CreatedClientView": {
         "description": "`POST /v1/clients`; the secret appears only for a confidential client and only here.",
         "properties": {
@@ -1154,6 +1167,75 @@
           "issued_at",
           "expires_at",
           "last_seen_at"
+        ],
+        "type": "object"
+      },
+      "TenantDomainList": {
+        "description": "The list response.",
+        "properties": {
+          "items": {
+            "description": "The tenant's bindings.",
+            "items": {
+              "$ref": "#/components/schemas/TenantDomainView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "TenantDomainView": {
+        "description": "One custom-domain binding as the management API reports it.",
+        "properties": {
+          "check_failures": {
+            "description": "Consecutive failed checks.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "created_at": {
+            "description": "Creation time, RFC 3339.",
+            "type": "string"
+          },
+          "host": {
+            "description": "The lower-case hostname.",
+            "type": "string"
+          },
+          "last_checked_at": {
+            "description": "When DNS was last checked, RFC 3339.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "`pending` | `verified` | `active` | `degraded` | `revoked`.",
+            "type": "string"
+          },
+          "verification_record": {
+            "description": "The TXT record name to publish.",
+            "type": "string"
+          },
+          "verification_value": {
+            "description": "The exact TXT value to publish (the tenant's nonce, as issued).",
+            "type": "string"
+          },
+          "verified_at": {
+            "description": "When ownership was first proven, RFC 3339.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "host",
+          "state",
+          "verification_record",
+          "verification_value",
+          "check_failures",
+          "created_at"
         ],
         "type": "object"
       },
@@ -3661,6 +3743,278 @@
           }
         },
         "summary": "Archive or reactivate the tenant",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains": {
+      "get": {
+        "operationId": "list_domains",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainList"
+                }
+              }
+            },
+            "description": "Every binding, including revoked ones."
+          }
+        },
+        "summary": "List custom hostnames",
+        "tags": [
+          "management"
+        ]
+      },
+      "post": {
+        "operationId": "create_domain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTenantDomainBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "The pending binding, including the TXT value to publish."
+          },
+          "400": {
+            "description": "The name is not a DNS hostname."
+          },
+          "409": {
+            "description": "Another tenant or this tenant already owns the host."
+          }
+        },
+        "summary": "Claim a custom hostname",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains/{host}": {
+      "get": {
+        "operationId": "get_domain",
+        "parameters": [
+          {
+            "description": "The hostname.",
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "The binding."
+          },
+          "404": {
+            "description": "No such binding in this tenant."
+          }
+        },
+        "summary": "Get a custom hostname",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains/{host}/activate": {
+      "post": {
+        "operationId": "activate_domain",
+        "parameters": [
+          {
+            "description": "The hostname.",
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "The active binding."
+          },
+          "409": {
+            "description": "The binding is not verified."
+          }
+        },
+        "summary": "Activate a verified custom hostname",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains/{host}/recheck": {
+      "post": {
+        "operationId": "recheck_domain",
+        "parameters": [
+          {
+            "description": "The hostname.",
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "The binding after the check; inspect `state` and `check_failures`."
+          },
+          "400": {
+            "description": "The binding is revoked."
+          },
+          "409": {
+            "description": "The binding is not in a checkable state."
+          }
+        },
+        "summary": "Re-check a custom hostname's DNS record",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains/{host}/renew": {
+      "post": {
+        "operationId": "renew_domain",
+        "parameters": [
+          {
+            "description": "The hostname.",
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "The pending binding with the new TXT value."
+          },
+          "409": {
+            "description": "The binding is not revoked."
+          }
+        },
+        "summary": "Re-claim a revoked custom hostname",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains/{host}/revoke": {
+      "post": {
+        "operationId": "revoke_domain",
+        "parameters": [
+          {
+            "description": "The hostname.",
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "The revoked binding, retained for history."
+          },
+          "409": {
+            "description": "The binding is already revoked."
+          }
+        },
+        "summary": "Revoke a custom hostname",
+        "tags": [
+          "management"
+        ]
+      }
+    },
+    "/v1/tenant-domains/{host}/verify": {
+      "post": {
+        "operationId": "verify_domain",
+        "parameters": [
+          {
+            "description": "The hostname.",
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDomainView"
+                }
+              }
+            },
+            "description": "Ownership proven; the binding is verified and serves."
+          },
+          "400": {
+            "description": "The TXT record is missing or carries another tenant's value."
+          },
+          "409": {
+            "description": "The binding is not pending."
+          }
+        },
+        "summary": "Verify a custom hostname",
         "tags": [
           "management"
         ]

@@ -17340,6 +17340,387 @@ async function samlFlow(base: string): Promise<StepResult> {
   };
 }
 
+/**
+ * Custom tenant hostnames — the three pinned properties of contract §5.8.
+ *
+ * The server is started with `MONACA_DOMAIN_TXT_ENDPOINT` pointing at the local mock below; the
+ * mock is the DNS plane, so a record can be published, removed and restored without real DNS.
+ * The step proves: ownership needs the tenant's nonce; unknown/unverified/archived hosts are
+ * indistinguishable; a failed re-check degrades instead of deleting and a later success restores;
+ * the issuer stays the platform issuer; and activation never rewrites registered redirect URIs.
+ */
+async function domainFlow(base: string, adminToken: string, adminSecret: string): Promise<StepResult> {
+  const t = performance.now();
+  const runId = Date.now().toString(36);
+  const checks: [string, boolean][] = [];
+  let detail = "";
+  const mockPort = Number(process.env.MONACA_DOMAIN_MOCK_PORT ?? 38400);
+  const primaryHost = `login-${runId}.example.test`;
+  const pendingHost = `pending-${runId}.example.test`;
+  const archivedHost = `archived-${runId}.example.test`;
+  const unknownHost = `unknown-${runId}.example.test`;
+  const redirectUri = "http://localhost:5173/bff/callback";
+  const records = new Map<string, string[]>();
+  let mock: ReturnType<typeof Bun.serve> | undefined;
+
+  const headers = { authorization: `Bearer ${adminToken}`, "content-type": "application/json" };
+  const bin =
+    process.env.MONACA_SERVER_BIN ??
+    (process.platform === "win32" ? ".monaca/bin/monaca-server.exe" : ".monaca/bin/monaca-server");
+
+  const cli = async (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const proc = Bun.spawn([bin, ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr };
+  };
+
+  /** A protocol request whose Host header names a custom hostname. */
+  const hostCall = (host: string, path: string, init?: RequestInit): Promise<HttpResult> =>
+    call(`${base}${path}`, {
+      ...init,
+      headers: { ...(init?.headers as Record<string, string> | undefined), host },
+    });
+
+  const authorizePath = (clientId: string, challenge: string, state: string): string =>
+    `/oauth2/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "openid profile email",
+      state,
+      nonce: `n-${state}`,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      organization: ORG,
+    })}`;
+
+  const bodyText = (body: unknown): string => (typeof body === "string" ? body : JSON.stringify(body));
+  const domain = (body: unknown) => body as { host?: string; state?: string; verification_record?: string; verification_value?: string; verified_at?: string | null; check_failures?: number };
+  const problem = (body: unknown): string => String((body as { detail?: unknown })?.detail ?? "");
+
+  const createDomain = (host: string, token: string): Promise<HttpResult> =>
+    call(`${base}/v1/tenant-domains`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ domain: host }),
+    });
+
+  const domainAction = (host: string, action: string, token: string): Promise<HttpResult> =>
+    call(`${base}/v1/tenant-domains/${host}/${action}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    });
+
+  /** Publish the expected value for a claimed host. */
+  const publish = (host: string, value: string): void => {
+    records.set(`_monaca-verify.${host}`, [value]);
+  };
+
+  try {
+    mock = Bun.serve({
+      port: mockPort,
+      fetch(request) {
+        const name = new URL(request.url).searchParams.get("name") ?? "";
+        return Response.json({ records: records.get(name) ?? [] });
+      },
+    });
+
+    const before = await call(`${base}/v1/clients`, { headers });
+    const beforeRows = (before.body as { items?: { id?: string; client_id?: string; redirect_uris?: unknown }[] }).items ?? [];
+    const consoleRow = beforeRows.find((row) => row.client_id === "monaca-console");
+    const beforeUris = JSON.stringify(consoleRow?.redirect_uris);
+    const consoleRowId = consoleRow?.id ?? "";
+
+    // --- claim, prove ownership, activate ---------------------------------------------------
+    const claimed = await createDomain(primaryHost, adminToken);
+    const claimedView = domain(claimed.body);
+    checks.push([
+      "a hostname claim returns the TXT record and a tenant-bound nonce",
+      claimed.status === 201 &&
+        claimedView.state === "pending" &&
+        claimedView.verification_record === `_monaca-verify.${primaryHost}` &&
+        typeof claimedView.verification_value === "string" &&
+        claimedView.verification_value.startsWith("monaca-verify-v1=") &&
+        claimedView.verification_value.includes(":"),
+    ]);
+    const claimedValue = claimedView.verification_value ?? "";
+
+    const duplicate = await createDomain(primaryHost, adminToken);
+    checks.push([
+      "a second claim of the same host is 409",
+      duplicate.status === 409,
+    ]);
+
+    publish(primaryHost, "monaca-verify-v1=someone-else:stolen");
+    const wrong = await domainAction(primaryHost, "verify", adminToken);
+    checks.push([
+      "a TXT value that is not this tenant's nonce is refused",
+      wrong.status === 400 && problem(wrong.body).includes("monaca-verify-v1="),
+    ]);
+    // The recheck above must not have verified the binding either.
+    const stillPending = await call(`${base}/v1/tenant-domains/${primaryHost}`, { headers });
+    checks.push([
+      "the wrong record did not verify the binding",
+      stillPending.status === 200 && domain(stillPending.body).state === "pending",
+    ]);
+
+    publish(primaryHost, claimedValue);
+    const verified = await domainAction(primaryHost, "verify", adminToken);
+    checks.push([
+      "the tenant's TXT value verifies the binding and records verified_at",
+      verified.status === 200 &&
+        domain(verified.body).state === "verified" &&
+        typeof domain(verified.body).verified_at === "string",
+    ]);
+
+    const activated = await domainAction(primaryHost, "activate", adminToken);
+    checks.push([
+      "a verified binding activates",
+      activated.status === 200 && domain(activated.body).state === "active",
+    ]);
+
+    // --- serving, issuer, discovery --------------------------------------------------------
+    const verifier = `s-${runId}-${"z".repeat(32)}`;
+    const challenge = base64Url(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+    );
+    const served = await hostCall(primaryHost, authorizePath("monaca-console", challenge, `st-${runId}`), {
+      redirect: "manual",
+    });
+    const interaction = new URL(served.headers.get("location") ?? "", base).searchParams.get("interaction");
+    checks.push([
+      "an authorize on the active custom host is served as the tenant",
+      served.status === 302 && interaction !== null,
+    ]);
+
+    const discovery = await hostCall(primaryHost, "/.well-known/openid-configuration");
+    const platformDiscovery = await call(`${base}/t/${TENANT}/.well-known/openid-configuration`);
+    const platformIssuer = (platformDiscovery.body as { issuer?: string }).issuer;
+    checks.push([
+      "the custom host does not answer discovery",
+      discovery.status === 404,
+    ]);
+    checks.push([
+      "discovery stays on the platform issuer",
+      platformDiscovery.status === 200 && typeof platformIssuer === "string" && platformIssuer.length > 0,
+    ]);
+
+    const customToken = await hostCall(primaryHost, "/oauth2/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${btoa(`monaca-admin:${adminSecret}`)}`,
+      },
+      body: "grant_type=client_credentials&scope=monaca:admin",
+    });
+    const customIss = jwtClaims((customToken.body as { access_token?: unknown }).access_token)?.iss;
+    checks.push([
+      "a token minted through the custom host keeps the platform iss",
+      customToken.status === 200 && customIss === platformIssuer,
+    ]);
+
+    const after = consoleRowId === "" ? undefined : await call(`${base}/v1/clients/${consoleRowId}`, { headers });
+    const afterUris = JSON.stringify((after?.body as { redirect_uris?: unknown } | undefined)?.redirect_uris);
+    checks.push([
+      "activation neither rewrites nor invalidates the registered redirect URIs",
+      before.status === 200 && consoleRowId !== "" && after?.status === 200 && beforeUris === afterUris,
+    ]);
+
+    // --- cookie attributes -------------------------------------------------------------
+    if (interaction === null) throw new Error(`authorize did not yield an interaction: ${served.status}`);
+    const signIn = await hostCall(primaryHost, `/interaction/${encodeURIComponent(interaction)}/sign-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: BOOTSTRAP_ADMIN.email, password: BOOTSTRAP_ADMIN.password }),
+    });
+    const setCookie = signIn.headers.get("set-cookie") ?? "";
+    checks.push([
+      "the session cookie is host-only (no Domain), Lax, HttpOnly and Path=/",
+      signIn.status === 200 &&
+        setCookie.includes("monaca_session=") &&
+        !/domain=/i.test(setCookie) &&
+        setCookie.includes("Path=/") &&
+        setCookie.includes("HttpOnly") &&
+        setCookie.includes("SameSite=Lax") &&
+        (base.startsWith("https://") || !setCookie.includes("Secure")),
+    ]);
+
+    // --- enumeration: unknown vs pending vs archived are identical --------------------------
+    const pending = await createDomain(pendingHost, adminToken);
+    checks.push(["a pending binding is created", pending.status === 201]);
+
+    const probe = authorizePath("monaca-console", challenge, "st-probe");
+    const unknown = await hostCall(unknownHost, probe, { redirect: "manual" });
+    const unverified = await hostCall(pendingHost, probe, { redirect: "manual" });
+
+    // An archived tenant's verified host must answer exactly like the other two.
+    const archivedSlug = `dom-${runId}`;
+    const archivedSecret = `dom-admin-${runId}`;
+    const created = await cli([
+      "tenant",
+      "create",
+      "--slug",
+      archivedSlug,
+      "--admin-email",
+      `admin@${archivedSlug}.localhost`,
+      "--admin-password",
+      `Dom-${runId}-9xQ`,
+      "--admin-client-secret",
+      archivedSecret,
+      "--login-client-id",
+      "e2e-login",
+      "--login-redirect-uri",
+      redirectUri,
+    ]);
+    checks.push(["a tenant for the archived case is provisioned", created.code === 0]);
+    if (created.code !== 0) throw new Error(created.stderr || created.stdout);
+
+    const archivedTokenResponse = await call(`${base}/t/${archivedSlug}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${btoa(`monaca-admin:${archivedSecret}`)}`,
+      },
+      body: "grant_type=client_credentials&scope=monaca:admin",
+    });
+    const archivedToken = (archivedTokenResponse.body as { access_token?: string }).access_token ?? "";
+    if (archivedTokenResponse.status !== 200 || archivedToken === "") {
+      throw new Error("the archived-case tenant has no management token");
+    }
+    const archivedClaim = await createDomain(archivedHost, archivedToken);
+    if (archivedClaim.status !== 201) throw new Error(`archived-case claim: ${archivedClaim.status}`);
+    publish(archivedHost, domain(archivedClaim.body).verification_value ?? "");
+    const archivedVerified = await domainAction(archivedHost, "verify", archivedToken);
+    const archivedActive = await domainAction(archivedHost, "activate", archivedToken);
+    const archivedProbe = authorizePath("e2e-login", challenge, `st-arch-${runId}`);
+    checks.push([
+      "the archived-case host serves before the tenant is archived",
+      archivedVerified.status === 200 &&
+        archivedActive.status === 200 &&
+        (await hostCall(archivedHost, archivedProbe, { redirect: "manual" })).status === 302,
+    ]);
+    const archived = await cli(["tenant", "archive", "--slug", archivedSlug]);
+    checks.push(["the case tenant is archived through the CLI", archived.code === 0]);
+
+    // Propagation is bounded by MONACA_DOMAIN_CACHE_REFRESH_SECS; poll, then compare exactly.
+    let archivedAnswer: HttpResult | undefined;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      archivedAnswer = await hostCall(archivedHost, archivedProbe, { redirect: "manual" });
+      if (archivedAnswer.status !== 302) break;
+      await Bun.sleep(500);
+    }
+    checks.push([
+      "unknown, unverified and archived-tenant hosts answer the same status and body",
+      unknown.status === unverified.status &&
+        unverified.status === archivedAnswer?.status &&
+        bodyText(unknown.body) === bodyText(unverified.body) &&
+        bodyText(unverified.body) === bodyText(archivedAnswer?.body ?? ""),
+    ]);
+
+    // --- degrade on a failed re-check, recover on a later success ---------------------------
+    records.delete(`_monaca-verify.${primaryHost}`);
+    const degraded = await domainAction(primaryHost, "recheck", adminToken);
+    const degradedView = domain(degraded.body);
+    checks.push([
+      "removing the TXT record degrades the binding and records the check",
+      degraded.status === 200 &&
+        degradedView.state === "degraded" &&
+        (degradedView.check_failures ?? 0) >= 1 &&
+        typeof (degradedView as { last_checked_at?: unknown }).last_checked_at === "string",
+    ]);
+    const degradedServe = await hostCall(primaryHost, probe, { redirect: "manual" });
+    checks.push([
+      "a degraded binding stops serving with the same response",
+      degradedServe.status === unknown.status && bodyText(degradedServe.body) === bodyText(unknown.body),
+    ]);
+    const retained = await call(`${base}/v1/tenant-domains/${primaryHost}`, { headers });
+    checks.push(["the degraded row is retained, not deleted", retained.status === 200]);
+
+    publish(primaryHost, claimedValue);
+    const recovered = await domainAction(primaryHost, "recheck", adminToken);
+    checks.push([
+      "restoring the record recovers the binding to its previous state",
+      recovered.status === 200 && domain(recovered.body).state === "active",
+    ]);
+    checks.push([
+      "the recovered binding serves again",
+      (await hostCall(primaryHost, probe, { redirect: "manual" })).status === 302,
+    ]);
+
+    // --- revoke keeps the row; renew rotates the nonce -------------------------------------
+    const revoked = await domainAction(primaryHost, "revoke", adminToken);
+    checks.push([
+      "revoking stops serving but keeps the row",
+      revoked.status === 200 &&
+        domain(revoked.body).state === "revoked" &&
+        (await hostCall(primaryHost, probe, { redirect: "manual" })).status === unknown.status,
+    ]);
+    const renewed = await domainAction(primaryHost, "renew", adminToken);
+    const renewedValue = domain(renewed.body).verification_value ?? "";
+    checks.push([
+      "renewing a revoked binding issues a different one-time nonce",
+      renewed.status === 200 &&
+        domain(renewed.body).state === "pending" &&
+        renewedValue.startsWith("monaca-verify-v1=") &&
+        renewedValue !== claimedValue,
+    ]);
+    const revokedAgain = await domainAction(primaryHost, "revoke", adminToken);
+    const revokedPending = await domainAction(pendingHost, "revoke", adminToken);
+    checks.push([
+      "the pending binding can be revoked too",
+      revokedAgain.status === 200 && revokedPending.status === 200,
+    ]);
+
+    const listed = await call(`${base}/v1/tenant-domains`, { headers });
+    const items = (listed.body as { items?: { host?: string; state?: string }[] }).items ?? [];
+    checks.push([
+      "the list retains every binding including revoked ones",
+      listed.status === 200 &&
+        items.some((item) => item.host === primaryHost && item.state === "revoked") &&
+        items.some((item) => item.host === pendingHost && item.state === "revoked"),
+    ]);
+
+    const audit = await call(
+      `${base}/v1/audit?${new URLSearchParams({ action_prefix: "tenant_domain.", limit: "50" })}`,
+      { headers },
+    );
+    const auditItems = (audit.body as { items?: { action?: string }[] }).items ?? [];
+    const actions = new Set(auditItems.map((item) => item.action));
+    checks.push([
+      "claim, verify, activate, degrade, recover, revoke and renew are all on the tenant chain",
+      audit.status === 200 &&
+        ["created", "verified", "activated", "degraded", "recovered", "revoked", "renewed"].every(
+          (action) => actions.has(`tenant_domain.${action}`),
+        ),
+    ]);
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error);
+    checks.push([`the flow completed without an exception (${detail})`, false]);
+  } finally {
+    mock?.stop();
+  }
+
+  const ok = checks.length > 0 && checks.every(([, passed]) => passed);
+  return {
+    step: "79",
+    title: "custom tenant hostnames",
+    status: ok ? "pass" : "fail",
+    ms: Math.round(performance.now() - t),
+    detail: ok
+      ? `${checks.length} checks: claim/nonce → TXT mismatch → verify → activate → serving/issuer → cookie → enumeration → degrade/recover → revoke/renew → audit`
+      : `${detail || checks.filter(([, passed]) => !passed).map(([name]) => name).join(", ")}`,
+  };
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -17575,6 +17956,7 @@ async function main(): Promise<number> {
   push(await roleTierFlow(base, adminToken, parsed.consoleSecret));
   push(await tenantLifecycleAndMeFlow(base, adminToken, parsed.consoleSecret));
   push(await samlFlow(base));
+  push(await domainFlow(base, adminToken, parsed.adminSecret));
 
   const failures = steps.filter((step) => step.status === "fail");
   report.ok = failures.length === 0;

@@ -104,6 +104,13 @@ pub const M0_ACTIONS: &[&str] = &[
     "webhook.deleted",
     "webhook.secret_rotated",
     "usage.quota_changed",
+    "tenant_domain.created",
+    "tenant_domain.verified",
+    "tenant_domain.activated",
+    "tenant_domain.degraded",
+    "tenant_domain.recovered",
+    "tenant_domain.revoked",
+    "tenant_domain.renewed",
 ];
 
 /// The `subject.type` values §8.1 allows.

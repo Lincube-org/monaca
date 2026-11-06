@@ -1,7 +1,7 @@
 //! Shared application state: the store, the configuration, the key cache and the interaction map.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use monaca_audit::AuditEvent;
 use monaca_crypto::{Argon2Params, EnvKeyProvider, KeyProvider, SigningKeyPair, seal};
@@ -66,6 +66,12 @@ pub struct AppState {
     pub metrics: Metrics,
     /// Google's signing keys. Provider-global, so one cache serves every tenant connector.
     google_jwks: Mutex<Option<GoogleJwksCache>>,
+    /// Hostname → tenant slug for custom domains that currently serve. Rebuilt from the control
+    /// plane on an interval and after a management write; a request-path read takes only this
+    /// lock, so host routing never adds a database round trip.
+    domain_routes: RwLock<HashMap<String, String>>,
+    /// The lazily built system DNS resolver used by custom-domain verification.
+    dns: tokio::sync::OnceCell<hickory_resolver::TokioResolver>,
 }
 
 impl AppState {
@@ -99,12 +105,59 @@ impl AppState {
             ip_limit: crate::ip_limit::IpRateLimiter::default(),
             metrics: Metrics::default(),
             google_jwks: Mutex::new(None),
+            domain_routes: RwLock::new(HashMap::new()),
+            dns: tokio::sync::OnceCell::new(),
         }))
     }
 
     /// The current instant.
     pub fn now(&self) -> time::OffsetDateTime {
         self.clock.now()
+    }
+
+    /// Rebuild the hostname → tenant map from the control plane.
+    ///
+    /// Only a binding that serves and a tenant that serves can be routed. The tenant half calls
+    /// [`TenantRow::serving`], the same gate `tenant()` and the path-based handlers use; this
+    /// function never re-implements the lifecycle decision. A database failure leaves the
+    /// previous map in place: a stale binding is bounded by `MONACA_DOMAIN_CACHE_REFRESH_SECS` and
+    /// is preferable to dropping every custom hostname on a transient read failure.
+    pub async fn refresh_domain_routes(&self) -> Result<(), ApiError> {
+        let routes = self.store.serving_domain_routes().await?;
+        let mut map = HashMap::with_capacity(routes.len());
+        for route in routes {
+            let tenant = route.tenant();
+            if tenant.serving().is_ok() {
+                map.insert(route.host, route.tenant_slug);
+            }
+        }
+        let mut current = self
+            .domain_routes
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *current = map;
+        Ok(())
+    }
+
+    /// The tenant serving a custom hostname, if the cached map has one.
+    pub fn domain_route(&self, host: &str) -> Option<String> {
+        self.domain_routes
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(host)
+            .cloned()
+    }
+
+    /// The system resolver, built once. Verification failures keep the cell empty so a transient
+    /// configuration failure is retried on the next check.
+    pub async fn dns(&self) -> Result<&hickory_resolver::TokioResolver, String> {
+        self.dns
+            .get_or_try_init(|| async {
+                hickory_resolver::TokioResolver::builder_tokio()
+                    .map(|builder| builder.build())
+                    .map_err(|err| err.to_string())
+            })
+            .await
     }
 
     /// A tenant by slug that is allowed to serve requests.

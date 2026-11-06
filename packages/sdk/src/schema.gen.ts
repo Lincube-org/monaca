@@ -4387,6 +4387,126 @@ export interface paths {
         patch: operations["update_tenant"];
         trace?: never;
     };
+    "/v1/tenant-domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List custom hostnames */
+        get: operations["list_domains"];
+        put?: never;
+        /** Claim a custom hostname */
+        post: operations["create_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenant-domains/{host}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a custom hostname */
+        get: operations["get_domain"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenant-domains/{host}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activate a verified custom hostname */
+        post: operations["activate_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenant-domains/{host}/recheck": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-check a custom hostname's DNS record */
+        post: operations["recheck_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenant-domains/{host}/renew": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-claim a revoked custom hostname */
+        post: operations["renew_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenant-domains/{host}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke a custom hostname */
+        post: operations["revoke_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenant-domains/{host}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Verify a custom hostname */
+        post: operations["verify_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/usage": {
         parameters: {
             query?: never;
@@ -4815,6 +4935,11 @@ export interface components {
             /** @description Permission scopes the role grants. */
             permissions?: string[];
         };
+        /** @description `POST /v1/tenant-domains` body. */
+        CreateTenantDomainBody: {
+            /** @description The hostname, for example `login.acme.com`. A scheme, port or path is refused. */
+            domain: string;
+        };
         /** @description `POST /v1/clients`; the secret appears only for a confidential client and only here. */
         CreatedClientView: {
             /** @description The protocol client id. */
@@ -5075,6 +5200,33 @@ export interface components {
             last_seen_at: string;
             /** @description The browser user agent, or `null`. */
             user_agent?: string | null;
+        };
+        /** @description The list response. */
+        TenantDomainList: {
+            /** @description The tenant's bindings. */
+            items: components["schemas"]["TenantDomainView"][];
+        };
+        /** @description One custom-domain binding as the management API reports it. */
+        TenantDomainView: {
+            /**
+             * Format: int32
+             * @description Consecutive failed checks.
+             */
+            check_failures: number;
+            /** @description Creation time, RFC 3339. */
+            created_at: string;
+            /** @description The lower-case hostname. */
+            host: string;
+            /** @description When DNS was last checked, RFC 3339. */
+            last_checked_at?: string | null;
+            /** @description `pending` | `verified` | `active` | `degraded` | `revoked`. */
+            state: string;
+            /** @description The TXT record name to publish. */
+            verification_record: string;
+            /** @description The exact TXT value to publish (the tenant's nonce, as issued). */
+            verification_value: string;
+            /** @description When ownership was first proven, RFC 3339. */
+            verified_at?: string | null;
         };
         /** @description `GET /v1/tenant` — the tenant's own lifecycle record. */
         TenantView: {
@@ -6039,6 +6191,258 @@ export interface operations {
             };
             /** @description The caller does not hold full management. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_domains: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every binding, including revoked ones. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainList"];
+                };
+            };
+        };
+    };
+    create_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTenantDomainBody"];
+            };
+        };
+        responses: {
+            /** @description The pending binding, including the TXT value to publish. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description The name is not a DNS hostname. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Another tenant or this tenant already owns the host. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The hostname. */
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The binding. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description No such binding in this tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    activate_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The hostname. */
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active binding. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description The binding is not verified. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    recheck_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The hostname. */
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The binding after the check; inspect `state` and `check_failures`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description The binding is revoked. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The binding is not in a checkable state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    renew_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The hostname. */
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending binding with the new TXT value. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description The binding is not revoked. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The hostname. */
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The revoked binding, retained for history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description The binding is already revoked. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    verify_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The hostname. */
+                host: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ownership proven; the binding is verified and serves. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDomainView"];
+                };
+            };
+            /** @description The TXT record is missing or carries another tenant's value. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The binding is not pending. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

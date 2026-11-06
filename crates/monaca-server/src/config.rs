@@ -117,6 +117,17 @@ pub struct Config {
     /// Tenant visits the mailer runs at once (`MONACA_MAILER_TENANT_CONCURRENCY`, 8). Bounded to
     /// 1–32; the poller's connection reservation is this value × `MONACA_MAILER_POOL_SIZE`.
     pub mailer_tenant_concurrency: usize,
+    /// A dev/CI-only DNS TXT resolver endpoint (`MONACA_DOMAIN_TXT_ENDPOINT`). When set, custom
+    /// domain verification asks `{endpoint}?name=<record>` for `{"records":[…]}` instead of the
+    /// system resolver. Ignored in production, where only real DNS can prove ownership.
+    pub domain_txt_endpoint: Option<String>,
+    /// How often the host-routing cache is rebuilt from the control plane
+    /// (`MONACA_DOMAIN_CACHE_REFRESH_SECS`, 5). This is the cross-instance propagation bound for a
+    /// bind/revoke/degrade made in another process.
+    pub domain_cache_refresh: Duration,
+    /// How often the daily DNS re-check runs (`MONACA_DOMAIN_RECHECK_SECS`, 86400). One failed
+    /// check degrades a serving binding; the next successful check restores it.
+    pub domain_recheck_interval: Duration,
 }
 
 /// One entry of the `X-Forwarded-For` trust boundary.
@@ -317,6 +328,21 @@ impl Config {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(8)
                 .clamp(1, 32),
+            domain_txt_endpoint: matches!(environment.as_str(), "dev" | "ci")
+                .then(|| env("MONACA_DOMAIN_TXT_ENDPOINT"))
+                .flatten(),
+            domain_cache_refresh: Duration::from_secs(
+                env("MONACA_DOMAIN_CACHE_REFRESH_SECS")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(5)
+                    .clamp(1, 300),
+            ),
+            domain_recheck_interval: Duration::from_secs(
+                env("MONACA_DOMAIN_RECHECK_SECS")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(86_400)
+                    .clamp(60, 604_800),
+            ),
         }
     }
 
@@ -534,6 +560,9 @@ mod tests {
             ],
             ip_rate_limit_per_minute: 600,
             mailer_tenant_concurrency: 8,
+            domain_txt_endpoint: None,
+            domain_cache_refresh: Duration::from_secs(5),
+            domain_recheck_interval: Duration::from_secs(86_400),
         }
     }
 

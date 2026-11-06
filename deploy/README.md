@@ -115,6 +115,31 @@ Operational boundaries: IdP-initiated SSO and SAML Single Logout are not impleme
 unsolicited POST is refused at the ACS); encrypted assertions are refused; role mapping from the
 configured attribute is additive and never grants a role that names `monaca:admin`.
 
+**Custom tenant hostnames.** A tenant claims a name with `POST /v1/tenant-domains`; the response
+carries the TXT record to publish at `_monaca-verify.<host>` (value
+`monaca-verify-v1=<tenant uuid>:<nonce>`). `POST …/verify` proves ownership and starts serving,
+`POST …/activate` records the explicit activation, `POST …/recheck` re-runs the DNS check,
+`POST …/revoke` stops serving while keeping the row, and `POST …/renew` starts a fresh claim with
+a new nonce. A failed daily check moves `verified`/`active` to `degraded` (not serving) and a later
+success returns it to the state it interrupted; nothing is deleted.
+
+The edge/reverse proxy in front of `monaca-server` **must forward the original `Host` header**;
+the server resolves the tenant from it and ignores `X-Forwarded-Host`. Only the browser/protocol
+paths (`/oauth2/*`, `/interaction/*`, `/account*`, `/connectors*`, `/social/*`, `/sso/*`,
+`/verification/sms*`, `/sign-in-experience`, `/sign-in-copy`) are served on a custom host;
+`/.well-known/*`, `/v1/*`, `/internal/*`, `/t/*`, `/healthz` and `/metrics` all answer the same
+`404`. The issuer does **not** follow the hostname:
+tokens minted through a custom host still carry `{MONACA_PUBLIC_BASE_URL}/t/<slug>`, discovery
+and JWKS stay on that URL, and activating a binding never rewrites a client's registered redirect
+URIs. Sessions are host-only cookies, so a session started at `login.example.com` is not shared
+with `app.example.com` or the platform host; this is deliberate and has no switch.
+
+Unknown hostnames, unverified bindings and hostnames of suspended/archived tenants all receive
+the same `404 MONACA_NOT_FOUND` problem; the router-level gate re-reads the tenant so a stale
+routing cache cannot surface a tenant-specific error. Do not add a diagnostic header or page to
+one of those branches. Cross-instance propagation of a bind/revoke/degrade is bounded by
+`MONACA_DOMAIN_CACHE_REFRESH_SECS` (default 5).
+
 **KEK rotation is an offline, three-step procedure** (§10.7). `MONACA_KEK` derives every tenant
 DEK, and sealed signing keys, TOTP seeds, passkey blobs and connector secrets are encrypted under
 those DEKs. There is no stored key id: decryption tries the current key first and the retiring key
