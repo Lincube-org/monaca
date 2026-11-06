@@ -108,12 +108,22 @@ provider's metadata XML. Before accepting it, the server refuses metadata that s
 downgrade the IdP's requirement), metadata with no HTTP-Redirect SSO endpoint, and metadata with
 no signing certificate. Give the IdP the SP metadata at
 `https://<host>/t/<tenant>/sso/<connector>/metadata`; its ACS is
-`https://<host>/t/<tenant>/sso/<connector>/acs`. `WantAssertionsSigned=true` is advertised and
-enforced, so the IdP must sign the Assertion itself, not only the Response.
+`https://<host>/t/<tenant>/sso/<connector>/acs` and its SLO endpoint, advertised for both
+HTTP-Redirect and HTTP-POST, is `https://<host>/t/<tenant>/sso/<connector>/slo`.
+`WantAssertionsSigned=true` is advertised and enforced, so the IdP must sign the Assertion itself,
+not only the Response.
 
-Operational boundaries: IdP-initiated SSO and SAML Single Logout are not implemented (an
-unsolicited POST is refused at the ACS); encrypted assertions are refused; role mapping from the
-configured attribute is additive and never grants a role that names `monaca:admin`.
+Operational boundaries: IdP-initiated SSO is not implemented (an unsolicited POST is refused at
+the ACS). SAML Single Logout is implemented for both front-channel bindings with signed inbound
+requests, a two-minute `IssueInstant` window and one-time request IDs; `GET …/logout` ends the
+local session and then sends an unsigned LogoutRequest. **This SP has no signing key**, so its
+outbound LogoutRequests and LogoutResponses are unsigned and the metadata carries no certificate;
+an IdP that requires a signed message will reject it, but the local session is already ended, so
+the IdP's decision cannot keep it alive. Adding a key (sealed storage, rotation and the
+certificate in metadata) is a separate step. The SOAP back-channel is not implemented and is not
+advertised, so the IdP must use a front-channel binding. Encrypted assertions are refused; role
+mapping from the configured attribute is additive and never grants a role that names
+`monaca:admin`.
 
 **Custom tenant hostnames.** A tenant claims a name with `POST /v1/tenant-domains`; the response
 carries the TXT record to publish at `_monaca-verify.<host>` (value

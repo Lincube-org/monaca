@@ -2003,6 +2003,26 @@ yBmB6zxGbMUOJqnBXVciUg==
     }
 
     #[test]
+    fn sp_metadata_advertises_both_front_channel_slo_bindings_and_no_soap() {
+        let sp = test_sp();
+        let xml = sp.metadata_xml();
+        assert_eq!(
+            xml.matches("SingleLogoutService").count(),
+            2,
+            "both front-channel bindings must be advertised"
+        );
+        assert!(xml.contains(&format!("Location=\"{SP_SLO}\"")));
+        assert!(
+            !xml.contains("SOAP"),
+            "this SP implements no SOAP back-channel and must not advertise one"
+        );
+        assert!(
+            !xml.contains("KeyDescriptor"),
+            "this SP has no signing key, so the metadata must not publish a certificate"
+        );
+    }
+
+    #[test]
     fn a_plain_logout_request_passes_the_scan() {
         let xml = r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_l1" Version="2.0" IssueInstant="2026-11-06T00:00:00Z"><saml:Issuer xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">https://idp.example.com/metadata</saml:Issuer><saml:NameID xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">user@corp.example</saml:NameID><samlp:SessionIndex>_s1</samlp:SessionIndex></samlp:LogoutRequest>"#;
         assert!(scan_logout_request(xml).is_ok());
