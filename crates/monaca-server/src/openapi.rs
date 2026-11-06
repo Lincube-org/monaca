@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn the_action_list_matches_the_contract() {
         // §8.1's fixed M0 set, spelled out — adding one is a contract change.
-        assert_eq!(M0_ACTIONS.len(), 77);
+        assert_eq!(M0_ACTIONS.len(), 84);
         for action in [
             "account.created",
             "account.updated",
@@ -321,6 +321,13 @@ mod tests {
             "webhook.updated",
             "webhook.deleted",
             "webhook.secret_rotated",
+            "tenant_domain.created",
+            "tenant_domain.verified",
+            "tenant_domain.activated",
+            "tenant_domain.degraded",
+            "tenant_domain.recovered",
+            "tenant_domain.revoked",
+            "tenant_domain.renewed",
         ] {
             assert!(
                 M0_ACTIONS.contains(&action),
