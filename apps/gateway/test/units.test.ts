@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolveGatewayConfig } from "../src/config.ts";
+import { upstreamHeaders } from "../src/proxy.ts";
 import { pkceChallenge, readCookie, clearSessionCookie, serializeSessionCookie, SessionStore } from "../src/sessions.ts";
 import { encodeTypeIdSuffix, newTypedId, uuidv7 } from "../src/typed-id.ts";
 import { buildToolAuditEvent } from "../src/audit.ts";
@@ -39,6 +40,41 @@ describe("resolveGatewayConfig (contract §2.2)", () => {
     expect(() => resolveGatewayConfig({ MONACA_ENV: "staging" })).toThrow(/MONACA_ENV/);
     expect(resolveGatewayConfig({ MONACA_DEV_PROXY: "1" }).devProxy).toBe(true);
     expect(() => resolveGatewayConfig({ MONACA_SESSION_TTL_SECS: "soon" })).toThrow(/integer/);
+  });
+});
+
+describe("upstreamHeaders (gateway proxy)", () => {
+  const request = (headers: Record<string, string>) =>
+    new Request("http://localhost:8080/t/demo/account", { headers });
+
+  test("drops the browser cookie and hop-by-hop headers by default", () => {
+    const headers = upstreamHeaders(
+      request({
+        cookie: "monaca_session=abc",
+        authorization: "Bearer token",
+        connection: "keep-alive",
+        host: "localhost:8080",
+      }),
+    );
+    expect(headers.get("cookie")).toBeNull();
+    expect(headers.get("authorization")).toBe("Bearer token");
+    expect(headers.get("connection")).toBeNull();
+    expect(headers.get("host")).toBeNull();
+  });
+
+  test("forwards the cookie when the dev proxy asks", () => {
+    const headers = upstreamHeaders(request({ cookie: "monaca_session=abc" }), {
+      forwardCookie: true,
+    });
+    expect(headers.get("cookie")).toBe("monaca_session=abc");
+  });
+
+  test("extra headers are set after the cookie rule", () => {
+    const headers = upstreamHeaders(request({ cookie: "browser=1" }), {
+      extraHeaders: { authorization: "Bearer gateway" },
+    });
+    expect(headers.get("cookie")).toBeNull();
+    expect(headers.get("authorization")).toBe("Bearer gateway");
   });
 });
 

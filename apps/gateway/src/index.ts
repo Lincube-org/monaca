@@ -132,11 +132,13 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
             const peer = getConnInfo(c).remote.address;
             const forwarded = c.req.header("x-forwarded-for");
             const chain = [forwarded, peer].filter((value) => value !== undefined && value !== "").join(", ");
-            return forward(
-              c.req.raw,
-              upstream,
-              chain === "" ? undefined : { "x-forwarded-for": chain },
-            );
+            return forward(c.req.raw, upstream, {
+              // This is a transparent proxy for the browser's own session: `/t/*` sets and reads
+              // `monaca_session`, so dropping the cookie would break every signed-in flow that
+              // travels through the public origin.
+              forwardCookie: true,
+              extraHeaders: chain === "" ? undefined : { "x-forwarded-for": chain },
+            });
           });
         }
         logger.info("dev proxy enabled", { prefixes: ["/t/*", "/v1/*", "/.well-known/*"], target: config.serverUrl });

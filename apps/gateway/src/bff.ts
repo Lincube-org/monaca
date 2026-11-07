@@ -359,6 +359,8 @@ export function registerBffRoutes(app: Hono, deps: BffDeps): void {
     const search = new URL(c.req.url).search;
     const upstream = new URL(`/v1${rest}${search}`, config.serverUrl);
     logger.debug("bff: api rewrite", { path: c.req.path, upstream: upstream.pathname });
-    return forward(c.req.raw, upstream, { authorization: `Bearer ${session.tokens.accessToken}` });
+    return forward(c.req.raw, upstream, {
+      extraHeaders: { authorization: `Bearer ${session.tokens.accessToken}` },
+    });
   });
 }
